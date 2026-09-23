@@ -25,9 +25,9 @@ numpy>=1.26.0
 python-multipart>=0.0.9
 jq>=1.6.0
 typer>=0.9.0
-# emergentintegrations is only published on Emergent's private index, not
-# public PyPI, so it's omitted here. chat.py imports it lazily and the AI
-# concierge endpoint degrades to a clean 503 when it (or EMERGENT_LLM_KEY)
-# is unavailable; every other feature works without it.
 httpx>=0.27.0
 reportlab==5.0.1
+# Powers the AI concierge (chat.py). Imported lazily - the endpoint
+# degrades to a clean 503 when OPENAI_API_KEY is unset, every other
+# feature works without it.
+openai>=1.50.0
