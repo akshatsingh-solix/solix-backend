@@ -18,3 +18,5 @@ services:
         sync: false
       - key: CORS_ORIGINS
         value: https://akshatsingh-solix.github.io
+      - key: OPENAI_API_KEY
+        sync: false

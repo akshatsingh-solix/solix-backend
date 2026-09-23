@@ -18,16 +18,19 @@ logger = logging.getLogger("solix.chat")
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 try:
-    # Only available inside Emergent's build image. On any other host this
-    # import fails, so the concierge degrades to a 503 instead of the whole
-    # API failing to start.
-    from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, StreamDone
+    from openai import AsyncOpenAI
 except ImportError:
-    LlmChat = UserMessage = TextDelta = StreamDone = None
+    AsyncOpenAI = None
 
-LLM_KEY = os.environ.get("EMERGENT_LLM_KEY") if LlmChat is not None else None
-CHAT_MODEL = ("openai", "gpt-5.4-mini")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+# None when the openai package isn't installed or no key is set - the
+# concierge endpoint degrades to a clean 503 rather than the whole API
+# failing to start.
+_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if (AsyncOpenAI is not None and OPENAI_API_KEY) else None
+
 HISTORY_LIMIT = 24
+MAX_TOOL_ROUNDS = 3
 EMAIL_RX = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 DEMO_TOOL = {
@@ -112,54 +115,73 @@ async def clear_chat_history(session_id: str):
 
 @router.post("/stream")
 async def chat_stream(req: ChatRequest):
-    if not LLM_KEY:
+    if _client is None:
         raise HTTPException(status_code=503, detail="AI concierge is not configured")
 
     history = await db.chat_messages.find({"session_id": req.session_id}, {"_id": 0, "role": 1, "content": 1}).sort("created_at", 1).to_list(HISTORY_LIMIT)
-    initial = [{"role": "system", "content": CONCIERGE_SYSTEM_PROMPT}] + [{"role": m["role"], "content": m["content"]} for m in history]
-
-    chat = (
-        LlmChat(api_key=LLM_KEY, session_id=req.session_id, system_message=CONCIERGE_SYSTEM_PROMPT, initial_messages=initial)
-        .with_model(*CHAT_MODEL)
-        .with_tools([DEMO_TOOL], tool_choice="auto")
-    )
-
-    async def run_turn(user_message):
-        text = ""
-        pending = None
-        async for event in chat.stream_message(user_message):
-            if isinstance(event, TextDelta):
-                text += event.content
-                yield sse({"delta": event.content}), None
-            elif isinstance(event, StreamDone):
-                pending = event.tool_calls
-        yield None, (text, pending)
+    messages = [{"role": "system", "content": CONCIERGE_SYSTEM_PROMPT}] + [{"role": m["role"], "content": m["content"]} for m in history] + [{"role": "user", "content": req.message}]
 
     async def generate():
         await save_message(req.session_id, "user", req.message)
         full = ""
         try:
-            user_message = UserMessage(text=req.message)
-            for _ in range(3):
-                result = None
-                async for chunk, done in run_turn(user_message):
-                    if chunk:
-                        yield chunk
-                    if done:
-                        result = done
-                text, tool_calls = result
-                full += text
-                if not tool_calls:
+            for _ in range(MAX_TOOL_ROUNDS):
+                stream = await _client.chat.completions.create(
+                    model=OPENAI_MODEL,
+                    messages=messages,
+                    tools=[DEMO_TOOL],
+                    tool_choice="auto",
+                    stream=True,
+                )
+
+                text_chunk = ""
+                tool_calls: dict[int, dict] = {}
+                finish_reason = None
+
+                async for event in stream:
+                    choice = event.choices[0]
+                    delta = choice.delta
+                    if delta.content:
+                        text_chunk += delta.content
+                        yield sse({"delta": delta.content})
+                    if delta.tool_calls:
+                        for tc_delta in delta.tool_calls:
+                            slot = tool_calls.setdefault(tc_delta.index, {"id": None, "name": None, "arguments": ""})
+                            if tc_delta.id:
+                                slot["id"] = tc_delta.id
+                            if tc_delta.function and tc_delta.function.name:
+                                slot["name"] = tc_delta.function.name
+                            if tc_delta.function and tc_delta.function.arguments:
+                                slot["arguments"] += tc_delta.function.arguments
+                    if choice.finish_reason:
+                        finish_reason = choice.finish_reason
+
+                full += text_chunk
+
+                if finish_reason != "tool_calls" or not tool_calls:
                     break
-                for tc in tool_calls:
-                    if tc.name == "create_demo_request":
-                        outcome = await create_demo_request(req.session_id, tc.arguments)
+
+                messages.append({
+                    "role": "assistant",
+                    "content": text_chunk or None,
+                    "tool_calls": [
+                        {"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": tc["arguments"]}}
+                        for tc in tool_calls.values()
+                    ],
+                })
+
+                for tc in tool_calls.values():
+                    try:
+                        args = json.loads(tc["arguments"] or "{}")
+                    except json.JSONDecodeError:
+                        args = {}
+                    if tc["name"] == "create_demo_request":
+                        outcome = await create_demo_request(req.session_id, args)
                         if outcome.get("ok"):
-                            yield sse({"event": "demo_booked", "submission_id": outcome["submission_id"], "name": tc.arguments.get("name"), "email": tc.arguments.get("email"), "company": tc.arguments.get("company")})
+                            yield sse({"event": "demo_booked", "submission_id": outcome["submission_id"], "name": args.get("name"), "email": args.get("email"), "company": args.get("company")})
                     else:
-                        outcome = {"ok": False, "error": f"Unknown tool {tc.name}"}
-                    chat.add_tool_result(tc.id, json.dumps(outcome))
-                user_message = None
+                        outcome = {"ok": False, "error": f"Unknown tool {tc['name']}"}
+                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": json.dumps(outcome)})
         except Exception:
             logger.exception("chat stream failed")
             yield sse({"error": "The concierge is temporarily unavailable. Please try again."})
