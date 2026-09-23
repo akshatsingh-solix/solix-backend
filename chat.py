@@ -53,9 +53,14 @@ DEMO_TOOL = {
 }
 
 
+LANGUAGE_NAMES = {"es": "Spanish", "fr": "French", "de": "German"}
+
+
 class ChatRequest(BaseModel):
     session_id: str = Field(min_length=6, max_length=80)
     message: str = Field(min_length=1, max_length=2000)
+    # The site language the visitor has selected (en/es/fr/de).
+    language: str = Field(default="en", max_length=8)
 
 
 class ChatMessage(BaseModel):
@@ -119,7 +124,11 @@ async def chat_stream(req: ChatRequest):
         raise HTTPException(status_code=503, detail="AI concierge is not configured")
 
     history = await db.chat_messages.find({"session_id": req.session_id}, {"_id": 0, "role": 1, "content": 1}).sort("created_at", 1).to_list(HISTORY_LIMIT)
-    messages = [{"role": "system", "content": CONCIERGE_SYSTEM_PROMPT}] + [{"role": m["role"], "content": m["content"]} for m in history] + [{"role": "user", "content": req.message}]
+    system_prompt = CONCIERGE_SYSTEM_PROMPT
+    if req.language in LANGUAGE_NAMES:
+        name = LANGUAGE_NAMES[req.language]
+        system_prompt += f"\n\nThe visitor is browsing the site in {name}. Reply in {name} unless they write to you in another language."
+    messages = [{"role": "system", "content": system_prompt}] + [{"role": m["role"], "content": m["content"]} for m in history] + [{"role": "user", "content": req.message}]
 
     async def generate():
         await save_message(req.session_id, "user", req.message)
