@@ -530,7 +530,7 @@ def test_content_list_engagement_counts(client):
     assert (rows[blog["id"]]["views_30d"], rows[blog["id"]]["downloads_30d"]) == (3, 2)
     assert (rows[news["id"]]["views_30d"], rows[news["id"]]["downloads_30d"]) == (1, 0)
     page = client.get("/api/admin/content", params={"page_size": 1, "page": 2}, headers=h).json()
-    assert page["total"] == 2 and len(page["items"]) == 1 and page["origin_counts"] == {"builtin": 0, "import": 0}
+    assert page["total"] == 2 and len(page["items"]) == 1 and page["origin_counts"] == {"builtin": 0, "import": 0, "import_drafts": 0, "misdated": 0}
 
 
 # --- solix.com datasheets: a WordPress page whose sub-pages are the items -------------------------
@@ -552,7 +552,7 @@ PRODUCT_PAGE = {"id": 86722, "slug": "enterprise-edition", "parent": 478, "link"
 
 def _ds_page(slug, title, gated=True):
     form = "<form><input type='email' name='new_email'><button>Download Now</button></form>" if gated else ""
-    return (f"<!doctype html><html><head><title>{title} | Corp</title></head><body><nav><a href='/resources/white-papers/'>WP</a></nav>"
+    return (f"<!doctype html><html><head><title>{title} | Corp</title><meta property='og:image' content='https://www.corp.test/wp-content/uploads/press-releases.jpg'></head><body><nav><a href='/resources/white-papers/'>WP</a></nav>"
             f"<main><h1>{title}</h1><img class='res-cover-image' src='/documents/datasheets/res-image/{slug}.jpg'><p>{'Body. ' * 60}</p>{form}</main></body></html>").encode()
 
 
@@ -641,3 +641,70 @@ def test_static_listing_follows_items_in_another_folder(client, corp):
     ee = next(i for i in client.get("/api/admin/content", params={"origin": "import"}, headers=h).json()["items"] if i["slug"] == "enterprise-edition")
     full = client.get(f"/api/admin/content/{ee['id']}", headers=h).json()
     assert full["type"] == "datasheet" and full["gated"] is True and full["file"] and full["cover_image"].startswith("/api/files/")
+    cover = client.get(full["cover_image"])
+    assert cover.status_code == 200 and cover.content == PNG  # the datasheet cover, not the generic og:image
+
+
+def test_publishing_migrated_content_keeps_the_old_sites_dates(client, corp):
+    h = staff(client)
+    # Migrate as drafts (the default), then publish one from the editor.
+    job = _run(client, h, {"source": "link", "url": "https://www.corp.test/resources/datasheets/"})
+    assert job["counts"]["created"] == 3
+    listed = client.get("/api/admin/content", params={"origin": "import"}, headers=h).json()
+    assert listed["origin_counts"]["import_drafts"] == 3
+    ee = next(i for i in listed["items"] if i["slug"] == "enterprise-edition")
+    pub = client.post(f"/api/admin/content/{ee['id']}/publish", json={}, headers=h).json()
+    assert pub["status"] == "published" and pub["publish_at"].startswith("2026-01-25") and pub["published_at"].startswith("2026-01-25")
+    # An explicit date still wins.
+    ask = next(i for i in listed["items"] if i["slug"] == "data-ask")
+    pub = client.post(f"/api/admin/content/{ask['id']}/publish", json={"publish_at": "2025-05-05T00:00:00Z"}, headers=h).json()
+    assert pub["publish_at"].startswith("2025-05-05")
+    # "Publish all migrated drafts" uses each item's original date.
+    r = client.post("/api/admin/content-imported/publish", headers=h).json()
+    assert r == {"published": 1}
+    sense = next(i for i in client.get("/api/admin/content", params={"origin": "import"}, headers=h).json()["items"] if i["slug"] == "data-sense")
+    assert sense["status"] == "published" and sense["publish_at"].startswith("2026-03-25")
+    # Content written in the CMS still publishes today.
+    own = client.post("/api/admin/content", json={"title": "Fresh", "type": "blog"}, headers=h).json()
+    assert client.post(f"/api/admin/content/{own['id']}/publish", json={}, headers=h).json()["publish_at"][:10] == content.now_iso()[:10]
+
+
+def test_restore_dates_repairs_items_published_with_todays_date(client, corp):
+    h = staff(client)
+    _run(client, h, {"source": "link", "url": "https://www.corp.test/resources/datasheets/"})
+    items = client.get("/api/admin/content", params={"origin": "import"}, headers=h).json()["items"]
+    today = content.now_iso()
+    # Simulate the old behaviour: published under today's date.
+    client.portal.call(lambda: database.db.content.update_many({"origin": "import"}, {"$set": {"status": "published", "publish_at": today, "published_at": today}}))
+    cache.clear()
+    assert client.get("/api/admin/content", headers=h).json()["origin_counts"]["misdated"] == 3
+    assert client.post("/api/admin/content-imported/restore-dates", headers=h).json() == {"fixed": 3}
+    after = {i["slug"]: i for i in client.get("/api/admin/content", params={"origin": "import"}, headers=h).json()["items"]}
+    assert after["enterprise-edition"]["publish_at"].startswith("2026-01-25") and after["data-sense"]["publish_at"].startswith("2026-03-25")
+    assert client.get("/api/admin/content", headers=h).json()["origin_counts"]["misdated"] == 0
+    public = {i["slug"]: i for i in client.get("/api/content").json()["items"]}
+    assert public["enterprise-edition"]["date"] == "2026-01-25"
+    assert len(items) == 3
+
+
+def test_attachment_found_from_the_pages_own_address(client, monkeypatch):
+    # White papers: no res-image cover, PDF at /documents/<section>/<name>.pdf.
+    def handler(request):
+        p = request.url.path
+        if p == "/resources/lg/white-papers/the-agentic-enterprise/":
+            return httpx.Response(200, headers={"content-type": "text/html"}, content=(
+                b"<!doctype html><html><head><meta property='og:title' content='The Agentic Enterprise'>"
+                b"<meta property='article:published_time' content='2026-06-11T09:53:36+00:00'></head><body><article><p>"
+                + b"Agents at work. " * 40 + b"</p></article><form><input type='email'></form></body></html>"))
+        if p == "/documents/white-papers/the-agentic-enterprise.pdf":
+            return httpx.Response(200, headers={"content-type": "application/pdf"}, content=PDF + b"wp")
+        return httpx.Response(404, headers={"content-type": "text/html"}, content=b"nf")
+    monkeypatch.setattr(migrate, "_public_host", lambda host: True)
+    monkeypatch.setattr(migrate, "new_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    h = staff(client)
+    job = _run(client, h, {"source": "urls", "urls": ["https://wp.test/resources/lg/white-papers/the-agentic-enterprise/"], "status": "published"})
+    assert job["counts"]["created"] == 1, job["log"]
+    item = client.get("/api/admin/content", params={"origin": "import"}, headers=h).json()["items"][0]
+    full = client.get(f"/api/admin/content/{item['id']}", headers=h).json()
+    assert full["type"] == "whitepaper" and full["publish_at"].startswith("2026-06-11")
+    assert full["file"]["content_type"] == "application/pdf" and full["gated"] is True

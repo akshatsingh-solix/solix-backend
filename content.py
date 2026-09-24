@@ -44,7 +44,8 @@ CONTENT_TYPES = ("blog", "whitepaper", "datasheet", "casestudy", "ebook", "webin
 ORIGINS = ("cms", "builtin", "import")
 Status = Literal["draft", "scheduled", "published", "archived"]
 SLUG_RX = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-MAX_FILE = 10 * 1024 * 1024
+# 15 MB: large white papers and eBooks, still well inside a MongoDB document.
+MAX_FILE = 15 * 1024 * 1024
 LIST_FIELDS = {"_id": 0, "body": 0}
 
 
@@ -278,14 +279,20 @@ async def admin_list(status: Optional[str] = None, type: Optional[str] = None, o
         db.content.count_documents(query),
         db.content.find(query, LIST_FIELDS).sort("updated_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size),
         _engagement_30d(),
-        db.content.aggregate([{"$match": {"status": {"$ne": "archived"}, "origin": {"$in": ["builtin", "import"]}}}, {"$group": {"_id": "$origin", "n": {"$sum": 1}}}]).to_list(None),
+        db.content.find({"status": {"$ne": "archived"}, "origin": {"$in": ["builtin", "import"]}}, {"_id": 0, "origin": 1, "status": 1, "publish_at": 1, "original_date": 1}).to_list(5000),
     )
     for it in items:
         path = f"/{'newsroom' if it.get('type') == 'news' else 'resources'}/{it['slug']}"
         views, downloads = engagement.get(path, (0, 0))
         it["views_30d"], it["downloads_30d"] = views, downloads
         it["live"] = _is_live(it)
-    counts = {"builtin": 0, "import": 0, **{r["_id"]: r["n"] for r in by_origin}}
+    now = now_iso()
+    counts = {
+        "builtin": sum(1 for d in by_origin if d["origin"] == "builtin"),
+        "import": sum(1 for d in by_origin if d["origin"] == "import"),
+        "import_drafts": sum(1 for d in by_origin if d["origin"] == "import" and d.get("status") == "draft"),
+        "misdated": sum(1 for d in by_origin if _misdated(d, now)),
+    }
     return {"items": items, "total": total, "page": page, "page_size": page_size, "types": CONTENT_TYPES, "origin_counts": counts}
 
 
@@ -368,7 +375,9 @@ async def upsert_imported(data: dict, *, origin: str, status: str, date: Optiona
         if on_conflict != "update":
             return "skipped", existing
         await _snapshot(existing, {"email": by})
-        update = {**clean, "slug": existing["slug"], "version": existing.get("version", 1) + 1, "updated_at": now, "updated_by": by}
+        update = {**clean, "slug": existing["slug"], "version": existing.get("version", 1) + 1, "updated_at": now, "updated_by": by, "original_date": original}
+        if existing.get("status") in ("published", "scheduled"):
+            update.update(publish_at=when, published_at=when, status="published")
         await db.content.update_one({"id": existing["id"]}, {"$set": update})
         cache.bump("content")
         return "updated", {**existing, **update}
@@ -444,16 +453,52 @@ async def admin_publish(content_id: str, body: PublishIn, user: dict = Depends(g
     if not doc:
         raise HTTPException(status_code=404, detail="Not found")
     now = now_iso()
-    at = now
+    # Migrated and original-site content keeps the date it was first published
+    # on the old site; everything else goes live now (or at the chosen time).
+    at = min(doc["original_date"], now) if doc.get("original_date") and doc.get("origin") in ("import", "builtin") else now
     if body.publish_at:
         try:
             at = datetime.fromisoformat(body.publish_at.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat()
         except ValueError:
             raise HTTPException(status_code=422, detail="Invalid publish date")
     status = "scheduled" if at > now else "published"
-    await db.content.update_one({"id": content_id}, {"$set": {"status": status, "publish_at": at, "published_at": doc.get("published_at") or at, "updated_at": now, "updated_by": user["email"]}})
+    published_at = at if doc.get("origin") in ("import", "builtin") and not body.publish_at else (doc.get("published_at") or at)
+    await db.content.update_one({"id": content_id}, {"$set": {"status": status, "publish_at": at, "published_at": published_at, "updated_at": now, "updated_by": user["email"]}})
     _changed(f"published {doc['slug']}")
     return await admin_get(content_id)
+
+
+def _misdated(doc: dict, now: str) -> bool:
+    """A migrated item that is live under a different date than it had on the old site."""
+    orig = doc.get("original_date")
+    return bool(orig) and orig <= now and doc.get("status") in ("published", "scheduled") and (doc.get("publish_at") or "")[:10] != orig[:10]
+
+
+@admin.post("/content-imported/publish", dependencies=[can_edit])
+async def publish_imported(user: dict = Depends(get_current_admin)):
+    """Publish every migrated draft under the date it had on the old website."""
+    now = now_iso()
+    docs = await db.content.find({"origin": "import", "status": "draft"}, {"_id": 0, "id": 1, "original_date": 1}).to_list(5000)
+    for d in docs:
+        at = min(d.get("original_date") or now, now)
+        await db.content.update_one({"id": d["id"]}, {"$set": {"status": "published", "publish_at": at, "published_at": at, "updated_at": now, "updated_by": user["email"]}})
+    if docs:
+        _changed(f"published {len(docs)} migrated items")
+    return {"published": len(docs)}
+
+
+@admin.post("/content-imported/restore-dates", dependencies=[can_edit])
+async def restore_imported_dates(user: dict = Depends(get_current_admin)):
+    """Put migrated and original-site items back on their original publish dates
+    (e.g. ones published before publishing kept those dates)."""
+    now = now_iso()
+    docs = await db.content.find({"origin": {"$in": ["import", "builtin"]}, "original_date": {"$ne": None}}, {"_id": 0, "id": 1, "original_date": 1, "publish_at": 1, "status": 1}).to_list(5000)
+    fixed = [d for d in docs if _misdated(d, now)]
+    for d in fixed:
+        await db.content.update_one({"id": d["id"]}, {"$set": {"publish_at": d["original_date"], "published_at": d["original_date"], "updated_at": now, "updated_by": user["email"]}})
+    if fixed:
+        _changed(f"restored dates on {len(fixed)} items")
+    return {"fixed": len(fixed)}
 
 
 @admin.post("/content/{content_id}/unpublish", dependencies=[can_edit])
@@ -525,7 +570,7 @@ def sniff(data: bytes, name: str) -> tuple[str, str]:
 async def store_file(data: bytes, raw_name: str, by: str) -> dict:
     """Validate and store a file (deduplicated by content); returns its record without the bytes."""
     if len(data) > MAX_FILE:
-        raise HTTPException(status_code=413, detail="Files must be 10 MB or smaller.")
+        raise HTTPException(status_code=413, detail="Files must be 15 MB or smaller.")
     if not data:
         raise HTTPException(status_code=422, detail="The file is empty.")
     raw_name = os.path.basename(raw_name or "file")
