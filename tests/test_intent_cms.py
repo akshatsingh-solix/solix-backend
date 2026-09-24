@@ -28,12 +28,18 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 @pytest.fixture()
 def client():
     mock = AsyncMongoMockClient()["solix_test"]
+    previous = {m: getattr(m, "db", None) for m in MODULES}
+    previous_database = database.db
     database.db = mock
     for m in MODULES:
         m.db = mock
     cache.clear()
     with TestClient(server.app) as c:
         yield c
+    # Put back whatever database other test modules patched in.
+    database.db = previous_database
+    for m, db in previous.items():
+        m.db = db
 
 
 def staff(client, email="admin@example.com", password="AdminPass!1"):
@@ -143,7 +149,7 @@ def test_export_neutralises_formula_injection(client):
 
 
 def test_overview_report(client):
-    track(client, "visitor-rep-1", [{"type": "page_view", "path": "/resources/cloud-archive", "meta": {"title": "Cloud archive"}}, {"type": "resource_download", "path": "/resources/cloud-archive", "topics": ["enterprise-archiving"]}])
+    track(client, "visitor-rep-1", [{"type": "resource_view", "path": "/resources/cloud-archive", "topics": ["enterprise-archiving"], "meta": {"title": "Cloud archive"}}, {"type": "resource_download", "path": "/resources/cloud-archive", "topics": ["enterprise-archiving"]}])
     client.post("/api/submissions", json={"type": "demo", "email": "a@corp.com", "visitor_id": "visitor-rep-1", "interest": "sap-archiving"})
     client.post("/api/submissions", json={"type": "newsletter", "email": "b@corp.com"})
     r = client.get("/api/admin/reports/overview?days=7", headers=staff(client))
@@ -259,3 +265,12 @@ def test_track_guards(client):
     assert track(client, "short", [{"type": "page_view", "path": "/"}]).status_code == 204
     assert client.post("/api/track", content=b"not json").status_code == 400
     assert client.post("/api/track", content=b"x" * 40000).status_code == 413
+
+
+def test_form_before_first_beacon_still_links_browsing_and_campaign(client):
+    vid = "visitor-race-1"
+    client.post("/api/submissions", json={"type": "download", "email": "sam@corp.com", "visitor_id": vid})
+    track(client, vid, [{"type": "page_view", "path": "/products/enterprise-ai"}], utm_source="linkedin", utm_medium="paid_social", landing="/products/enterprise-ai")
+    lead = client.get("/api/admin/leads", headers=staff(client)).json()["items"][0]
+    assert lead["product_scores"] == {"enterprise-ai": 3.0}
+    assert lead["first_touch"]["utm_source"] == "linkedin" and lead["channel"] == "paid"

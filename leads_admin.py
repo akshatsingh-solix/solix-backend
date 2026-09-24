@@ -386,7 +386,7 @@ async def overview(request: Request, date_from: Optional[str] = None, date_to: O
             return [{"key": k, "count": c} for k, c in sorted(counts.items(), key=lambda x: -x[1])[:n]]
 
         content_rows: Dict[str, dict] = {}
-        async for e in db.events.find({"at": {"$gte": start, "$lte": end}, "type": {"$in": ["page_view", "resource_view", "resource_download"]}, "path": {"$regex": "^/resources/"}}, {"_id": 0, "type": 1, "path": 1, "meta": 1}).limit(200000):
+        async for e in db.events.find({"at": {"$gte": start, "$lte": end}, "type": {"$in": ["resource_view", "resource_download"]}, "path": {"$regex": "^/resources/"}}, {"_id": 0, "type": 1, "path": 1, "meta": 1}).limit(200000):
             row = content_rows.setdefault(e["path"], {"path": e["path"], "title": None, "views": 0, "downloads": 0})
             row["title"] = row["title"] or (e.get("meta") or {}).get("title")
             if e["type"] == "resource_download":

@@ -259,7 +259,7 @@ async def admin_list(status: Optional[str] = None, type: Optional[str] = None, q
     since = datetime.fromtimestamp(time.time() - 30 * 86400, tz=timezone.utc).isoformat()
     for it in items:
         path = f"/resources/{it['slug']}"
-        it["views_30d"] = await db.events.count_documents({"type": "page_view", "path": path, "at": {"$gte": since}})
+        it["views_30d"] = await db.events.count_documents({"type": "resource_view", "path": path, "at": {"$gte": since}})
         it["downloads_30d"] = await db.events.count_documents({"type": "resource_download", "path": path, "at": {"$gte": since}})
         it["live"] = _is_live(it)
     return {"items": items, "total": total, "page": page, "page_size": page_size, "types": CONTENT_TYPES}

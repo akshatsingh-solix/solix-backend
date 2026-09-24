@@ -104,6 +104,8 @@ async def ingest(vid: str, sid: str, events: list, ctx: dict) -> dict:
         }
     scores = scoring.decay_scores(visitor.get("product_scores") or {}, visitor.get("scored_at"), settings["half_life_days"])
     seen = deque(visitor.get("seen") or [], maxlen=SEEN_KEEP)
+    if not visitor.get("first_touch"):  # stub created by a form that beat the first beacon
+        visitor["first_touch"] = _touch(ctx, None)
     if visitor.get("last_session") != sid:
         visitor["sessions"] = (visitor.get("sessions") or 0) + 1
         visitor["last_session"] = sid
@@ -170,8 +172,9 @@ async def rollup_lead(lead_id: str, settings: Optional[dict] = None) -> Optional
     industries: dict = {}
     pages = sessions = 0
     last_seen = lead.get("last_activity_at")
+    touches = []
     for vid in lead.get("visitor_ids") or []:
-        v = await db.visitors.find_one({"id": vid}, {"_id": 0, "product_scores": 1, "scored_at": 1, "industries": 1, "pages_count": 1, "sessions": 1, "last_seen": 1})
+        v = await db.visitors.find_one({"id": vid}, {"_id": 0, "product_scores": 1, "scored_at": 1, "industries": 1, "pages_count": 1, "sessions": 1, "last_seen": 1, "first_touch": 1})
         if not v:
             continue
         for k, val in scoring.decay_scores(v.get("product_scores") or {}, v.get("scored_at"), hl).items():
@@ -182,13 +185,20 @@ async def rollup_lead(lead_id: str, settings: Optional[dict] = None) -> Optional
         sessions += v.get("sessions") or 0
         if v.get("last_seen") and (not last_seen or v["last_seen"] > last_seen):
             last_seen = v["last_seen"]
+        if v.get("first_touch"):
+            touches.append(v["first_touch"])
+    first_touch = lead.get("first_touch") or {}
+    if touches and not any(first_touch.get(k) for k in ("referrer", "utm_source", "utm_medium", "chat")):
+        # The form only knew its own page; the visitor's real landing is better attribution.
+        first_touch = min(touches, key=lambda t: t.get("at") or "")
+        lead["first_touch"] = first_touch
     fit, fit_breakdown = scoring.fit_score(lead)
     summary = scoring.summarize(scores, fit)
     update = {
         "direct_scores": direct, "direct_scored_at": now_iso(), "product_scores": scores, "fit_score": fit,
         "fit_breakdown": fit_breakdown, **summary, "pages_viewed": pages, "sessions": sessions,
         "industry": lead.get("industry") or (max(industries, key=industries.get) if industries else None),
-        "industries": industries, "last_activity_at": last_seen, "channel": scoring.channel_for(lead.get("first_touch")),
+        "industries": industries, "last_activity_at": last_seen, "channel": scoring.channel_for(first_touch), "first_touch": first_touch or None,
         "rescored_at": now_iso(),
     }
     merged = {**lead, **update}
@@ -242,13 +252,18 @@ async def record_submission(sub: dict, *, visitor_id: Optional[str] = None, topi
         tags.append("partner")
     visitor_ids = list(lead.get("visitor_ids") or [])
     first_touch = lead.get("first_touch")
-    if visitor_id:
-        v = await db.visitors.find_one({"id": visitor_id}, {"_id": 0, "first_touch": 1, "lead_id": 1})
-        if v is not None:
-            if visitor_id not in visitor_ids:
-                visitor_ids.append(visitor_id)
-            await db.visitors.update_one({"id": visitor_id}, {"$set": {"lead_id": lead["id"], "email": email}})
-            first_touch = first_touch or v.get("first_touch")
+    if visitor_id and 8 <= len(visitor_id) <= 64:
+        # The form can arrive before the visitor's first tracking batch: reserve the
+        # visitor so browsing that lands afterwards still rolls up into this lead.
+        await db.visitors.update_one(
+            {"id": visitor_id},
+            {"$set": {"lead_id": lead["id"], "email": email}, "$setOnInsert": {"created_at": now, "product_scores": {}, "scored_at": now, "sessions": 0, "events_count": 0, "pages_count": 0}},
+            upsert=True,
+        )
+        if visitor_id not in visitor_ids:
+            visitor_ids.append(visitor_id)
+        v = await db.visitors.find_one({"id": visitor_id}, {"_id": 0, "first_touch": 1})
+        first_touch = first_touch or (v or {}).get("first_touch")
     if not first_touch:
         first_touch = {"chat": True, "at": now} if sub.get("source") == "chat" else {"landing": sub.get("source_page"), "at": now}
     await db.leads.update_one({"id": lead["id"]}, {"$set": {
