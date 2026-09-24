@@ -414,3 +414,98 @@ def test_site_settings_announcement(client):
     bad = {**body, "announcement": {**body["announcement"], "link_url": "javascript:alert(1)"}}
     assert client.put("/api/admin/site", json=bad, headers=h).status_code == 422
     assert client.put("/api/admin/site", json=body).status_code == 401
+
+
+# --- "Paste any link" ---------------------------------------------------------------------------
+# Mirrors solix.com: the main WordPress at / and a separate blog WordPress under /blog/,
+# article pages without the api.w.org <link> tag, plus a non-WordPress listing site.
+
+def _wp_post(i, slug, title, cat):
+    return {"id": i, "slug": slug, "link": f"https://www.site.test/blog/{slug}/", "date_gmt": f"2026-0{i}-10T10:00:00",
+            "title": {"rendered": title}, "excerpt": {"rendered": f"<p>{title} summary.</p>"},
+            "content": {"rendered": f"<h2>{title}</h2><p>{'Words about data lakes. ' * 40}</p>"},
+            "_embedded": {"wp:term": [[{"name": cat}]], "author": [{"name": "David Z"}]}}
+
+
+BLOG = [_wp_post(1, "the-second-data-lake", "The Second Data Lake", "Data Lake"), _wp_post(2, "ai-ready-data", "AI-ready data", "Enterprise AI"), _wp_post(3, "archives-as-ai-assets", "Archives as AI assets", "Data Lake")]
+ARTICLE_HTML = b"<!doctype html><html><head><title>The Second Data Lake - SOLIX Blog</title></head><body><article><p>" + b"Rendered page text. " * 50 + b"</p></article></body></html>"
+LISTING_HTML = b"""<!doctype html><html><head><title>Insights</title></head><body><h1>Insights</h1>
+<a href="/insights/one/">One</a><a href="/insights/two/">Two</a><a href="https://news.test/insights/three/">Three</a>
+<a href="/insights/category/x/">Category</a><a href="/about/">About</a><a rel="next" href="/insights/page/2/">Next</a></body></html>"""
+LISTING2_HTML = b"""<!doctype html><html><body><a href="/insights/four/">Four</a><a href="/insights/five/">Five</a><a href="/insights/six/">Six</a></body></html>"""
+
+
+def site_handler(request: httpx.Request):
+    host, path, q = request.url.host, request.url.path, request.url.params
+    js = lambda body: httpx.Response(200, headers={"content-type": "application/json"}, json=body)  # noqa: E731
+    page = lambda body: httpx.Response(200, headers={"content-type": "text/html; charset=utf-8"}, content=body)  # noqa: E731
+    if host == "www.site.test":
+        if path in ("/wp-json/", "/blog/wp-json/"):
+            return js({"namespaces": ["oembed/1.0", "wp/v2"]})
+        if path == "/blog/wp-json/wp/v2/types":
+            return js({"post": {"name": "Posts", "rest_base": "posts"}, "page": {"name": "Pages", "rest_base": "pages"}})
+        if path == "/blog/wp-json/wp/v2/posts":
+            rows = BLOG
+            if q.get("slug"):
+                rows = [p for p in BLOG if p["slug"] == q["slug"]]
+            if q.get("categories"):
+                rows = [p for p in BLOG if p["_embedded"]["wp:term"][0][0]["name"] == "Data Lake"]
+            return js(rows if q.get("page", "1") == "1" else [])
+        if path == "/blog/wp-json/wp/v2/pages":
+            return js([])
+        if path == "/blog/wp-json/wp/v2/categories":
+            return js([{"id": 7, "name": "Data Lake", "slug": "data-lake"}] if q.get("slug") == "data-lake" else [])
+        if path == "/blog/the-second-data-lake/":
+            return page(ARTICLE_HTML)
+        if path in ("/blog/", "/blog/category/data-lake/"):
+            return page(b"<!doctype html><html><body><a href='/blog/the-second-data-lake/'>x</a></body></html>")
+        if path == "/sitemap.xml":
+            return httpx.Response(200, headers={"content-type": "application/xml"}, content=b'<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://news.test/insights/one/</loc></url></urlset>')
+    if host == "news.test":
+        if path == "/insights/":
+            return page(LISTING_HTML)
+        if path == "/insights/page/2/":
+            return page(LISTING2_HTML)
+        m = path.strip("/").split("/")
+        if len(m) == 2 and m[0] == "insights":
+            name = m[1].title()
+            return page(f"<!doctype html><html><head><meta property='og:title' content='Insight {name}'><meta property='article:published_time' content='2025-01-02T00:00:00Z'></head><body><article><p>{'Insight text. ' * 40}</p></article></body></html>".encode())
+    return httpx.Response(404, headers={"content-type": "text/html"}, content=b"not found")
+
+
+@pytest.fixture()
+def links(monkeypatch):
+    monkeypatch.setattr(migrate, "_public_host", lambda host: True)
+    monkeypatch.setattr(migrate, "new_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(site_handler), headers={"User-Agent": migrate.UA}))
+
+
+def test_link_to_an_article_on_a_blog_under_a_subfolder(client, links):
+    h = staff(client)
+    prev = client.post("/api/admin/migrations/preview", json={"source": "link", "url": "https://www.site.test/blog/the-second-data-lake/"}, headers=h).json()
+    assert prev["found"] == 1, prev
+    item = prev["items"][0]
+    # Found through the blog's own WordPress API, not the main site's.
+    assert item["title"] == "The Second Data Lake" and item["author"] == "David Z" and item["date"].startswith("2026-01-10") and item["tag"] == "Data Lake"
+    job = _run(client, h, {"source": "link", "url": "https://www.site.test/blog/the-second-data-lake/", "status": "published", "mirror_media": False})
+    assert job["counts"]["created"] == 1, job["log"]
+
+
+def test_link_to_blog_home_category_listing_and_sitemap(client, links):
+    h = staff(client)
+    whole = client.post("/api/admin/migrations/preview", json={"source": "link", "url": "https://www.site.test/blog/"}, headers=h).json()
+    assert whole["found"] == 3
+    cat = client.post("/api/admin/migrations/preview", json={"source": "link", "url": "https://www.site.test/blog/category/data-lake/"}, headers=h).json()
+    assert cat["found"] == 2 and {i["title"] for i in cat["items"]} == {"The Second Data Lake", "Archives as AI assets"}
+    listing = client.post("/api/admin/migrations/preview", json={"source": "link", "url": "https://news.test/insights/"}, headers=h).json()
+    # Articles on both listing pages; category, about and off-section links skipped.
+    assert listing["found"] == 6 and {i["title"] for i in listing["items"]} >= {"Insight One", "Insight Six"}
+    sm = client.post("/api/admin/migrations/preview", json={"source": "link", "url": "https://www.site.test/sitemap.xml"}, headers=h).json()
+    assert sm["found"] == 1 and sm["items"][0]["title"] == "Insight One"
+    # The WordPress option finds the blog's API from any page on it.
+    wp = client.post("/api/admin/migrations/preview", json={"source": "wordpress", "url": "https://www.site.test/blog/the-second-data-lake/"}, headers=h).json()
+    assert wp["found"] == 3
+    # A broken address is a clear per-item error, not a crash.
+    bad = client.post("/api/admin/migrations/preview", json={"source": "urls", "urls": ["https://news.test/missing", "https://news.test/insights/one/"]}, headers=h).json()
+    assert bad["found"] == 1 and bad["items"][0]["title"] == "Insight One" and "HTTP 404" in bad["log"][0]["msg"]
+    none = client.post("/api/admin/migrations/preview", json={"source": "link", "url": "https://news.test/missing"}, headers=h).json()
+    assert none["found"] == 0 and none["types"] == {} and none["log"][0]["level"] == "error"

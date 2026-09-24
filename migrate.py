@@ -54,7 +54,8 @@ logger = logging.getLogger("solix.migrate")
 router = APIRouter(prefix="/api/admin/migrations", tags=["migration"], dependencies=[Depends(get_current_admin)])
 can_run = Depends(require_roles("admin", "editor"))
 
-UA = "SolixSiteMigrator/1.0 (+content migration)"
+# A normal browser identity: many site firewalls turn away unknown bots.
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 SolixSiteMigrator/1.1"
 MAX_PAGE = 5 * 1024 * 1024
 MAX_ITEMS = 2000
 CONCURRENCY = 4
@@ -137,7 +138,10 @@ async def fetch(client: httpx.AsyncClient, url: str, max_bytes: int = MAX_PAGE) 
 
 
 def new_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(timeout=httpx.Timeout(25, connect=10), headers={"User-Agent": UA, "Accept": "*/*"})
+    return httpx.AsyncClient(timeout=httpx.Timeout(25, connect=10), headers={
+        "User-Agent": UA, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.8",
+    })
 
 
 def _text(html: str) -> str:
@@ -302,7 +306,8 @@ def extract_page(html: str, url: str) -> dict:
 # --- Sources -------------------------------------------------------------------------------
 
 class MigrationIn(BaseModel):
-    source: Literal["wordpress", "sitemap", "rss", "urls", "file"]
+    # "link": any address - an article, a listing or blog home, a sitemap or a feed.
+    source: Literal["link", "wordpress", "sitemap", "rss", "urls", "file"]
     url: Optional[str] = Field(default=None, max_length=1000)
     urls: List[str] = Field(default_factory=list, max_length=MAX_ITEMS)
     records: List[dict] = Field(default_factory=list, max_length=MAX_ITEMS)
@@ -363,50 +368,206 @@ async def wp_types(client: httpx.AsyncClient, root: str) -> list:
     try:
         data, _, _ = await fetch(client, urljoin(root.rstrip("/") + "/", "wp-json/wp/v2/types"))
         types = json.loads(data)
-        return [{"rest_base": t.get("rest_base"), "name": t.get("name")} for t in types.values() if t.get("rest_base") and t.get("rest_base") not in ("media", "blocks", "menu-items", "navigation", "templates", "template-parts", "global-styles", "font-families", "wp_pattern_category")]
+        skip = {"media", "blocks", "menu-items", "navigation", "templates", "template-parts", "global-styles", "font-families", "wp_pattern_category", "guest-author", "rm_content_editor"}
+        return [{"rest_base": t.get("rest_base"), "name": t.get("name")} for t in types.values()
+                if re.match(r"^[a-z0-9_-]+$", t.get("rest_base") or "") and t["rest_base"] not in skip]
     except (ValueError, httpx.HTTPError, AttributeError):
         return []
+
+
+def wp_record(p: dict, rest_base: str) -> dict:
+    """A WordPress REST API item (fetched with _embed) as a raw migration record."""
+    emb = p.get("_embedded") or {}
+    media = (emb.get("wp:featuredmedia") or [{}])[0] or {}
+    terms = [t.get("name") for group in (emb.get("wp:term") or []) for t in (group or []) if isinstance(t, dict) and t.get("name")]
+    author = ((emb.get("author") or [{}])[0] or {}).get("name")
+    return {
+        "url": p.get("link") or "", "slug": p.get("slug"), "title": unescape(_text((p.get("title") or {}).get("rendered", ""))),
+        "date": (p.get("date_gmt") + "Z") if p.get("date_gmt") else p.get("date"),
+        "summary": _text((p.get("excerpt") or {}).get("rendered", "")), "body_html": (p.get("content") or {}).get("rendered", ""),
+        "cover_image": media.get("source_url"), "author": author, "tag": terms[0] if terms else None, "categories": terms,
+        "wp_type": rest_base,
+    }
+
+
+async def _json(client: httpx.AsyncClient, url: str):
+    try:
+        data, _, _ = await fetch(client, url)
+        return json.loads(data)
+    except (ValueError, httpx.HTTPError):
+        return None
+
+
+async def find_wp_root(client: httpx.AsyncClient, url: Optional[str], cache: dict, soup: Optional[BeautifulSoup] = None) -> Optional[str]:
+    """The WordPress install serving `url` (e.g. https://site.com/blog/), or None.
+
+    Uses the page's <link rel="https://api.w.org/"> when present, otherwise asks
+    the nearest parent folders for /wp-json/ - sites often run a separate
+    WordPress for the blog under /blog/."""
+    if not url:
+        return None
+    if soup is not None:
+        tag = soup.find("link", rel=lambda r: r and "https://api.w.org/" in (r if isinstance(r, list) else [r]))
+        if tag and tag.get("href", "").rstrip("/").endswith("wp-json"):
+            return tag["href"].rstrip("/")[: -len("wp-json")]
+    u = urlparse(url)
+    parts = [p for p in u.path.split("/") if p]
+    candidates = [f"{u.scheme}://{u.netloc}/" + "".join(f"{p}/" for p in parts[:i]) for i in range(min(len(parts), 3), -1, -1)]
+    for root in candidates:
+        if root in cache:
+            if cache[root]:
+                return root
+            continue
+        info = await _json(client, root + "wp-json/")
+        cache[root] = isinstance(info, dict) and "wp/v2" in (info.get("namespaces") or [])
+        if cache[root]:
+            return root
+    return None
+
+
+async def wp_items(client: httpx.AsyncClient, root: str, rest_base: str, params: "MigrationIn", log, query: str = "") -> AsyncIterator[dict]:
+    """Every item of one post type from a WordPress REST API, newest first."""
+    if not re.match(r"^[a-z0-9_-]+$", rest_base):
+        return
+    page = 1
+    while True:
+        api = urljoin(root, f"wp-json/wp/v2/{rest_base}?per_page=50&page={page}&_embed=1&orderby=date&order=desc{query}")
+        rows = await _json(client, api)
+        if not isinstance(rows, list):
+            if page == 1:
+                await log("error", api, f"WordPress API not reachable for '{rest_base}'")
+            return
+        if not rows:
+            return
+        for p in rows:
+            if _match(params, p.get("link") or ""):
+                yield wp_record(p, rest_base)
+        page += 1
+
+
+LISTING_SKIP = re.compile(r"/(category|tag|author|page|feed|wp-content|wp-json|comments)/|\.(jpe?g|png|gif|webp|svg|pdf|zip|xml)$|#", re.I)
+
+
+def listing_links(soup: BeautifulSoup, base: str) -> list:
+    """Links from a listing page to the articles below it (same site, deeper path)."""
+    b = urlparse(base)
+    prefix = b.path if b.path.endswith("/") else b.path.rsplit("/", 1)[0] + "/"
+    out = []
+    for a in soup.find_all("a", href=True):
+        href = urljoin(base, a["href"]).split("#")[0]
+        u = urlparse(href)
+        if u.netloc != b.netloc or not u.path.startswith(prefix) or u.path.rstrip("/") == b.path.rstrip("/") or LISTING_SKIP.search(u.path + ("#" if "#" in a["href"] else "")):
+            continue
+        if href not in out:
+            out.append(href)
+    return out
+
+
+async def link_records(client: httpx.AsyncClient, url: str, params: "MigrationIn", log, roots: dict) -> AsyncIterator[dict]:
+    """Whatever a pasted address points at: a sitemap or feed, a whole WordPress
+    blog or category, a single article (through its WordPress API record when
+    there is one), or a listing page whose articles are followed."""
+    data, ctype, final = await fetch(client, url)
+    start = data[:4000].lstrip().lower()
+    if b"<urlset" in start or b"<sitemapindex" in start:
+        async for rec in discover(client, params.model_copy(update={"source": "sitemap", "url": final}), log):
+            yield rec
+        return
+    if b"<rss" in start or b"<feed" in start:
+        async for rec in discover(client, params.model_copy(update={"source": "rss", "url": final}), log):
+            yield rec
+        return
+    if "html" not in ctype and not start.startswith((b"<!doctype", b"<html")):
+        raise ValueError(f"Not a web page, sitemap or feed ({ctype or 'unknown type'})")
+    html = data.decode("utf-8", "replace")
+    soup = BeautifulSoup(html, "html.parser")
+    root = await find_wp_root(client, final, roots, soup)
+    path = urlparse(final).path
+    if root:
+        root_path = urlparse(root).path
+        rel = path[len(root_path):].strip("/") if path.startswith(root_path) else None
+        types = [t for t in (params.wp_types or ["posts"]) if t]
+        if rel == "" or (rel and re.fullmatch(r"page/\d+", rel)):
+            await log("info", final, f"WordPress site at {root}: importing its {', '.join(types)}")
+            for rest_base in types:
+                async for rec in wp_items(client, root, rest_base, params, log):
+                    yield rec
+            return
+        m = re.match(r"^(category|tag)/(?:.*/)?([^/]+)$", rel or "")
+        if m:
+            tax = "categories" if m.group(1) == "category" else "tags"
+            terms = await _json(client, urljoin(root, f"wp-json/wp/v2/{tax}?slug={m.group(2)}"))
+            if isinstance(terms, list) and terms:
+                await log("info", final, f"WordPress {m.group(1)} '{terms[0].get('name')}': importing its posts")
+                async for rec in wp_items(client, root, "posts", params, log, query=f"&{tax}={terms[0]['id']}"):
+                    yield rec
+                return
+        if rel:
+            slug = rel.rsplit("/", 1)[-1]
+            available = [t["rest_base"] for t in await wp_types(client, root)] or ["posts", "pages"]
+            for rest_base in dict.fromkeys(["posts", "pages", *available]):
+                rows = await _json(client, urljoin(root, f"wp-json/wp/v2/{rest_base}?slug={slug}&_embed=1"))
+                if isinstance(rows, list) and rows:
+                    yield wp_record(rows[0], rest_base)
+                    return
+    # Not WordPress (or not found there): read the page itself.
+    page = extract_page(html, final)
+    words = len(_text(page.get("body_html") or "").split())
+    links = listing_links(soup, final)
+    if words < 250 and len(links) >= 3:
+        await log("info", final, f"Listing page: following {len(links)} links")
+        pages, next_url = 1, final
+        while True:
+            for href in links:
+                yield {"url": href, "fetch": True}
+            nxt = soup.find("a", rel=lambda r: r and "next" in (r if isinstance(r, list) else [r])) or soup.find("link", rel="next")
+            if not nxt or pages >= 20:
+                return
+            next_url = urljoin(next_url, nxt.get("href"))
+            try:
+                data, _, next_url = await fetch(client, next_url)
+            except ValueError:
+                return
+            soup = BeautifulSoup(data.decode("utf-8", "replace"), "html.parser")
+            links = listing_links(soup, final)
+            pages += 1
+    yield {**page, "url": final}
 
 
 async def discover(client: httpx.AsyncClient, params: MigrationIn, log) -> AsyncIterator[dict]:
     """Yield raw records ({url, title?, body_html?, ...}) up to params.limit."""
     count = 0
     if params.source == "wordpress":
-        root = (params.url or "").rstrip("/") + "/"
+        root = await find_wp_root(client, params.url, {}) or (urljoin(params.url, "/"))
+        if root.rstrip("/") != (params.url or "").rstrip("/"):
+            await log("info", params.url, f"Using the WordPress site at {root}")
         for rest_base in params.wp_types or ["posts"]:
-            if not re.match(r"^[a-z0-9_-]+$", rest_base):
+            async for rec in wp_items(client, root, rest_base, params, log):
+                yield rec
+                count += 1
+                if count >= params.limit:
+                    return
+    elif params.source in ("link", "urls"):
+        roots: dict = {}
+        targets = [params.url] if params.source == "link" else [u.strip() for u in params.urls if u.strip()]
+        seen: set = set()
+        for target in targets:
+            if params.source == "urls" and not _match(params, target):
                 continue
-            page = 1
-            while count < params.limit:
-                api = urljoin(root, f"wp-json/wp/v2/{rest_base}?per_page=50&page={page}&_embed=1&orderby=date&order=desc")
-                try:
-                    data, _, _ = await fetch(client, api)
-                    rows = json.loads(data)
-                except (ValueError, httpx.HTTPError) as exc:
-                    if page == 1:
-                        await log("error", api, f"WordPress API not reachable: {exc}")
-                    break
-                if not isinstance(rows, list) or not rows:
-                    break
-                for p in rows:
-                    link = p.get("link") or ""
-                    if not _match(params, link):
+            try:
+                async for rec in link_records(client, target, params, log, roots):
+                    key = rec.get("url") or rec.get("title")
+                    if key in seen:
                         continue
-                    emb = p.get("_embedded") or {}
-                    media = (emb.get("wp:featuredmedia") or [{}])[0] or {}
-                    terms = [t.get("name") for group in (emb.get("wp:term") or []) for t in (group or []) if isinstance(t, dict) and t.get("name")]
-                    author = ((emb.get("author") or [{}])[0] or {}).get("name")
-                    yield {
-                        "url": link, "slug": p.get("slug"), "title": unescape(_text((p.get("title") or {}).get("rendered", ""))),
-                        "date": (p.get("date_gmt") + "Z") if p.get("date_gmt") else p.get("date"),
-                        "summary": _text((p.get("excerpt") or {}).get("rendered", "")), "body_html": (p.get("content") or {}).get("rendered", ""),
-                        "cover_image": media.get("source_url"), "author": author, "tag": terms[0] if terms else None, "categories": terms,
-                        "wp_type": rest_base,
-                    }
+                    seen.add(key)
+                    yield rec
                     count += 1
                     if count >= params.limit:
                         return
-                page += 1
+            except (ValueError, httpx.HTTPError) as exc:
+                # One unreachable address counts as one failed item, not a failed run.
+                yield {"url": target, "error": str(exc) or exc.__class__.__name__}
+                count += 1
     elif params.source == "rss":
         data, _, _ = await fetch(client, params.url)
         root = ElementTree.fromstring(data)
@@ -462,14 +623,6 @@ async def discover(client: httpx.AsyncClient, params: MigrationIn, log) -> Async
                     count += 1
                     if count >= params.limit:
                         return
-    elif params.source == "urls":
-        for u in params.urls:
-            u = u.strip()
-            if u and _match(params, u):
-                yield {"url": u, "fetch": True}
-                count += 1
-                if count >= params.limit:
-                    return
     elif params.source == "file":
         for r in params.records:
             rec = {str(k).strip().lower(): (v.strip() if isinstance(v, str) else v) for k, v in r.items() if k}
@@ -504,6 +657,8 @@ async def _mirror(client: httpx.AsyncClient, url: str, by: str, cache: dict) -> 
 
 async def build_item(client: httpx.AsyncClient, rec: dict, params: MigrationIn, *, by: str, mirror: bool, media_cache: dict) -> dict:
     url = rec.get("url") or ""
+    if rec.get("error"):
+        raise ValueError(rec["error"])
     if rec.get("fetch"):
         data, ctype, final = await fetch(client, url)
         if "html" not in ctype and not data.lstrip()[:15].lower().startswith((b"<!doctype", b"<html")):
@@ -617,7 +772,7 @@ async def resume_interrupted() -> None:
 
 
 def _validate_params(params: MigrationIn) -> None:
-    if params.source in ("wordpress", "sitemap", "rss") and not params.url:
+    if params.source in ("link", "wordpress", "sitemap", "rss") and not params.url:
         raise HTTPException(status_code=422, detail="Enter the address to import from.")
     if params.source == "urls" and not [u for u in params.urls if u.strip()]:
         raise HTTPException(status_code=422, detail="Add at least one page address.")
@@ -659,6 +814,9 @@ async def preview(params: MigrationIn, sample: int = Query(8, ge=1, le=20)):
             except Exception as exc:
                 return {"source_url": rec.get("url"), "error": getattr(exc, "detail", None) or str(exc) or exc.__class__.__name__}
 
+        failed = [r for r in records if r.get("error")]
+        logs += [{"level": "error", "url": r.get("url"), "msg": r["error"]} for r in failed]
+        records = [r for r in records if not r.get("error")]
         items = await asyncio.gather(*(parse(r) for r in records[:sample]))
         available = await wp_types(client, params.url) if params.source == "wordpress" else []
     kinds: dict = {}
