@@ -122,41 +122,44 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def on_startup():
-    await db.submissions.create_index("created_at")
-    await db.submissions.create_index("type")
-    await db.chat_messages.create_index([("session_id", 1), ("created_at", 1)])
-    await db.users.create_index("email", unique=True)
-    await db.accounts.create_index("email", unique=True)
-    await db.accounts.create_index("id", unique=True)
-    await db.login_attempts.create_index("identifier")
-    await db.notifications.create_index("created_at")
-    for field, unique in (("id", True), ("email", True), ("created_at", False), ("mql_at", False), ("last_activity_at", False), ("score", False), ("primary_line", False), ("stage", False)):
-        await db.leads.create_index(field, unique=unique)
-    await db.visitors.create_index("id", unique=True)
-    await db.visitors.create_index("last_seen")
-    await db.events.create_index([("visitor_id", 1), ("at", -1)])
-    await db.events.create_index([("type", 1), ("at", -1)])
-    # Raw events expire after 180 days to keep the free database tier small.
-    await db.events.create_index("at_dt", expireAfterSeconds=180 * 86400)
-    await db.content.create_index("id", unique=True)
-    await db.content.create_index("slug", unique=True)
-    await db.content.create_index([("status", 1), ("publish_at", -1)])
-    await db.content_versions.create_index([("content_id", 1), ("version", -1)])
-    await db.files.create_index("id", unique=True)
-    await db.files.create_index("sha256")
-    await db.event_configs.create_index("slug", unique=True)
-    await db.event_registrations.create_index("id", unique=True)
-    await db.event_registrations.create_index([("event", 1), ("code", 1)], unique=True)
-    await db.event_registrations.create_index([("event", 1), ("email", 1)])
-    await db.event_registrations.create_index([("event", 1), ("created_at", -1)])
-    await db.content.create_index("source_url", sparse=True)
-    await db.content.create_index("origin")
-    await db.content.create_index([("status", 1), ("updated_at", -1)])
-    await db.content.create_index([("updated_at", -1)])
-    await db.deliveries.create_index("created_at")
-    await db.deliveries.create_index([("email", 1), ("slug", 1), ("created_at", -1)])
-    await db.migration_jobs.create_index("id", unique=True)
-    await db.migration_jobs.create_index("created_at")
+    # Index creation is idempotent; running it concurrently turns ~40 round trips
+    # to the database into about one, so a cold start answers sooner.
+    await asyncio.gather(
+        db.submissions.create_index("created_at"),
+        db.submissions.create_index("type"),
+        db.chat_messages.create_index([("session_id", 1), ("created_at", 1)]),
+        db.users.create_index("email", unique=True),
+        db.accounts.create_index("email", unique=True),
+        db.accounts.create_index("id", unique=True),
+        db.login_attempts.create_index("identifier"),
+        db.notifications.create_index("created_at"),
+        *(db.leads.create_index(field, unique=unique) for field, unique in (("id", True), ("email", True), ("created_at", False), ("mql_at", False), ("last_activity_at", False), ("score", False), ("primary_line", False), ("stage", False))),
+        db.visitors.create_index("id", unique=True),
+        db.visitors.create_index("last_seen"),
+        db.events.create_index([("visitor_id", 1), ("at", -1)]),
+        db.events.create_index([("type", 1), ("at", -1)]),
+        # Raw events expire after 180 days to keep the free database tier small.
+        db.events.create_index("at_dt", expireAfterSeconds=180 * 86400),
+        db.content.create_index("id", unique=True),
+        db.content.create_index("slug", unique=True),
+        db.content.create_index([("status", 1), ("publish_at", -1)]),
+        db.content_versions.create_index([("content_id", 1), ("version", -1)]),
+        db.files.create_index("id", unique=True),
+        db.files.create_index("sha256"),
+        db.event_configs.create_index("slug", unique=True),
+        db.event_registrations.create_index("id", unique=True),
+        db.event_registrations.create_index([("event", 1), ("code", 1)], unique=True),
+        db.event_registrations.create_index([("event", 1), ("email", 1)]),
+        db.event_registrations.create_index([("event", 1), ("created_at", -1)]),
+        db.content.create_index("source_url", sparse=True),
+        db.content.create_index("origin"),
+        db.content.create_index([("status", 1), ("updated_at", -1)]),
+        db.content.create_index([("updated_at", -1)]),
+        db.deliveries.create_index("created_at"),
+        db.deliveries.create_index([("email", 1), ("slug", 1), ("created_at", -1)]),
+        db.migration_jobs.create_index("id", unique=True),
+        db.migration_jobs.create_index("created_at"),
+    )
     await seed_admin()
     await resume_interrupted()
     asyncio.create_task(_rescore_loop())
