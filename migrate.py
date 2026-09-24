@@ -582,7 +582,9 @@ async def link_records(client: httpx.AsyncClient, url: str, params: "MigrationIn
             soup = BeautifulSoup(data.decode("utf-8", "replace"), "html.parser")
             links = listing_links(soup, final)
             pages += 1
-    yield {**page, "url": final}
+    extra = page_extras(soup, final)
+    yield {**page, "url": final, "cover_image": extra.get("cover_image") or page.get("cover_image"),
+           "pdf_candidates": extra.get("pdfs", []), "fetch_meta": True, "gated_form": extra.get("gated")}
 
 
 async def discover(client: httpx.AsyncClient, params: MigrationIn, log) -> AsyncIterator[dict]:
@@ -718,7 +720,10 @@ async def enrich_from_page(client: httpx.AsyncClient, url: str) -> dict:
         data, _, final = await fetch(client, url)
     except (ValueError, httpx.HTTPError):
         return {}
-    soup = BeautifulSoup(data.decode("utf-8", "replace"), "html.parser")
+    return page_extras(BeautifulSoup(data.decode("utf-8", "replace"), "html.parser"), final)
+
+
+def page_extras(soup: BeautifulSoup, final: str) -> dict:
     cover = None
     img = soup.select_one("img.res-cover-image, img.wp-post-image, .entry-content img, article img")
     if img and (img.get("src") or img.get("data-src")):
@@ -731,6 +736,10 @@ async def enrich_from_page(client: httpx.AsyncClient, url: str) -> dict:
         m = re.match(r"^(.*)/res-image/([^/?#]+)\.(?:jpe?g|png|webp|gif)$", cover, re.I)
         if m:
             pdfs.append(f"{m.group(1)}/{m.group(2)}.pdf")
+    # /resources/lg/white-papers/<name>/ -> /documents/white-papers/<name>.pdf
+    parts = [p for p in urlparse(final).path.split("/") if p]
+    if len(parts) >= 2:
+        pdfs.append(urljoin(final, f"/documents/{parts[-2]}/{parts[-1]}.pdf"))
     form = soup.find("form")
     gated = bool(form and form.find("input", attrs={"type": "email"})) or bool(FORM_HINT.search(soup.get_text(" ")[:20000]) and form)
     return {"cover_image": cover, "pdfs": list(dict.fromkeys(pdfs)), "gated": gated}
@@ -747,7 +756,8 @@ async def build_item(client: httpx.AsyncClient, rec: dict, params: MigrationIn, 
         page = extract_page(data.decode("utf-8", "replace"), final)
         rec = {**page, **{k: v for k, v in rec.items() if v and k not in ("fetch", "body_html", "url")}}
         extra = await enrich_from_page(client, final)
-        rec["cover_image"] = rec.get("cover_image") or extra.get("cover_image")
+        # The page's own cover beats og:image (often a generic, site-wide banner).
+        rec["cover_image"] = extra.get("cover_image") or rec.get("cover_image")
         rec["pdf_candidates"] = extra.get("pdfs", [])
         rec["fetch_meta"], rec["gated_form"] = True, extra.get("gated")
         url = final
@@ -781,11 +791,13 @@ async def build_item(client: httpx.AsyncClient, rec: dict, params: MigrationIn, 
         if cover and cover.startswith("http"):
             f = await _mirror(client, cover, by, media_cache)
             cover = f"/api/files/{f['id']}/{f['name']}" if f and f["kind"] == "image" else cover
-        for candidate in candidates[:3]:
+        for candidate in candidates[:4]:
             f = await _mirror(client, candidate, by, media_cache)
             if f and f["kind"] != "image":
                 file_id = f["id"]
                 break
+        if was_gated and not file_id and rec.get("_log"):
+            await rec["_log"]("warning", url, f"No attachment copied for '{rec.get('title') or url}' (tried {len(candidates[:4])} PDF address(es); a file over 15 MB is skipped)")
     if cover and cover.startswith("http://"):
         cover = None
     # Gate the file if asked to, or if the old site put it behind a form.
@@ -823,7 +835,7 @@ async def run_job(job_id: str, params: MigrationIn, by: str) -> None:
     async def one(client, rec):
         async with sem:
             try:
-                item = await build_item(client, rec, params, by=by, mirror=params.mirror_media, media_cache=media_cache)
+                item = await build_item(client, {**rec, "_log": log}, params, by=by, mirror=params.mirror_media, media_cache=media_cache)
                 date = item.pop("date", None)
                 outcome, doc = await upsert_imported(item, origin="import", status=params.status, date=date, by=by, on_conflict=params.on_conflict)
                 counts[outcome] += 1
