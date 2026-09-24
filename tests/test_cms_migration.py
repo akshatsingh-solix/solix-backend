@@ -509,3 +509,25 @@ def test_link_to_blog_home_category_listing_and_sitemap(client, links):
     assert bad["found"] == 1 and bad["items"][0]["title"] == "Insight One" and "HTTP 404" in bad["log"][0]["msg"]
     none = client.post("/api/admin/migrations/preview", json={"source": "link", "url": "https://news.test/missing"}, headers=h).json()
     assert none["found"] == 0 and none["types"] == {} and none["log"][0]["level"] == "error"
+
+
+def test_content_list_engagement_counts(client):
+    h = staff(client)
+    blog = client.post("/api/admin/content", json={"title": "Counted post", "type": "blog", "slug": "counted-post"}, headers=h).json()
+    news = client.post("/api/admin/content", json={"title": "Counted news", "type": "news", "slug": "counted-news"}, headers=h).json()
+    now = content.now_iso()
+    old = "2020-01-01T00:00:00+00:00"
+    events_rows = (
+        [{"type": "resource_view", "path": "/resources/counted-post", "at": now}] * 3
+        + [{"type": "resource_download", "path": "/resources/counted-post", "at": now}] * 2
+        + [{"type": "resource_view", "path": "/resources/counted-post", "at": old}]  # outside 30 days
+        + [{"type": "resource_view", "path": "/newsroom/counted-news", "at": now}]
+        + [{"type": "page_view", "path": "/resources/counted-post", "at": now}]
+    )
+    client.portal.call(lambda: database.db.events.insert_many([dict(e) for e in events_rows]))
+    cache.clear()
+    rows = {i["id"]: i for i in client.get("/api/admin/content", headers=h).json()["items"]}
+    assert (rows[blog["id"]]["views_30d"], rows[blog["id"]]["downloads_30d"]) == (3, 2)
+    assert (rows[news["id"]]["views_30d"], rows[news["id"]]["downloads_30d"]) == (1, 0)
+    page = client.get("/api/admin/content", params={"page_size": 1, "page": 2}, headers=h).json()
+    assert page["total"] == 2 and len(page["items"]) == 1 and page["origin_counts"] == {"builtin": 0, "import": 0}
