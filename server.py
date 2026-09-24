@@ -151,6 +151,8 @@ async def on_startup():
     await db.event_registrations.create_index([("event", 1), ("created_at", -1)])
     await db.content.create_index("source_url", sparse=True)
     await db.content.create_index("origin")
+    await db.content.create_index([("status", 1), ("updated_at", -1)])
+    await db.content.create_index([("updated_at", -1)])
     await db.deliveries.create_index("created_at")
     await db.deliveries.create_index([("email", 1), ("slug", 1), ("created_at", -1)])
     await db.migration_jobs.create_index("id", unique=True)

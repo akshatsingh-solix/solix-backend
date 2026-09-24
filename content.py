@@ -272,17 +272,43 @@ async def admin_list(status: Optional[str] = None, type: Optional[str] = None, o
     if q:
         rx = {"$regex": re.escape(q.strip()), "$options": "i"}
         query["$or"] = [{"title": rx}, {"summary": rx}, {"slug": rx}, {"tag": rx}]
-    total = await db.content.count_documents(query)
-    items = await db.content.find(query, LIST_FIELDS).sort("updated_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
-    # Engagement for the last 30 days, from tracked events.
-    since = datetime.fromtimestamp(time.time() - 30 * 86400, tz=timezone.utc).isoformat()
+    # The page, its total, per-item engagement and the source counts in parallel:
+    # a handful of queries per load instead of two per row.
+    total, items, engagement, by_origin = await asyncio.gather(
+        db.content.count_documents(query),
+        db.content.find(query, LIST_FIELDS).sort("updated_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size),
+        _engagement_30d(),
+        db.content.aggregate([{"$match": {"status": {"$ne": "archived"}, "origin": {"$in": ["builtin", "import"]}}}, {"$group": {"_id": "$origin", "n": {"$sum": 1}}}]).to_list(None),
+    )
     for it in items:
-        path = f"/resources/{it['slug']}"
-        it["views_30d"] = await db.events.count_documents({"type": "resource_view", "path": path, "at": {"$gte": since}})
-        it["downloads_30d"] = await db.events.count_documents({"type": "resource_download", "path": path, "at": {"$gte": since}})
+        path = f"/{'newsroom' if it.get('type') == 'news' else 'resources'}/{it['slug']}"
+        views, downloads = engagement.get(path, (0, 0))
+        it["views_30d"], it["downloads_30d"] = views, downloads
         it["live"] = _is_live(it)
-    counts = {o: await db.content.count_documents({"origin": o, "status": {"$ne": "archived"}}) for o in ("builtin", "import")}
+    counts = {"builtin": 0, "import": 0, **{r["_id"]: r["n"] for r in by_origin}}
     return {"items": items, "total": total, "page": page, "page_size": page_size, "types": CONTENT_TYPES, "origin_counts": counts}
+
+
+async def _engagement_30d() -> dict:
+    """{path: (views, downloads)} over the last 30 days for every resource and
+    press release, in one grouped query, shared by all admin list pages for
+    five minutes (engagement doesn't need to be to-the-second)."""
+    async def produce():
+        since = datetime.fromtimestamp(time.time() - 30 * 86400, tz=timezone.utc).isoformat()
+        rows = await db.events.aggregate([
+            {"$match": {"type": {"$in": ["resource_view", "resource_download"]}, "at": {"$gte": since}}},
+            {"$group": {"_id": {"path": "$path", "type": "$type"}, "n": {"$sum": 1}}},
+        ]).to_list(None)
+        out: dict = {}
+        for r in rows:
+            views, downloads = out.get(r["_id"].get("path"), (0, 0))
+            if r["_id"].get("type") == "resource_view":
+                views += r["n"]
+            else:
+                downloads += r["n"]
+            out[r["_id"].get("path")] = (views, downloads)
+        return out
+    return await cache.memo("engagement", "30d", 300, produce)
 
 
 @admin.post("/content", status_code=201, dependencies=[can_edit])
