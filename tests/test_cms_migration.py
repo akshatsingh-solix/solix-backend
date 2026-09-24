@@ -531,3 +531,113 @@ def test_content_list_engagement_counts(client):
     assert (rows[news["id"]]["views_30d"], rows[news["id"]]["downloads_30d"]) == (1, 0)
     page = client.get("/api/admin/content", params={"page_size": 1, "page": 2}, headers=h).json()
     assert page["total"] == 2 and len(page["items"]) == 1 and page["origin_counts"] == {"builtin": 0, "import": 0}
+
+
+# --- solix.com datasheets: a WordPress page whose sub-pages are the items -------------------------
+
+DS_PARENT = {"id": 1380, "slug": "datasheets", "link": "https://www.corp.test/resources/datasheets/", "title": {"rendered": "Datasheets"}, "date_gmt": "2018-02-16T10:59:26", "content": {"rendered": "<p>Download datasheets.</p>"}, "excerpt": {"rendered": ""}}
+
+
+def _ds(i, slug, title):
+    return {"id": 87000 + i, "slug": slug, "parent": 1380, "link": f"https://www.corp.test/resources/datasheets/{slug}/", "date_gmt": f"2026-0{i}-25T10:00:00",
+            "title": {"rendered": title}, "excerpt": {"rendered": f"<p>{title} in brief.</p>"},
+            "content": {"rendered": f"<p>{title} explained. {'Detail. ' * 30}</p><ul><li>Point one</li></ul><h2>What’s inside</h2><p>Stuff.</p><p><b>Download the Datasheet</b></p>"}}
+
+
+DATASHEETS = [_ds(1, "enterprise-edition", "Enterprise Edition"), _ds(2, "data-ask", "Data Ask"), _ds(3, "data-sense", "Data Sense")]
+RETIRED = {**_ds(4, "solix-exapps-appliance", "Solix ExApps Appliance")}  # still a sub-page, no longer listed
+# Same slug, different pages: the product page must never be mistaken for the datasheet.
+PRODUCT_PAGE = {"id": 86722, "slug": "enterprise-edition", "parent": 478, "link": "https://www.corp.test/products/enterprise-edition/", "date_gmt": "2026-06-28T17:51:38", "title": {"rendered": "Enterprise Edition product"}, "content": {"rendered": "<p>Product.</p>"}, "excerpt": {"rendered": ""}}
+
+
+def _ds_page(slug, title, gated=True):
+    form = "<form><input type='email' name='new_email'><button>Download Now</button></form>" if gated else ""
+    return (f"<!doctype html><html><head><title>{title} | Corp</title></head><body><nav><a href='/resources/white-papers/'>WP</a></nav>"
+            f"<main><h1>{title}</h1><img class='res-cover-image' src='/documents/datasheets/res-image/{slug}.jpg'><p>{'Body. ' * 60}</p>{form}</main></body></html>").encode()
+
+
+def corp_handler(request: httpx.Request):
+    host, path, q = request.url.host, request.url.path, request.url.params
+    js = lambda body: httpx.Response(200, headers={"content-type": "application/json"}, json=body)  # noqa: E731
+    page = lambda body: httpx.Response(200, headers={"content-type": "text/html"}, content=body)  # noqa: E731
+    if host == "www.corp.test":
+        if path == "/wp-json/":
+            return js({"namespaces": ["wp/v2"]})
+        if path == "/wp-json/wp/v2/types":
+            return js({"post": {"name": "Posts", "rest_base": "posts"}, "page": {"name": "Pages", "rest_base": "pages"}})
+        if path == "/wp-json/wp/v2/posts":
+            return js([])
+        if path == "/wp-json/wp/v2/pages":
+            allp = [DS_PARENT, PRODUCT_PAGE, *DATASHEETS, RETIRED]
+            if q.get("slug"):
+                return js([p for p in allp if p["slug"] == q["slug"]])
+            if q.get("parent"):
+                kids = [p for p in allp if p.get("parent") == int(q["parent"])]
+                return js(kids[: int(q.get("per_page", 50))] if q.get("page", "1") == "1" else [])
+            return js([])
+        if path == "/resources/datasheets/":
+            links = "".join(f"<a href='/resources/lg/datasheets/{d['slug']}/'>{d['title']['rendered']}</a>" for d in DATASHEETS)
+            return page(f"<!doctype html><html><body><nav><a href='/products/x/'>P</a></nav><h1>Datasheets</h1>{links}</body></html>".encode())
+        for d in DATASHEETS:
+            if path in (f"/resources/datasheets/{d['slug']}/", f"/resources/lg/datasheets/{d['slug']}/"):
+                return page(_ds_page(d["slug"], d["title"]["rendered"], gated=d["slug"] != "data-sense"))
+        if path.startswith("/documents/datasheets/res-image/"):
+            return httpx.Response(200, headers={"content-type": "image/png"}, content=PNG + path.encode())
+        if path in ("/documents/datasheets/enterprise-edition.pdf", "/documents/datasheets/data-ask.pdf"):
+            return httpx.Response(200, headers={"content-type": "application/pdf"}, content=PDF + path.encode())
+    if host == "static.test":  # the same listing on a site without WordPress
+        if path == "/resources/datasheets/":
+            links = "".join(f"<a href='/resources/lg/datasheets/{d['slug']}/'>{d['title']['rendered']}</a>" for d in DATASHEETS)
+            return page(f"<!doctype html><html><body><header><a href='/resources/white-papers/'>White papers</a><a href='/about/'>About</a></header><h1>Datasheets</h1>{links}<footer><a href='/privacy/'>Privacy</a></footer></body></html>".encode())
+        for d in DATASHEETS:
+            if path == f"/resources/lg/datasheets/{d['slug']}/":
+                return page(_ds_page(d["slug"], d["title"]["rendered"]))
+        if path == "/documents/datasheets/enterprise-edition.pdf":
+            return httpx.Response(200, headers={"content-type": "application/pdf"}, content=PDF)
+        if path.startswith("/documents/datasheets/res-image/"):
+            return httpx.Response(200, headers={"content-type": "image/png"}, content=PNG)
+    return httpx.Response(404, headers={"content-type": "text/html"}, content=b"nf")
+
+
+@pytest.fixture()
+def corp(monkeypatch):
+    monkeypatch.setattr(migrate, "_public_host", lambda host: True)
+    monkeypatch.setattr(migrate, "new_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(corp_handler), headers={"User-Agent": migrate.UA}))
+
+
+def test_datasheets_listing_imports_every_datasheet_with_cover_and_gated_pdf(client, corp):
+    h = staff(client)
+    prev = client.post("/api/admin/migrations/preview", json={"source": "link", "url": "https://www.corp.test/resources/datasheets/"}, headers=h).json()
+    assert prev["found"] == 3, prev
+    assert prev["types"] == {"datasheet": 3}
+    assert {i["title"] for i in prev["items"]} == {"Enterprise Edition", "Data Ask", "Data Sense"}
+    assert any("is a listing" in entry["msg"] for entry in prev["log"])
+    assert any("Skipped 1 older sub-page" in entry["msg"] for entry in prev["log"])
+
+    job = _run(client, h, {"source": "link", "url": "https://www.corp.test/resources/datasheets/", "status": "published"})
+    assert job["counts"]["created"] == 3 and job["counts"]["failed"] == 0, job["log"]
+    items = {i["slug"]: i for i in client.get("/api/admin/content", params={"origin": "import"}, headers=h).json()["items"]}
+    ee = client.get(f"/api/admin/content/{items['enterprise-edition']['id']}", headers=h).json()
+    assert ee["type"] == "datasheet" and ee["title"] == "Enterprise Edition" and ee["publish_at"].startswith("2026-01-25")
+    assert ee["cover_image"].startswith("/api/files/")
+    assert ee["file"]["content_type"] == "application/pdf" and ee["gated"] is True  # gated like on the old site
+    assert "Download the Datasheet" not in ee["body"] and "## What’s inside" in ee["body"]
+    sense = client.get(f"/api/admin/content/{items['data-sense']['id']}", headers=h).json()
+    assert sense.get("file") is None and sense["gated"] is False  # no PDF found: no file, nothing gated
+
+
+def test_datasheet_link_picks_the_exact_page_not_a_same_slug_one(client, corp):
+    h = staff(client)
+    prev = client.post("/api/admin/migrations/preview", json={"source": "link", "url": "https://www.corp.test/resources/datasheets/enterprise-edition/"}, headers=h).json()
+    assert prev["found"] == 1 and prev["items"][0]["title"] == "Enterprise Edition" and prev["items"][0]["has_file"] is False
+
+
+def test_static_listing_follows_items_in_another_folder(client, corp):
+    h = staff(client)
+    prev = client.post("/api/admin/migrations/preview", json={"source": "link", "url": "https://static.test/resources/datasheets/"}, headers=h).json()
+    assert prev["found"] == 3, prev  # /resources/lg/datasheets/* followed; header, footer and other sections ignored
+    job = _run(client, h, {"source": "link", "url": "https://static.test/resources/datasheets/"})
+    assert job["counts"]["created"] == 3, job["log"]
+    ee = next(i for i in client.get("/api/admin/content", params={"origin": "import"}, headers=h).json()["items"] if i["slug"] == "enterprise-edition")
+    full = client.get(f"/api/admin/content/{ee['id']}", headers=h).json()
+    assert full["type"] == "datasheet" and full["gated"] is True and full["file"] and full["cover_image"].startswith("/api/files/")

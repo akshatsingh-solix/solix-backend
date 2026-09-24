@@ -206,6 +206,8 @@ def to_markdown(html: str) -> str:
     md = re.sub(r"\[\s*\]\([^)]*\)", "", md)  # empty links
     md = re.sub(r"[ \t]+\n", "\n", md)
     md = re.sub(r"\n{3,}", "\n\n", md)
+    # The old site's "Download the Datasheet" line pointed at its own form.
+    md = re.sub(r"(\n|^)\s*\**\s*download (the|this|our) [\w -]{3,40}\s*\**\s*$", "", md.strip(), flags=re.I)
     return md.strip()
 
 
@@ -449,18 +451,52 @@ LISTING_SKIP = re.compile(r"/(category|tag|author|page|feed|wp-content|wp-json|c
 
 
 def listing_links(soup: BeautifulSoup, base: str) -> list:
-    """Links from a listing page to the articles below it (same site, deeper path)."""
+    """Links from a listing page to its items: same site, below the listing's
+    path or anywhere under a folder named like the section (solix.com lists
+    /resources/datasheets/ items at /resources/lg/datasheets/<name>/). Menus,
+    headers and footers are ignored."""
     b = urlparse(base)
     prefix = b.path if b.path.endswith("/") else b.path.rsplit("/", 1)[0] + "/"
+    section = [p for p in b.path.split("/") if p][-1:] or [""]
+    marker = f"/{section[0]}/" if section[0] else None
+    body = BeautifulSoup(str(soup), "html.parser")
+    for tag in body(["nav", "header", "footer", "aside"]):
+        tag.decompose()
+    for el in body.find_all(True):
+        if el.attrs is not None and re.search(r"(^|[-_ ])(menu|nav|footer|header|breadcrumb)", " ".join(el.get("class") or []) + " " + (el.get("id") or ""), re.I):
+            el.decompose()
     out = []
-    for a in soup.find_all("a", href=True):
+    for a in body.find_all("a", href=True):
         href = urljoin(base, a["href"]).split("#")[0]
         u = urlparse(href)
-        if u.netloc != b.netloc or not u.path.startswith(prefix) or u.path.rstrip("/") == b.path.rstrip("/") or LISTING_SKIP.search(u.path + ("#" if "#" in a["href"] else "")):
+        path = u.path
+        if u.netloc != b.netloc or path.rstrip("/") == b.path.rstrip("/") or LISTING_SKIP.search(path + ("#" if "#" in a["href"] else "")):
             continue
-        if href not in out:
+        below = path.startswith(prefix) and path != prefix
+        in_section = bool(marker) and marker in path and path.split(marker, 1)[1].strip("/") != ""
+        if (below or in_section) and href not in out:
             out.append(href)
     return out
+
+
+def _same_url(a: str, b: str) -> bool:
+    norm = lambda u: re.sub(r"^https?://(www\.)?", "", (u or "").split("#")[0].split("?")[0]).rstrip("/").lower()  # noqa: E731
+    return norm(a) == norm(b)
+
+
+async def wp_lookup(client: httpx.AsyncClient, root: str, url: str) -> Optional[tuple[dict, str]]:
+    """The WordPress item published at exactly `url` (several pages can share a slug)."""
+    slug = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1]
+    if not slug:
+        return None
+    available = [t["rest_base"] for t in await wp_types(client, root)] or ["posts", "pages"]
+    for rest_base in dict.fromkeys(["posts", "pages", *available]):
+        rows = await _json(client, urljoin(root, f"wp-json/wp/v2/{rest_base}?slug={slug}&_embed=1&per_page=50"))
+        if isinstance(rows, list):
+            for row in rows:
+                if _same_url(row.get("link") or "", url):
+                    return row, rest_base
+    return None
 
 
 async def link_records(client: httpx.AsyncClient, url: str, params: "MigrationIn", log, roots: dict) -> AsyncIterator[dict]:
@@ -503,19 +539,34 @@ async def link_records(client: httpx.AsyncClient, url: str, params: "MigrationIn
                     yield rec
                 return
         if rel:
-            slug = rel.rsplit("/", 1)[-1]
-            available = [t["rest_base"] for t in await wp_types(client, root)] or ["posts", "pages"]
-            for rest_base in dict.fromkeys(["posts", "pages", *available]):
-                rows = await _json(client, urljoin(root, f"wp-json/wp/v2/{rest_base}?slug={slug}&_embed=1"))
-                if isinstance(rows, list) and rows:
-                    yield wp_record(rows[0], rest_base)
+            found = await wp_lookup(client, root, final)
+            if found:
+                row, rest_base = found
+                # A page with sub-pages is a listing (e.g. /resources/datasheets/): import the sub-pages.
+                children = await _json(client, urljoin(root, f"wp-json/wp/v2/{rest_base}?parent={row['id']}&per_page=1")) if rest_base == "pages" else None
+                if isinstance(children, list) and children:
+                    title = unescape(_text((row.get("title") or {}).get("rendered", "")))
+                    # Sites keep retired items as unlisted sub-pages: import what the page shows.
+                    shown = {urlparse(h).path.rstrip("/").rsplit("/", 1)[-1] for h in listing_links(soup, final)}
+                    shown = shown if len(shown) >= 3 else set()
+                    await log("info", final, f"'{title}' is a listing: importing its {f'{len(shown)} listed ' if shown else ''}sub-pages")
+                    skipped = 0
+                    async for rec in wp_items(client, root, "pages", params, log, query=f"&parent={row['id']}"):
+                        if shown and rec.get("slug") not in shown:
+                            skipped += 1
+                            continue
+                        yield {**rec, "enrich": True}
+                    if skipped:
+                        await log("info", final, f"Skipped {skipped} older sub-page(s) that the listing no longer shows")
                     return
+                yield {**wp_record(row, rest_base), "enrich": True}
+                return
     # Not WordPress (or not found there): read the page itself.
     page = extract_page(html, final)
     words = len(_text(page.get("body_html") or "").split())
     links = listing_links(soup, final)
     if words < 250 and len(links) >= 3:
-        await log("info", final, f"Listing page: following {len(links)} links")
+        await log("info", final, f"Listing page: following {len(links)} item links")
         pages, next_url = 1, final
         while True:
             for href in links:
@@ -655,6 +706,36 @@ async def _mirror(client: httpx.AsyncClient, url: str, by: str, cache: dict) -> 
     return f
 
 
+FORM_HINT = re.compile(r"submit your information|fill (in|out) the form|download (now|the)", re.I)
+
+
+async def enrich_from_page(client: httpx.AsyncClient, url: str) -> dict:
+    """What the API record lacks, from the item's own page: its cover image,
+    whether the download sat behind a form, and where the PDF probably is
+    (linked on the page, or next to the cover, e.g. /documents/datasheets/
+    res-image/x.jpg -> /documents/datasheets/x.pdf)."""
+    try:
+        data, _, final = await fetch(client, url)
+    except (ValueError, httpx.HTTPError):
+        return {}
+    soup = BeautifulSoup(data.decode("utf-8", "replace"), "html.parser")
+    cover = None
+    img = soup.select_one("img.res-cover-image, img.wp-post-image, .entry-content img, article img")
+    if img and (img.get("src") or img.get("data-src")):
+        cover = urljoin(final, img.get("data-src") or img["src"])
+    cover = cover or _meta(soup, "og:image", "twitter:image")
+    if cover and re.search(r"\.svg($|\?)|logo", cover, re.I):
+        cover = _meta(soup, "og:image")
+    pdfs = [urljoin(final, a["href"]) for a in soup.find_all("a", href=True) if re.search(r"\.pdf($|\?)", a["href"], re.I)]
+    if cover:
+        m = re.match(r"^(.*)/res-image/([^/?#]+)\.(?:jpe?g|png|webp|gif)$", cover, re.I)
+        if m:
+            pdfs.append(f"{m.group(1)}/{m.group(2)}.pdf")
+    form = soup.find("form")
+    gated = bool(form and form.find("input", attrs={"type": "email"})) or bool(FORM_HINT.search(soup.get_text(" ")[:20000]) and form)
+    return {"cover_image": cover, "pdfs": list(dict.fromkeys(pdfs)), "gated": gated}
+
+
 async def build_item(client: httpx.AsyncClient, rec: dict, params: MigrationIn, *, by: str, mirror: bool, media_cache: dict) -> dict:
     url = rec.get("url") or ""
     if rec.get("error"):
@@ -665,7 +746,18 @@ async def build_item(client: httpx.AsyncClient, rec: dict, params: MigrationIn, 
             raise ValueError(f"Not a web page ({ctype or 'unknown type'})")
         page = extract_page(data.decode("utf-8", "replace"), final)
         rec = {**page, **{k: v for k, v in rec.items() if v and k not in ("fetch", "body_html", "url")}}
+        extra = await enrich_from_page(client, final)
+        rec["cover_image"] = rec.get("cover_image") or extra.get("cover_image")
+        rec["pdf_candidates"] = extra.get("pdfs", [])
+        rec["fetch_meta"], rec["gated_form"] = True, extra.get("gated")
         url = final
+    was_gated = False
+    if rec.get("enrich") and url:
+        extra = await enrich_from_page(client, url)
+        rec = {**rec, "cover_image": rec.get("cover_image") or extra.get("cover_image"), "pdf_candidates": extra.get("pdfs", [])}
+        was_gated = extra.get("gated", False)
+    elif rec.get("fetch_meta"):
+        was_gated = bool(rec.get("gated_form"))
     body_html, video = clean_html(rec.get("body_html") or "", url or site_url())
     body = rec.get("body") or to_markdown(body_html)
     title = (rec.get("title") or "").strip()[:200]
@@ -680,6 +772,7 @@ async def build_item(client: httpx.AsyncClient, rec: dict, params: MigrationIn, 
     cover = rec.get("cover_image") or rec.get("image")
     file_id = None
     pdf = rec.get("file_url") or (PDF_LINK.search(body).group(1) if params.attach_pdfs and PDF_LINK.search(body) else None)
+    candidates = [pdf] if pdf else list(rec.get("pdf_candidates") or []) if params.attach_pdfs else []
     if mirror:
         for alt, src in list(dict.fromkeys(IMG_MD.findall(body)))[:30]:
             f = await _mirror(client, src, by, media_cache)
@@ -688,12 +781,15 @@ async def build_item(client: httpx.AsyncClient, rec: dict, params: MigrationIn, 
         if cover and cover.startswith("http"):
             f = await _mirror(client, cover, by, media_cache)
             cover = f"/api/files/{f['id']}/{f['name']}" if f and f["kind"] == "image" else cover
-        if pdf:
-            f = await _mirror(client, pdf, by, media_cache)
-            file_id = f["id"] if f and f["kind"] != "image" else None
+        for candidate in candidates[:3]:
+            f = await _mirror(client, candidate, by, media_cache)
+            if f and f["kind"] != "image":
+                file_id = f["id"]
+                break
     if cover and cover.startswith("http://"):
         cover = None
-    gated = params.gated if file_id else False
+    # Gate the file if asked to, or if the old site put it behind a form.
+    gated = (params.gated or was_gated) if file_id else False
     if isinstance(rec.get("gated"), str):
         gated = rec["gated"].lower() in ("1", "true", "yes", "y") and bool(file_id)
     return {
