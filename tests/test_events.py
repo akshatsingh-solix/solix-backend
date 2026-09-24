@@ -50,14 +50,59 @@ def reg(client, **over):
     return client.post(f"/api/events/{SLUG}/registrations", json=body)
 
 
+def make_free(client):
+    h = staff(client)
+    ev = client.get(f"/api/admin/events/{SLUG}", headers=h).json()
+    ev["tickets"][0].update(price=0, provider="free")
+    assert client.put(f"/api/admin/events/{SLUG}", json=ev, headers=h).status_code == 200
+    return h
+
+
 def test_public_event_is_seeded(client):
     d = client.get(f"/api/events/{SLUG}").json()
     assert d["name"] == "SOLIXEmpower 2026" and d["registration_open"] is True
-    assert [t["id"] for t in d["tickets"]] == ["full-pass"] and d["tickets"][0]["price"] == 0
+    t = d["tickets"][0]
+    assert [x["id"] for x in d["tickets"]] == ["full-pass"] and t["price"] == 29900 and t["provider"] == "eventbrite"
+    assert t["eventbrite_event_id"] == "1994300379119" and t["sales_ended"] is False and "Refunds up to 7 days" in d["refund_policy"]
     assert "promo_codes" not in d and len(d["interests"]) == 6
 
 
+def test_default_pass_is_paid_through_eventbrite(client):
+    q = client.post(f"/api/events/{SLUG}/quote", json={"ticket_id": "full-pass", "promo_code": "SLXEMP26EB"}).json()
+    assert q["total"] == 29900 and q["promo_valid"] is None and "Eventbrite" in q["promo_message"]
+    j = reg(client, promo_code="slxemp26eb").json()
+    assert j["status"] == "pending_payment" and j["amount"] == 29900
+    assert j["payment"] == {"provider": "eventbrite", "eventbrite_event_id": "1994300379119", "promo_code": "SLXEMP26EB"}
+    r = client.post(f"/api/events/{SLUG}/registrations/{j['code']}/payment", json={"email": "ana@bank.com", "provider": "eventbrite", "reference": "123456789"})
+    assert r.json()["status"] == "payment_reported"
+
+
+def test_old_free_seed_is_upgraded_unless_staff_edited(client):
+    import asyncio
+    old = {**events.DEFAULT_EVENTS[SLUG], "seed_version": 1, "refund_policy": None,
+           "tickets": [{**events.DEFAULT_EVENTS[SLUG]["tickets"][0], "price": 0, "provider": "free"}]}
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(events.db.event_configs.insert_one(dict(old)))
+    loop.close()
+    assert client.get(f"/api/events/{SLUG}").json()["tickets"][0]["price"] == 29900
+    # Once staff save settings, their choices win over any future seed.
+    h = make_free(client)
+    assert client.get(f"/api/admin/events/{SLUG}", headers=h).json()["tickets"][0]["price"] == 0
+
+
+def test_sales_end_closes_the_pass(client):
+    h = staff(client)
+    ev = client.get(f"/api/admin/events/{SLUG}", headers=h).json()
+    ev["tickets"][0]["sales_end_at"] = "2020-01-01T00:00:00-07:00"
+    assert client.put(f"/api/admin/events/{SLUG}", json=ev, headers=h).status_code == 200
+    assert client.get(f"/api/events/{SLUG}").json()["tickets"][0]["sales_ended"] is True
+    assert reg(client).status_code == 409
+    ev["tickets"][0]["sales_end_at"] = "next week"
+    assert client.put(f"/api/admin/events/{SLUG}", json=ev, headers=h).status_code == 422
+
+
 def test_free_registration_confirms_and_scores_lead(client):
+    make_free(client)
     r = reg(client)
     assert r.status_code == 201
     j = r.json()
@@ -128,7 +173,7 @@ def test_settings_validation(client):
 
 
 def test_capacity_waitlist_admin_stats_and_export(client):
-    h = staff(client)
+    h = make_free(client)
     ev = client.get(f"/api/admin/events/{SLUG}", headers=h).json()
     ev["capacity"] = 1
     client.put(f"/api/admin/events/{SLUG}", json=ev, headers=h)
