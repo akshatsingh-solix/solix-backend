@@ -2,6 +2,7 @@
 settings and staff users."""
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import re
@@ -325,18 +326,26 @@ async def overview(request: Request, date_from: Optional[str] = None, date_to: O
         if line and line != "all":
             lead_filter["primary_line"] = line
         fields = {"_id": 0, "created_at": 1, "mql_at": 1, "sql_at": 1, "stage": 1, "primary_line": 1, "channel": 1, "owner": 1, "country": 1, "industry": 1, "score": 1, "primary_product": 1}
-        leads = await db.leads.find(lead_filter, fields).to_list(50000)
         mql_filter: dict = {"mql_at": {"$gte": start, "$lte": end}}
         if line and line != "all":
             mql_filter["mql_line"] = line
-        mqls = await db.leads.find(mql_filter, {"_id": 0, "mql_at": 1, "mql_line": 1, "channel": 1, "owner": 1}).to_list(50000)
-        new_visitors = await db.visitors.find({"created_at": {"$gte": start, "$lte": end}}, {"_id": 0, "created_at": 1}).to_list(200000)
-        active_visitors = await db.visitors.count_documents({"last_seen": {"$gte": start, "$lte": end}})
+        # Independent queries run together; new visitors are counted per day in
+        # the database instead of downloading every visitor record.
+        leads, mqls, visitors_by_day, active_visitors = await asyncio.gather(
+            db.leads.find(lead_filter, fields).to_list(50000),
+            db.leads.find(mql_filter, {"_id": 0, "mql_at": 1, "mql_line": 1, "channel": 1, "owner": 1}).to_list(50000),
+            db.visitors.aggregate([
+                {"$match": {"created_at": {"$gte": start, "$lte": end}}},
+                {"$group": {"_id": {"$substr": ["$created_at", 0, 10]}, "n": {"$sum": 1}}},
+            ]).to_list(None),
+            db.visitors.count_documents({"last_seen": {"$gte": start, "$lte": end}}),
+        )
 
+        new_visitors_total = sum(v["n"] for v in visitors_by_day)
         trend = {d: {"date": d, "visitors": 0, "leads": 0, "mqls": 0} for d in day_keys}
-        for v in new_visitors:
-            if v["created_at"][:10] in trend:
-                trend[v["created_at"][:10]]["visitors"] += 1
+        for v in visitors_by_day:
+            if v["_id"] in trend:
+                trend[v["_id"]]["visitors"] += v["n"]
         for l in leads:
             if l["created_at"][:10] in trend:
                 trend[l["created_at"][:10]]["leads"] += 1
@@ -367,7 +376,7 @@ async def overview(request: Request, date_from: Optional[str] = None, date_to: O
             # lost / disqualified leads only count as having been leads.
             for s in order[: order.index(st) + 1] if st in order else ["lead"]:
                 reached[s] += 1
-        funnel = [{"stage": "visitors", "count": len(new_visitors)}] + [{"stage": s, "count": reached[s]} for s in order]
+        funnel = [{"stage": "visitors", "count": new_visitors_total}] + [{"stage": s, "count": reached[s]} for s in order]
 
         owners: Dict[str, dict] = {}
         for l in leads:
@@ -411,9 +420,9 @@ async def overview(request: Request, date_from: Optional[str] = None, date_to: O
         return {
             "window": {"from": start, "to": end},
             "kpis": {
-                "new_visitors": len(new_visitors), "active_visitors": active_visitors, "leads": total_leads, "mqls": mql_count,
+                "new_visitors": new_visitors_total, "active_visitors": active_visitors, "leads": total_leads, "mqls": mql_count,
                 "sqls": sql_count, "won": sum(1 for l in leads if l.get("stage") == "won"),
-                "visitor_to_lead": round(100 * total_leads / len(new_visitors), 1) if new_visitors else None,
+                "visitor_to_lead": round(100 * total_leads / new_visitors_total, 1) if new_visitors_total else None,
                 "lead_to_mql": round(100 * mql_count / total_leads, 1) if total_leads else None,
                 "mql_to_sql": round(100 * sql_count / mql_count, 1) if mql_count else None,
                 "unassigned_mqls": await db.leads.count_documents({"stage": "mql", "owner": {"$in": [None, ""]}}),
@@ -521,6 +530,7 @@ async def create_user(body: UserIn):
     password = _temp_password()
     doc = {"id": str(uuid.uuid4()), "email": email, "name": body.name.strip(), "role": body.role, "password_hash": hash_password(password), "created_at": now_iso(), "disabled": False}
     await db.users.insert_one(dict(doc))
+    cache.bump("users")
     return {"user": {k: v for k, v in doc.items() if k not in ("password_hash", "_id")}, "temporary_password": password}
 
 
@@ -539,5 +549,6 @@ async def update_user(user_id: str, body: UserPatch, me: dict = Depends(get_curr
         out["temporary_password"] = password
     if changes:
         await db.users.update_one({"id": user_id}, {"$set": changes})
+        cache.bump("users")
     out["user"] = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
     return out

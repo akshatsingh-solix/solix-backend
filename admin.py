@@ -1,3 +1,4 @@
+import asyncio
 import csv
 import io
 from datetime import datetime, timezone, timedelta
@@ -33,19 +34,24 @@ def _query(type: Optional[str], q: Optional[str], status: Optional[str] = None, 
 
 @router.get("/stats")
 async def stats():
-    total = await db.submissions.count_documents({})
     week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-    last_7 = await db.submissions.count_documents({"created_at": {"$gte": week_ago}})
-    pipeline = [{"$group": {"_id": "$type", "count": {"$sum": 1}}}]
-    by_type = {r["_id"]: r["count"] async for r in db.submissions.aggregate(pipeline)}
-    chat_leads = await db.submissions.count_documents({"source": "chat"})
-    alerts_sent = await db.notifications.count_documents({"status": "sent"})
-    by_status = {}
-    async for r in db.submissions.aggregate([{"$group": {"_id": "$status", "count": {"$sum": 1}}}]):
+    group = lambda field: db.submissions.aggregate([{"$group": {"_id": f"${field}", "count": {"$sum": 1}}}]).to_list(None)  # noqa: E731
+    # Seven independent counts: one round trip's worth of latency instead of seven.
+    total, last_7, types, chat_leads, alerts_sent, statuses, owners = await asyncio.gather(
+        db.submissions.count_documents({}),
+        db.submissions.count_documents({"created_at": {"$gte": week_ago}}),
+        group("type"),
+        db.submissions.count_documents({"source": "chat"}),
+        db.notifications.count_documents({"status": "sent"}),
+        group("status"),
+        group("owner"),
+    )
+    by_type = {r["_id"]: r["count"] for r in types}
+    by_status, by_owner = {}, {}
+    for r in statuses:
         key = r["_id"] or "new"
         by_status[key] = by_status.get(key, 0) + r["count"]
-    by_owner = {}
-    async for r in db.submissions.aggregate([{"$group": {"_id": "$owner", "count": {"$sum": 1}}}]):
+    for r in owners:
         key = r["_id"] or "unassigned"
         by_owner[key] = by_owner.get(key, 0) + r["count"]
     return {"total": total, "last_7_days": last_7, "by_type": by_type, "by_status": by_status, "by_owner": by_owner, "chat_leads": chat_leads, "alerts_sent": alerts_sent}
