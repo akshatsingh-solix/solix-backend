@@ -19,6 +19,7 @@ from accounts import router as accounts_router
 from intent import router as intent_router, record_submission, rescore_all
 from leads_admin import router as leads_admin_router
 from content import public as content_router, admin as content_admin_router
+from events import public as events_router, admin as events_admin_router
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("solix")
@@ -26,7 +27,7 @@ logger = logging.getLogger("solix")
 app = FastAPI(title="Solix Technologies API")
 api_router = APIRouter(prefix="/api")
 
-SubmissionType = Literal["demo", "contact", "newsletter", "career", "partner", "download", "trial"]
+SubmissionType = Literal["demo", "contact", "newsletter", "career", "partner", "download", "trial", "event"]
 
 
 class SubmissionCreate(BaseModel):
@@ -93,6 +94,8 @@ app.include_router(intent_router)
 app.include_router(leads_admin_router)
 app.include_router(content_router)
 app.include_router(content_admin_router)
+app.include_router(events_router)
+app.include_router(events_admin_router)
 
 # Compress JSON/CSV responses; tiny responses aren't worth the CPU.
 app.add_middleware(GZipMiddleware, minimum_size=800)
@@ -130,6 +133,11 @@ async def on_startup():
     await db.content_versions.create_index([("content_id", 1), ("version", -1)])
     await db.files.create_index("id", unique=True)
     await db.files.create_index("sha256")
+    await db.event_configs.create_index("slug", unique=True)
+    await db.event_registrations.create_index("id", unique=True)
+    await db.event_registrations.create_index([("event", 1), ("code", 1)], unique=True)
+    await db.event_registrations.create_index([("event", 1), ("email", 1)])
+    await db.event_registrations.create_index([("event", 1), ("created_at", -1)])
     await seed_admin()
     asyncio.create_task(_rescore_loop())
 

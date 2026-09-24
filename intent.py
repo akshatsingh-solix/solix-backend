@@ -220,7 +220,7 @@ async def rollup_lead(lead_id: str, settings: Optional[dict] = None) -> Optional
 PROFILE_FIELDS = ("name", "company", "job_title", "phone", "country", "company_size")
 
 
-async def record_submission(sub: dict, *, visitor_id: Optional[str] = None, topics: Optional[list] = None, extra: Optional[dict] = None) -> Optional[dict]:
+async def record_submission(sub: dict, *, visitor_id: Optional[str] = None, topics: Optional[list] = None, extra: Optional[dict] = None, tags: Optional[list] = None) -> Optional[dict]:
     """Create/update the lead behind a form submission, sign-up or chat booking."""
     stype = sub.get("type")
     email = (sub.get("email") or "").strip().lower()
@@ -247,9 +247,13 @@ async def record_submission(sub: dict, *, visitor_id: Optional[str] = None, topi
     types = list(lead.get("submission_types") or [])
     if stype not in types:
         types.append(stype)
+    extra_tags = [str(t)[:40] for t in (tags or [])]
     tags = list(lead.get("tags") or [])
     if stype == "partner" and "partner" not in tags:
         tags.append("partner")
+    for t in extra_tags:
+        if t not in tags:
+            tags.append(t)
     visitor_ids = list(lead.get("visitor_ids") or [])
     first_touch = lead.get("first_touch")
     if visitor_id and 8 <= len(visitor_id) <= 64:
