@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
 
 from database import db, now_iso
-from auth import get_current_admin
+from auth import get_current_admin, require_roles
 from emailer import ALERT_TYPES, get_alert_recipient
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(get_current_admin)])
@@ -76,7 +76,7 @@ async def export_submissions(type: Optional[str] = None, q: Optional[str] = None
     return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="solix-leads-{stamp}.csv"'})
 
 
-@router.delete("/submissions/{submission_id}", status_code=204)
+@router.delete("/submissions/{submission_id}", status_code=204, dependencies=[Depends(require_roles("admin"))])
 async def delete_submission(submission_id: str):
     res = await db.submissions.delete_one({"id": submission_id})
     if res.deleted_count == 0:
@@ -90,7 +90,7 @@ class LeadUpdate(BaseModel):
     owner: Optional[str] = Field(default=None, max_length=200)
 
 
-@router.patch("/submissions/{submission_id}")
+@router.patch("/submissions/{submission_id}", dependencies=[Depends(require_roles("admin", "sales"))])
 async def update_submission(submission_id: str, body: LeadUpdate):
     changes = {k: v for k, v in body.model_dump().items() if v is not None}
     if "owner" in body.model_fields_set:
@@ -120,7 +120,7 @@ async def get_team():
     return {"members": (doc or {}).get("members", [])}
 
 
-@router.put("/team")
+@router.put("/team", dependencies=[Depends(require_roles("admin"))])
 async def put_team(body: Team):
     seen, members = set(), []
     for m in body.members:
@@ -141,7 +141,7 @@ async def get_settings():
     return {"alert_email": await get_alert_recipient(), "alert_types": sorted(ALERT_TYPES)}
 
 
-@router.put("/settings")
+@router.put("/settings", dependencies=[Depends(require_roles("admin"))])
 async def update_settings(body: AlertSettings):
     await db.settings.update_one({"key": "alerts"}, {"$set": {"alert_email": body.alert_email, "updated_at": now_iso()}}, upsert=True)
     return {"alert_email": await get_alert_recipient(), "alert_types": sorted(ALERT_TYPES)}

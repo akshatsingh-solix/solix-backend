@@ -20,3 +20,7 @@ services:
         value: https://akshatsingh-solix.github.io
       - key: OPENAI_API_KEY
         sync: false
+      # Optional: a GitHub token (repo scope, or fine-grained with Actions: write
+      # on the Website repo) lets publishing trigger an instant static rebuild.
+      - key: GITHUB_DEPLOY_TOKEN
+        sync: false
