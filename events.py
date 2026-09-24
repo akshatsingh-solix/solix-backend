@@ -82,14 +82,18 @@ DEFAULT_EVENTS = {
         ],
         "tickets": [
             {
-                "id": "full-pass", "name": "Full event pass", "active": True, "price": 0, "currency": "USD", "provider": "free",
+                "id": "full-pass", "name": "Full Event Pass", "active": True, "price": 29900, "currency": "USD", "provider": "eventbrite",
                 "description": "All three days, Oct 28-30: keynotes, panels, hands-on workshops, the hackathon finals, networking meals and evening receptions.",
-                "capacity": None, "eventbrite_event_id": None, "payment_link": None,
+                "capacity": None, "eventbrite_event_id": None, "payment_link": None, "sales_end_at": "2026-10-28T23:59:00-07:00",
             },
         ],
+        "refund_policy": "Refunds up to 7 days before the event. Eventbrite's fee is non-refundable.",
         "promo_codes": [],
+        "seed_version": 2,
     }
 }
+# Seed fields that a newer seed_version may update on events staff haven't edited yet.
+SEED_FIELDS = ("tickets", "refund_policy")
 
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 _hits: dict = defaultdict(deque)
@@ -117,6 +121,16 @@ def _new_code() -> str:
 
 async def get_event(slug: str) -> dict:
     doc = await db.event_configs.find_one({"slug": slug}, {"_id": 0})
+    seed = DEFAULT_EVENTS.get(slug)
+    if doc and seed and (doc.get("seed_version") or 1) < seed["seed_version"]:
+        # Bring an untouched seeded event up to date (e.g. the pass became paid);
+        # anything staff have saved from the admin is left alone.
+        patch = {"seed_version": seed["seed_version"], "updated_at": now_iso()}
+        if not doc.get("updated_by"):
+            patch.update({k: seed[k] for k in SEED_FIELDS})
+        await db.event_configs.update_one({"slug": slug}, {"$set": patch})
+        cache.bump("events")
+        doc = await db.event_configs.find_one({"slug": slug}, {"_id": 0})
     if doc:
         return doc
     if slug in DEFAULT_EVENTS:
@@ -130,6 +144,16 @@ def _price(ticket: dict, promo: Optional[dict]) -> dict:
     base = int(ticket.get("price") or 0)
     discount = round(base * (promo["percent_off"] / 100)) if promo else 0
     return {"price": base, "discount": discount, "total": max(0, base - discount), "currency": ticket.get("currency") or "USD"}
+
+
+def _sales_ended(ticket: dict) -> bool:
+    end = ticket.get("sales_end_at")
+    if not end:
+        return False
+    try:
+        return datetime.now(timezone.utc) > datetime.fromisoformat(end)
+    except ValueError:
+        return False
 
 
 def _find_promo(event: dict, code: Optional[str], ticket_id: str) -> Optional[dict]:
@@ -156,9 +180,10 @@ async def _counts(slug: str) -> Dict[str, int]:
 
 def _public_ticket(t: dict, sold: int, event: dict) -> dict:
     cap = t.get("capacity")
-    out = {k: t.get(k) for k in ("id", "name", "description", "price", "currency", "provider")}
+    out = {k: t.get(k) for k in ("id", "name", "description", "price", "currency", "provider", "sales_end_at")}
     out["seats_left"] = max(0, cap - sold) if cap else None
     out["sold_out"] = bool(cap and sold >= cap)
+    out["sales_ended"] = _sales_ended(t)
     if t.get("provider") == "eventbrite":
         out["eventbrite_event_id"] = t.get("eventbrite_event_id") or event.get("eventbrite_event_id")
     return out
@@ -174,7 +199,7 @@ async def public_event(slug: str, request: Request):
         cap = event.get("capacity")
         tickets = [_public_ticket(t, counts.get(t["id"], 0), event) for t in event.get("tickets") or [] if t.get("active")]
         return {
-            **{k: event.get(k) for k in ("slug", "name", "theme", "starts_at", "ends_at", "timezone", "venue", "address", "contact_email", "days")},
+            **{k: event.get(k) for k in ("slug", "name", "theme", "starts_at", "ends_at", "timezone", "venue", "address", "contact_email", "days", "refund_policy")},
             "registration_open": bool(event.get("registration_open")),
             "seats_left": max(0, cap - counts["_total"]) if cap else None,
             "waitlist": bool(cap and counts["_total"] >= cap),
@@ -200,6 +225,9 @@ async def quote(slug: str, body: QuoteIn, request: Request):
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
     promo = _find_promo(event, body.promo_code, ticket["id"])
+    if not promo and body.promo_code and ticket.get("provider") == "eventbrite":
+        # Eventbrite checks its own discount codes at checkout.
+        return {**_price(ticket, None), "promo_valid": None, "promo_message": "Your code will be applied at Eventbrite checkout."}
     return {**_price(ticket, promo), "promo_valid": bool(promo), "promo_message": (f"{promo['percent_off']}% off applied" if promo else ("That code isn't valid for this pass." if body.promo_code else None))}
 
 
@@ -226,6 +254,13 @@ class RegistrationIn(BaseModel):
     accept_terms: bool
     utm: Dict[str, str] = Field(default_factory=dict)
     visitor_id: Optional[str] = Field(default=None, max_length=64)
+
+
+def _eventbrite_code(ticket: dict, code: Optional[str]) -> Optional[str]:
+    """An unrecognised code on an Eventbrite pass is passed to Eventbrite's checkout, which validates it."""
+    if ticket.get("provider") == "eventbrite" and code and re.fullmatch(r"[A-Za-z0-9_-]{2,40}", code.strip()):
+        return code.strip().upper()
+    return None
 
 
 def _registration_view(r: dict) -> dict:
@@ -260,6 +295,8 @@ async def register(slug: str, body: RegistrationIn, request: Request):
     ticket = next((t for t in event.get("tickets") or [] if t["id"] == body.ticket_id and t.get("active")), None)
     if not ticket:
         raise HTTPException(status_code=422, detail="Please choose an available pass.")
+    if _sales_ended(ticket):
+        raise HTTPException(status_code=409, detail="Sales for this pass have ended.")
     email = body.email.lower()
     existing = await db.event_registrations.find_one({"event": slug, "email": email, "status": {"$ne": "cancelled"}}, {"_id": 0})
     if existing:
@@ -279,7 +316,7 @@ async def register(slug: str, body: RegistrationIn, request: Request):
         "days": [d for d in dict.fromkeys(body.days) if d in day_ids],
         "dinners": [d for d in dict.fromkeys(body.dinners) if d in day_ids],
         "hackathon": body.hackathon, "dietary": body.dietary, "accessibility": body.accessibility, "how_heard": body.how_heard,
-        "promo_code": promo["code"] if promo else None, "amount": price["total"], "list_price": price["price"], "discount": price["discount"],
+        "promo_code": promo["code"] if promo else _eventbrite_code(ticket, body.promo_code), "amount": price["total"], "list_price": price["price"], "discount": price["discount"],
         "currency": price["currency"], "billing_contact": body.billing_contact, "po_number": body.po_number,
         "marketing_opt_in": body.marketing_opt_in, "utm": {k: str(v)[:120] for k, v in list(body.utm.items())[:6]},
         "checked_in": False, "notes": "", "created_at": now_iso(), "updated_at": now_iso(),
@@ -398,6 +435,7 @@ class TicketIn(BaseModel):
     capacity: Optional[int] = Field(default=None, ge=1, le=100000)
     eventbrite_event_id: Optional[str] = Field(default=None, pattern=r"^\d{6,20}$")
     payment_link: Optional[str] = Field(default=None, max_length=300)
+    sales_end_at: Optional[str] = Field(default=None, max_length=40)
     active: bool = True
 
 
@@ -417,6 +455,7 @@ class EventSettingsIn(BaseModel):
     capacity: Optional[int] = Field(default=None, ge=1, le=100000)
     contact_email: Optional[EmailStr] = None
     eventbrite_event_id: Optional[str] = Field(default=None, pattern=r"^\d{6,20}$")
+    refund_policy: Optional[str] = Field(default=None, max_length=400)
     tickets: List[TicketIn] = Field(min_length=1, max_length=20)
     promo_codes: List[PromoIn] = Field(default_factory=list, max_length=100)
 
@@ -438,6 +477,11 @@ async def update_event(slug: str, body: EventSettingsIn, user: dict = Depends(ge
             raise HTTPException(status_code=422, detail=f"'{t['name']}' uses a Stripe Payment Link: paste the https:// link.")
         if t["provider"] == "eventbrite" and not (t.get("eventbrite_event_id") or data.get("eventbrite_event_id")):
             raise HTTPException(status_code=422, detail=f"'{t['name']}' uses Eventbrite: add the Eventbrite event ID.")
+        if t.get("sales_end_at"):
+            try:
+                datetime.fromisoformat(t["sales_end_at"])
+            except ValueError:
+                raise HTTPException(status_code=422, detail=f"'{t['name']}' sales end date must look like 2026-10-28T23:59:00-07:00.")
         if t["provider"] != "free" and t["price"] <= 0:
             raise HTTPException(status_code=422, detail=f"'{t['name']}' has a payment method but no price. Set a price or make it free.")
     codes = [p["code"].upper() for p in data["promo_codes"]]
