@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import List, Optional, Literal
 
-from fastapi import FastAPI, APIRouter, Query
+from fastapi import FastAPI, APIRouter, Query, Request
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -20,6 +20,9 @@ from intent import router as intent_router, record_submission, rescore_all
 from leads_admin import router as leads_admin_router
 from content import public as content_router, admin as content_admin_router
 from events import public as events_router, admin as events_admin_router
+from delivery import public as delivery_router, admin as delivery_admin_router, api_base, deliver_for_submission
+from migrate import router as migrate_router, resume_interrupted
+from site_settings import public as site_router, admin as site_admin_router
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("solix")
@@ -41,6 +44,8 @@ class SubmissionCreate(BaseModel):
     message: Optional[str] = None
     role: Optional[str] = None
     resource: Optional[str] = None
+    # Slug of the gated asset, so the download email can carry the right file.
+    resource_slug: Optional[str] = Field(default=None, max_length=120)
     source_page: Optional[str] = None
     country: Optional[str] = Field(default=None, max_length=80)
     company_size: Optional[str] = Field(default=None, max_length=40)
@@ -62,13 +67,14 @@ async def root():
 
 
 @api_router.post("/submissions", response_model=Submission, status_code=201)
-async def create_submission(payload: SubmissionCreate):
+async def create_submission(payload: SubmissionCreate, request: Request):
     doc = payload.model_dump(exclude={"visitor_id", "topics"})
     doc["id"] = str(uuid.uuid4())
     doc["created_at"] = now_iso()
     doc["source"] = "web"
     await db.submissions.insert_one(dict(doc))
     asyncio.create_task(notify_lead(doc))
+    asyncio.create_task(deliver_for_submission(doc, api_base(request)))
     try:
         await record_submission(doc, visitor_id=payload.visitor_id, topics=payload.topics)
     except Exception:  # scoring must never lose a lead
@@ -96,6 +102,11 @@ app.include_router(content_router)
 app.include_router(content_admin_router)
 app.include_router(events_router)
 app.include_router(events_admin_router)
+app.include_router(delivery_router)
+app.include_router(delivery_admin_router)
+app.include_router(migrate_router)
+app.include_router(site_router)
+app.include_router(site_admin_router)
 
 # Compress JSON/CSV responses; tiny responses aren't worth the CPU.
 app.add_middleware(GZipMiddleware, minimum_size=800)
@@ -138,7 +149,14 @@ async def on_startup():
     await db.event_registrations.create_index([("event", 1), ("code", 1)], unique=True)
     await db.event_registrations.create_index([("event", 1), ("email", 1)])
     await db.event_registrations.create_index([("event", 1), ("created_at", -1)])
+    await db.content.create_index("source_url", sparse=True)
+    await db.content.create_index("origin")
+    await db.deliveries.create_index("created_at")
+    await db.deliveries.create_index([("email", 1), ("slug", 1), ("created_at", -1)])
+    await db.migration_jobs.create_index("id", unique=True)
+    await db.migration_jobs.create_index("created_at")
     await seed_admin()
+    await resume_interrupted()
     asyncio.create_task(_rescore_loop())
 
 

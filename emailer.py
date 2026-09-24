@@ -91,15 +91,106 @@ def _assert_safe_email(subject: str, html: str) -> None:
                 raise ValueError(f"Anchor text {m.group(1)!r} != real link host {real!r} (G3)")
 
 
-async def send_email(*, to: str, subject: str, html: str, reply_to: str | None = None) -> str | None:
+# --- Transports ---------------------------------------------------------------
+# The first configured one is used: SMTP (any provider: Microsoft 365, Google
+# Workspace, SES, SendGrid, Mailgun...), then Resend's API, then the Emergent
+# platform. SMTP and Resend can carry attachments; Emergent sends links only.
+
+def _smtp_config() -> dict | None:
+    host = os.environ.get("SMTP_HOST")
+    if not host:
+        return None
+    return {
+        "host": host,
+        "port": int(os.environ.get("SMTP_PORT") or 587),
+        "user": os.environ.get("SMTP_USER") or None,
+        "password": os.environ.get("SMTP_PASSWORD") or None,
+        "from": os.environ.get("EMAIL_FROM") or os.environ.get("SMTP_USER"),
+        "ssl": (os.environ.get("SMTP_SSL") or "").lower() in ("1", "true", "yes") or os.environ.get("SMTP_PORT") == "465",
+    }
+
+
+def email_provider() -> str | None:
+    """Name of the transport that will send mail, or None if none is configured."""
+    if _smtp_config() and _smtp_config()["from"]:
+        return "smtp"
+    if os.environ.get("RESEND_API_KEY") and os.environ.get("EMAIL_FROM"):
+        return "resend"
+    if EMAIL_KEY:
+        return "emergent"
+    return None
+
+
+def supports_attachments() -> bool:
+    return email_provider() in ("smtp", "resend")
+
+
+def _from_header(addr: str) -> str:
+    from email.utils import formataddr
+    return formataddr((EMAIL_FROM_NAME, addr))
+
+
+def _send_smtp(cfg: dict, to: str, subject: str, html: str, reply_to: str | None, attachments: list[dict]) -> str:
+    import smtplib
+    import ssl
+    from email.message import EmailMessage
+    from email.utils import make_msgid
+
+    msg = EmailMessage()
+    msg["From"] = _from_header(cfg["from"])
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg["Message-ID"] = make_msgid(domain=cfg["from"].split("@")[-1])
+    if reply_to:
+        msg["Reply-To"] = reply_to
+    msg.set_content("This message is best viewed in an email app that shows HTML.")
+    msg.add_alternative(html, subtype="html")
+    for a in attachments:
+        maintype, _, subtype = (a.get("content_type") or "application/octet-stream").partition("/")
+        msg.add_attachment(a["data"], maintype=maintype, subtype=subtype or "octet-stream", filename=a["name"])
+    ctx = ssl.create_default_context()
+    if cfg["ssl"]:
+        server = smtplib.SMTP_SSL(cfg["host"], cfg["port"], context=ctx, timeout=30)
+    else:
+        server = smtplib.SMTP(cfg["host"], cfg["port"], timeout=30)
+        server.starttls(context=ctx)
+    with server:
+        if cfg["user"] and cfg["password"]:
+            server.login(cfg["user"], cfg["password"])
+        server.send_message(msg)
+    return msg["Message-ID"]
+
+
+async def send_email(*, to: str, subject: str, html: str, reply_to: str | None = None, attachments: list[dict] | None = None) -> str | None:
+    """Send one email. `attachments` items are {name, content_type, data: bytes};
+    they are dropped (links in the body still work) on transports without support."""
     _assert_safe_email(subject, html)
-    payload = {"to": [to], "subject": subject, "html": html, "from_name": EMAIL_FROM_NAME}
-    if reply_to or EMAIL_REPLY_TO:
-        payload["contact_email"] = reply_to or EMAIL_REPLY_TO
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(f"{EMAIL_BASE_URL}/api/v1/email/send", headers={"X-Email-Key": EMAIL_KEY}, json=payload)
-    resp.raise_for_status()
-    return resp.json().get("id")
+    reply_to = reply_to or EMAIL_REPLY_TO
+    provider = email_provider()
+    attachments = attachments or []
+    if provider == "smtp":
+        import asyncio
+        return await asyncio.to_thread(_send_smtp, _smtp_config(), to, subject, html, reply_to, attachments)
+    if provider == "resend":
+        import base64
+        payload = {"from": _from_header(os.environ["EMAIL_FROM"]), "to": [to], "subject": subject, "html": html}
+        if reply_to:
+            payload["reply_to"] = reply_to
+        if attachments:
+            payload["attachments"] = [{"filename": a["name"], "content": base64.b64encode(a["data"]).decode()} for a in attachments]
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post("https://api.resend.com/emails", headers={"Authorization": f"Bearer {os.environ['RESEND_API_KEY']}"}, json=payload)
+        resp.raise_for_status()
+        return resp.json().get("id")
+    if provider == "emergent":
+        payload = {"to": [to], "subject": subject, "html": html, "from_name": EMAIL_FROM_NAME}
+        if reply_to:
+            payload["contact_email"] = reply_to
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(f"{EMAIL_BASE_URL}/api/v1/email/send", headers={"X-Email-Key": EMAIL_KEY}, json=payload)
+        resp.raise_for_status()
+        return resp.json().get("id")
+    raise RuntimeError("No email transport configured (set SMTP_*, RESEND_API_KEY or EMERGENT_EMAIL_KEY)")
 
 
 TYPE_LABELS = {
@@ -168,7 +259,7 @@ async def notify_lead(sub: dict) -> None:
         "created_at": now_iso(),
     }
     recipient = await get_alert_recipient()
-    if not EMAIL_KEY or not recipient:
+    if not email_provider() or not recipient:
         record.update(status="skipped", detail="Email key or recipient not configured")
         await db.notifications.insert_one(dict(record))
         logger.warning("lead alert skipped: %s", record["detail"])

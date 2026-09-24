@@ -37,7 +37,7 @@ from pydantic import BaseModel, EmailStr, Field
 import cache
 from auth import get_current_admin, require_roles
 from database import db, now_iso
-from emailer import EMAIL_KEY, notify_lead, send_email
+from emailer import email_provider, notify_lead, send_email
 from intent import record_submission
 
 logger = logging.getLogger("solix.events")
@@ -387,7 +387,7 @@ async def report_payment(slug: str, code: str, body: PaymentReport):
 
 
 async def _send_confirmation(event: dict, reg: dict) -> None:
-    if not EMAIL_KEY:
+    if not email_provider():
         return
     status_line = {
         "confirmed": "Your place is confirmed.",
