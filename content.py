@@ -38,7 +38,10 @@ public = APIRouter(prefix="/api", tags=["content"])
 admin = APIRouter(prefix="/api/admin", tags=["content-admin"], dependencies=[Depends(get_current_admin)])
 can_edit = Depends(require_roles("admin", "editor"))
 
-CONTENT_TYPES = ("blog", "whitepaper", "datasheet", "casestudy", "ebook", "webinar", "podcast", "leadership", "event", "brief", "collateral")
+CONTENT_TYPES = ("blog", "whitepaper", "datasheet", "casestudy", "ebook", "webinar", "podcast", "leadership", "event", "brief", "collateral", "news")
+# Where an item came from: written in the CMS, one of the site's built-in
+# (original) items taken over by the CMS, or migrated from another website.
+ORIGINS = ("cms", "builtin", "import")
 Status = Literal["draft", "scheduled", "published", "archived"]
 SLUG_RX = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 MAX_FILE = 10 * 1024 * 1024
@@ -72,6 +75,7 @@ class ContentIn(BaseModel):
     video_url: Optional[str] = Field(default=None, max_length=500)
     seo_title: Optional[str] = Field(default=None, max_length=120)
     seo_description: Optional[str] = Field(default=None, max_length=300)
+    source_url: Optional[str] = Field(default=None, max_length=1000)
 
 
 class PublishIn(BaseModel):
@@ -109,7 +113,7 @@ async def _public_view(doc: dict, full: bool) -> dict:
     out = {k: doc.get(k) for k in (
         "id", "slug", "type", "title", "summary", "tag", "products", "industries", "author", "author_role",
         "cover_image", "gated", "event_date", "video_url", "seo_title", "seo_description", "read_minutes",
-        "published_at", "publish_at", "updated_at",
+        "published_at", "publish_at", "updated_at", "origin",
     )}
     out["date"] = (doc.get("publish_at") or doc.get("published_at") or "")[:10]
     if full:
@@ -121,6 +125,16 @@ async def _public_view(doc: dict, full: bool) -> dict:
             if not doc.get("gated"):
                 out["file"]["url"] = file_url(f)
     return out
+
+
+async def withdrawn_builtins() -> list:
+    """Slugs of the site's built-in items that editors took over and then
+    unpublished or archived: the site hides its built-in copy of these."""
+    async def produce():
+        now = now_iso()
+        docs = await db.content.find({"origin": "builtin"}, {"_id": 0, "slug": 1, "status": 1, "publish_at": 1}).to_list(5000)
+        return sorted(d["slug"] for d in docs if not _is_live(d, now))
+    return await cache.memo("content", "withdrawn", 30, produce)
 
 
 async def published(full: bool) -> list:
@@ -141,7 +155,7 @@ async def list_content(request: Request, type: Optional[str] = None, product: Op
         items = [i for i in items if i["type"] == type]
     if product:
         items = [i for i in items if product in (i.get("products") or [])]
-    return cache.cached_json(request, {"items": items[:limit]}, max_age=60, swr=86400)
+    return cache.cached_json(request, {"items": items[:limit], "withdrawn": await withdrawn_builtins()}, max_age=60, swr=86400)
 
 
 @public.get("/content/{slug}")
@@ -233,6 +247,7 @@ async def _validate(body: ContentIn, current_id: Optional[str] = None) -> dict:
         url = data.get(key)
         if url and not (url.startswith("https://") or url.startswith("/")):
             raise HTTPException(status_code=422, detail=f"{key.replace('_', ' ').capitalize()} must be an https:// link or a site path.")
+    data["source_url"] = (data.get("source_url") or "").strip() or None
     data["read_minutes"] = read_minutes(data["body"])
     return data
 
@@ -242,8 +257,12 @@ async def _snapshot(doc: dict, user: dict) -> None:
 
 
 @admin.get("/content")
-async def admin_list(status: Optional[str] = None, type: Optional[str] = None, q: Optional[str] = None, page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100)):
+async def admin_list(status: Optional[str] = None, type: Optional[str] = None, origin: Optional[str] = None, q: Optional[str] = None, page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100)):
     query: dict = {}
+    if origin and origin != "all":
+        query["origin"] = "cms" if origin == "cms" else origin
+        if origin == "cms":
+            query["origin"] = {"$nin": ["builtin", "import"]}
     if status and status != "all":
         query["status"] = status
     else:
@@ -262,17 +281,109 @@ async def admin_list(status: Optional[str] = None, type: Optional[str] = None, q
         it["views_30d"] = await db.events.count_documents({"type": "resource_view", "path": path, "at": {"$gte": since}})
         it["downloads_30d"] = await db.events.count_documents({"type": "resource_download", "path": path, "at": {"$gte": since}})
         it["live"] = _is_live(it)
-    return {"items": items, "total": total, "page": page, "page_size": page_size, "types": CONTENT_TYPES}
+    counts = {o: await db.content.count_documents({"origin": o, "status": {"$ne": "archived"}}) for o in ("builtin", "import")}
+    return {"items": items, "total": total, "page": page, "page_size": page_size, "types": CONTENT_TYPES, "origin_counts": counts}
 
 
 @admin.post("/content", status_code=201, dependencies=[can_edit])
 async def admin_create(body: ContentIn, user: dict = Depends(get_current_admin)):
     data = await _validate(body)
     now = now_iso()
-    doc = {**data, "id": str(uuid.uuid4()), "status": "draft", "version": 1, "created_at": now, "updated_at": now, "created_by": user["email"], "updated_by": user["email"], "publish_at": None, "published_at": None}
+    doc = {**data, "id": str(uuid.uuid4()), "status": "draft", "origin": "cms", "version": 1, "created_at": now, "updated_at": now, "created_by": user["email"], "updated_by": user["email"], "publish_at": None, "published_at": None}
     await db.content.insert_one(dict(doc))
     doc.pop("_id", None)
     return doc
+
+
+def _to_utc(value: Optional[str]) -> Optional[str]:
+    """Normalise a date or datetime string to a UTC ISO timestamp (None if unparseable)."""
+    if not value:
+        return None
+    try:
+        v = value.strip().replace("Z", "+00:00")
+        dt = datetime.fromisoformat(v if "T" in v or " " in v else f"{v}T09:00:00+00:00")
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    except ValueError:
+        return None
+
+
+async def upsert_imported(data: dict, *, origin: str, status: str, date: Optional[str], by: str, on_conflict: str = "skip") -> tuple[str, dict]:
+    """Create (or update) an item that came from outside the editor: the site's
+    built-in content or a website migration. Keeps the original publish date so
+    history lands in the right place in the content stream.
+
+    Returns (outcome, doc) with outcome "created", "updated" or "skipped"."""
+    try:
+        body = ContentIn(**{k: data.get(k) for k in ContentIn.model_fields if data.get(k) is not None})
+    except Exception as exc:  # pydantic validation
+        raise ValueError(str(exc).splitlines()[0][:200])
+    clean = body.model_dump()
+    clean["slug"] = slugify(clean["slug"] or clean["title"])
+    clean["products"] = [p for p in dict.fromkeys(clean["products"]) if p in scoring.PRODUCTS]
+    clean["industries"] = [i for i in dict.fromkeys(clean["industries"]) if i in scoring.INDUSTRIES]
+    clean["read_minutes"] = read_minutes(clean["body"])
+    for key in ("cover_image", "video_url"):
+        if clean.get(key) and not (clean[key].startswith("https://") or clean[key].startswith("/")):
+            clean[key] = None
+    if clean.get("file_id") and not await db.files.find_one({"id": clean["file_id"]}, {"_id": 1}):
+        clean["file_id"] = None
+    now = now_iso()
+    original = _to_utc(date) or now
+    # Imported content is already public on its old site: an upcoming event's
+    # date must not hold it back as "scheduled".
+    when = min(original, now)
+    existing = None
+    if clean.get("source_url"):
+        existing = await db.content.find_one({"source_url": clean["source_url"]}, {"_id": 0})
+    existing = existing or await db.content.find_one({"slug": clean["slug"]}, {"_id": 0})
+    if existing:
+        if on_conflict != "update":
+            return "skipped", existing
+        await _snapshot(existing, {"email": by})
+        update = {**clean, "slug": existing["slug"], "version": existing.get("version", 1) + 1, "updated_at": now, "updated_by": by}
+        await db.content.update_one({"id": existing["id"]}, {"$set": update})
+        cache.bump("content")
+        return "updated", {**existing, **update}
+    live = status == "published"
+    doc = {
+        **clean, "id": str(uuid.uuid4()), "origin": origin, "status": "published" if live else "draft",
+        "version": 1, "created_at": now, "updated_at": now, "created_by": by, "updated_by": by,
+        "publish_at": when if live else None, "published_at": when if live else None, "original_date": original,
+    }
+    await db.content.insert_one(dict(doc))
+    doc.pop("_id", None)
+    cache.bump("content")
+    return "created", doc
+
+
+class BuiltinItem(ContentIn):
+    date: Optional[str] = Field(default=None, max_length=40)
+
+
+class BuiltinImport(BaseModel):
+    items: List[BuiltinItem] = Field(min_length=1, max_length=500)
+    on_conflict: Literal["skip", "update"] = "skip"
+
+
+@admin.post("/content/import-builtin", dependencies=[can_edit])
+async def import_builtin(body: BuiltinImport, user: dict = Depends(get_current_admin)):
+    """Take the website's built-in (original) articles, resources and press
+    releases under CMS management. They stay published with their original
+    dates; from then on editors can change, unpublish or archive them, and the
+    site shows the CMS version (or hides the built-in one)."""
+    result = {"created": 0, "updated": 0, "skipped": 0, "failed": []}
+    for item in body.items:
+        data = item.model_dump()
+        try:
+            outcome, _ = await upsert_imported(data, origin="builtin", status="published", date=data.pop("date"), by=user["email"], on_conflict=body.on_conflict)
+            result[outcome] += 1
+        except ValueError as exc:
+            result["failed"].append({"slug": item.slug or item.title, "error": str(exc)})
+    if result["created"] or result["updated"]:
+        _changed("imported built-in content")
+    return result
 
 
 @admin.get("/content/{content_id}")
@@ -385,26 +496,34 @@ def sniff(data: bytes, name: str) -> tuple[str, str]:
     raise HTTPException(status_code=415, detail="Upload a PDF, PNG, JPEG, WebP, GIF, PPTX, DOCX or XLSX file.")
 
 
-@admin.post("/files", status_code=201, dependencies=[can_edit])
-async def upload_file(file: UploadFile = File(...), user: dict = Depends(get_current_admin)):
-    data = await file.read(MAX_FILE + 1)
+async def store_file(data: bytes, raw_name: str, by: str) -> dict:
+    """Validate and store a file (deduplicated by content); returns its record without the bytes."""
     if len(data) > MAX_FILE:
         raise HTTPException(status_code=413, detail="Files must be 10 MB or smaller.")
     if not data:
         raise HTTPException(status_code=422, detail="The file is empty.")
-    raw_name = os.path.basename(file.filename or "file")
+    raw_name = os.path.basename(raw_name or "file")
     ctype, kind = sniff(data, raw_name)
     stem, ext = os.path.splitext(raw_name)
+    if not ext:
+        ext = {"application/pdf": ".pdf", "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}.get(ctype, "")
     name = (slugify(stem) or "file") + ext.lower()
     sha = hashlib.sha256(data).hexdigest()
     existing = await db.files.find_one({"sha256": sha}, {"_id": 0, "data": 0})
     if existing:
-        return {**existing, "url": file_url(existing, _signed(existing["id"]) if existing["kind"] != "image" else None), "public_url": file_url(existing)}
-    doc = {"id": uuid.uuid4().hex, "name": name, "content_type": ctype, "kind": kind, "size": len(data), "sha256": sha, "data": Binary(data), "created_at": now_iso(), "created_by": user["email"]}
+        return existing
+    doc = {"id": uuid.uuid4().hex, "name": name, "content_type": ctype, "kind": kind, "size": len(data), "sha256": sha, "data": Binary(data), "created_at": now_iso(), "created_by": by}
     await db.files.insert_one(dict(doc))
     doc.pop("data")
     doc.pop("_id", None)
-    return {**doc, "url": file_url(doc, _signed(doc["id"]) if kind != "image" else None), "public_url": file_url(doc)}
+    return doc
+
+
+@admin.post("/files", status_code=201, dependencies=[can_edit])
+async def upload_file(file: UploadFile = File(...), user: dict = Depends(get_current_admin)):
+    data = await file.read(MAX_FILE + 1)
+    doc = await store_file(data, file.filename or "file", user["email"])
+    return {**doc, "url": file_url(doc, _signed(doc["id"]) if doc["kind"] != "image" else None), "public_url": file_url(doc)}
 
 
 @admin.get("/files")

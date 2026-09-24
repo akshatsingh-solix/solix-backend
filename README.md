@@ -68,3 +68,29 @@ cp .env.example .env   # fill in MONGO_URL, JWT_SECRET, ADMIN_EMAIL, ADMIN_PASSW
 pip install -r requirements.txt
 uvicorn server:app --reload
 ```
+
+## Content management, migration and gated asset emails
+
+- **Built-in content**: Admin > Content > "Manage built-in content" takes the
+  website's original articles, resources and press releases under CMS
+  management (`POST /api/admin/content/import-builtin`). They keep their
+  original dates; editing one replaces the built-in copy on the site, and
+  unpublishing or archiving it hides it (`/api/content` lists these slugs as
+  `withdrawn`).
+- **Website migration** (`migrate.py`, Admin > Migrate): imports from a
+  WordPress site (REST API), a sitemap, an RSS/Atom feed, a list of URLs or a
+  CSV/JSON export. Preview first, then run as a background job with progress,
+  a log and cancel. Original publish dates and source URLs are kept, types are
+  detected from URLs and categories, and images and linked PDFs can be copied
+  into the file store. `GET /api/admin/migrations/redirects?format=csv|nginx|apache`
+  gives the 301 map for the old web server. Only public http(s) addresses are
+  fetched.
+- **Gated asset emails** (`delivery.py`): every download-form submission with a
+  `resource_slug` emails the visitor a signed download link (and the file as
+  an attachment when the transport allows and it is small enough). Built-in
+  articles get a link that reopens the full article. Settings, a delivery log,
+  resend and a test send live in Admin > Settings. Needs an email transport
+  (SMTP, Resend or Emergent) plus `PUBLIC_API_URL` and `SITE_URL`; see
+  `.env.example`.
+- **Site settings** (`site_settings.py`): the announcement bar and the
+  SOLIXEmpower promo, editable in Admin > Website (`GET /api/site`).

@@ -146,6 +146,8 @@ async def get_lead(lead_id: str):
     timeline = [{"kind": "form", "at": s["created_at"], "type": s["type"], "detail": s.get("interest") or s.get("resource") or s.get("message"), "source_page": s.get("source_page")} for s in subs]
     timeline += [{"kind": "event", "at": e["at"], "type": e["type"], "path": e.get("path"), "topics": e.get("topics"), "points": e.get("points"), "meta": e.get("meta")} for e in events]
     timeline += [{"kind": "stage", "at": h["at"], "type": h["stage"], "detail": h.get("reason"), "by": h.get("by")} for h in lead.get("stage_history") or []]
+    deliveries = await db.deliveries.find({"email": lead["email"], "status": {"$in": ["sent", "failed"]}}, {"_id": 0}).sort("created_at", -1).to_list(50)
+    timeline += [{"kind": "email", "at": d["created_at"], "type": f"asset_{d['status']}", "detail": d.get("title"), "meta": {"attached": d.get("attached"), "reason": d.get("detail")}} for d in deliveries]
     timeline.sort(key=lambda x: x["at"], reverse=True)
     products = sorted(((p, v) for p, v in (lead.get("product_scores") or {}).items()), key=lambda x: -x[1])
     return {

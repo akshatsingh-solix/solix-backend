@@ -24,3 +24,22 @@ services:
       # on the Website repo) lets publishing trigger an instant static rebuild.
       - key: GITHUB_DEPLOY_TOKEN
         sync: false
+      # Public addresses put into emails (download links, "read the full article").
+      - key: PUBLIC_API_URL
+        value: https://solix-backend.onrender.com
+      - key: SITE_URL
+        value: https://akshatsingh-solix.github.io/Website
+      # Email transport for lead alerts and gated asset emails: set the SMTP_*
+      # values (any provider) or RESEND_API_KEY, plus EMAIL_FROM.
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
