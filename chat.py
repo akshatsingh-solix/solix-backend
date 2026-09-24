@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from database import db, now_iso
 from knowledge import CONCIERGE_SYSTEM_PROMPT
 from emailer import notify_lead
+from intent import record_submission
 
 logger = logging.getLogger("solix.chat")
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -102,6 +103,10 @@ async def create_demo_request(session_id: str, args: dict) -> dict:
     }
     await db.submissions.insert_one(dict(doc))
     asyncio.create_task(notify_lead(doc))
+    try:
+        await record_submission(doc)
+    except Exception:
+        logger.exception("lead scoring failed for chat booking %s", doc["id"])
     logger.info("chat demo request saved %s", doc["id"])
     return {"ok": True, "submission_id": doc["id"], "message": "Demo request saved. A Solix expert will reach out within one business day."}
 

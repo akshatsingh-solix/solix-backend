@@ -18,6 +18,10 @@ ACCESS_TTL = timedelta(hours=12)
 MAX_ATTEMPTS = 5
 LOCKOUT = timedelta(minutes=15)
 
+# Staff roles. admin: everything; sales: work leads; editor: publish content;
+# viewer: read-only leads and reports (leadership).
+ROLES = ("admin", "sales", "editor", "viewer")
+
 
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
@@ -57,10 +61,19 @@ async def get_current_admin(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="Invalid token")
     if payload.get("type") != "access":
         raise HTTPException(status_code=401, detail="Invalid token type")
-    user = await db.users.find_one({"id": payload["sub"], "role": "admin"}, {"_id": 0, "password_hash": 0})
-    if not user:
+    user = await db.users.find_one({"id": payload["sub"], "role": {"$in": list(ROLES)}}, {"_id": 0, "password_hash": 0})
+    if not user or user.get("disabled"):
         raise HTTPException(status_code=401, detail="User not found")
     return user
+
+
+def require_roles(*roles: str):
+    """Dependency: the signed-in staff user must hold one of `roles`."""
+    async def check(user: dict = Depends(get_current_admin)) -> dict:
+        if user.get("role") not in roles:
+            raise HTTPException(status_code=403, detail="You don't have permission to do this")
+        return user
+    return check
 
 
 class LoginRequest(BaseModel):
@@ -97,8 +110,8 @@ async def login(body: LoginRequest, request: Request):
             raise HTTPException(status_code=429, detail="Too many failed attempts. Try again in 15 minutes.")
         await db.login_attempts.delete_one({"identifier": identifier})
 
-    user = await db.users.find_one({"email": email, "role": "admin"})
-    if not user or not verify_password(body.password, user["password_hash"]):
+    user = await db.users.find_one({"email": email, "role": {"$in": list(ROLES)}})
+    if not user or user.get("disabled") or not verify_password(body.password, user["password_hash"]):
         await db.login_attempts.update_one({"identifier": identifier}, {"$inc": {"count": 1}, "$set": {"last_attempt": now.isoformat()}}, upsert=True)
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
@@ -109,3 +122,19 @@ async def login(body: LoginRequest, request: Request):
 @router.get("/me", response_model=AdminUser)
 async def me(user: dict = Depends(get_current_admin)):
     return AdminUser(**user)
+
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@router.post("/password", status_code=204)
+async def change_password(body: PasswordChange, user: dict = Depends(get_current_admin)):
+    full = await db.users.find_one({"id": user["id"]})
+    if not full or not verify_password(body.current_password, full["password_hash"]):
+        raise HTTPException(status_code=400, detail="Your current password is incorrect")
+    pw = body.new_password
+    if len(pw) < 10 or not any(c.isalpha() for c in pw) or not any(c.isdigit() for c in pw):
+        raise HTTPException(status_code=422, detail="Use at least 10 characters with letters and numbers")
+    await db.users.update_one({"id": user["id"]}, {"$set": {"password_hash": hash_password(pw), "password_changed_at": now_iso()}})

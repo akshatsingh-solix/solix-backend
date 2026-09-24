@@ -20,6 +20,25 @@ Everything else — lead capture forms, the admin dashboard (`/admin`, login
 `ADMIN_EMAIL`/`ADMIN_PASSWORD`), newsroom, press-release PDF downloads — works
 fully with just MongoDB configured.
 
+## Lead intelligence, content publishing and caching
+
+- **Intent scoring**: consent-gated behaviour tracking (`POST /api/track`)
+  scores each product; every form, trial sign-up and chat booking becomes one
+  lead per email, tagged to the product line with the most intent and
+  promoted to MQL on a hand-raise or score threshold. Model and tuning:
+  [`docs/lead-intent-methodology.md`](docs/lead-intent-methodology.md).
+- **Admin** (`/admin`): leadership dashboard, filterable leads with saved
+  views, bulk updates, CSV/Excel export, lead timelines, and staff roles
+  (admin, sales, content editor, read-only leadership).
+- **Content publishing**: blogs, white papers, datasheets, case studies,
+  webinars and marketing material with drafts, scheduling, versions, file
+  uploads (stored in MongoDB) and gated downloads. Published items reach the
+  site within about a minute. Optional `GITHUB_DEPLOY_TOKEN` also triggers a
+  static rebuild so the content is baked into the site's pages.
+- **Caching**: gzip, ETag/304 and `Cache-Control` on public content, a short
+  in-process cache for published content and reports, and a 180-day TTL on
+  raw events.
+
 ## Deploy (Render, free tier)
 
 1. **Database**: create a free cluster at https://www.mongodb.com/cloud/atlas,

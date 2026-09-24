@@ -19,6 +19,7 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 from auth import hash_password, verify_password, JWT_ALGORITHM, MAX_ATTEMPTS, LOCKOUT, _client_ip
 from database import db, now_iso
 from emailer import notify_lead
+from intent import record_submission
 
 logger = logging.getLogger("solix.accounts")
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
@@ -45,6 +46,8 @@ class SignupRequest(BaseModel):
     use_case: Optional[str] = Field(default=None, max_length=160)
     marketing_opt_in: bool = False
     language: str = "en"
+    # Links the sign-up to tracked browsing (only sent after analytics consent).
+    visitor_id: Optional[str] = Field(default=None, max_length=64)
 
     @field_validator("first_name", "last_name", "company")
     @classmethod
@@ -133,7 +136,7 @@ async def signup(body: SignupRequest):
         raise HTTPException(status_code=409, detail="An account with this email already exists. Sign in instead.")
 
     now = datetime.now(timezone.utc)
-    doc = body.model_dump(exclude={"password"})
+    doc = body.model_dump(exclude={"password", "visitor_id"})
     doc.update(
         id=str(uuid.uuid4()),
         email=email,
@@ -163,6 +166,10 @@ async def signup(body: SignupRequest):
     }
     await db.submissions.insert_one(dict(lead))
     asyncio.create_task(notify_lead(lead))
+    try:
+        await record_submission(lead, visitor_id=body.visitor_id, topics=["enterprise-content-services"], extra={"country": doc.get("country"), "company_size": doc.get("company_size"), "language": doc.get("language")})
+    except Exception:
+        logger.exception("lead scoring failed for trial sign-up %s", doc["id"])
     logger.info("trial account created %s", doc["id"])
     return AuthResponse(access_token=_token(doc["id"], email), account=_public(doc))
 
