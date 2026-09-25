@@ -23,6 +23,7 @@ from events import public as events_router, admin as events_admin_router
 from delivery import public as delivery_router, admin as delivery_admin_router, api_base, deliver_for_submission
 from migrate import router as migrate_router, resume_interrupted
 from site_settings import public as site_router, admin as site_admin_router
+from seo import router as seo_router
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("solix")
@@ -107,6 +108,7 @@ app.include_router(delivery_admin_router)
 app.include_router(migrate_router)
 app.include_router(site_router)
 app.include_router(site_admin_router)
+app.include_router(seo_router)
 
 # Compress JSON/CSV responses; tiny responses aren't worth the CPU.
 app.add_middleware(GZipMiddleware, minimum_size=800)
@@ -159,6 +161,9 @@ async def on_startup():
         db.deliveries.create_index([("email", 1), ("slug", 1), ("created_at", -1)]),
         db.migration_jobs.create_index("id", unique=True),
         db.migration_jobs.create_index("created_at"),
+        db.seo_snapshots.create_index("geo", unique=True),
+        db.seo_cache.create_index([("kind", 1), ("key", 1)], unique=True),
+        db.seo_ai_runs.create_index("ran_at"),
     )
     await seed_admin()
     await resume_interrupted()

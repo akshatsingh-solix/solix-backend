@@ -19,16 +19,40 @@ logger = logging.getLogger("solix.chat")
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 try:
+    import openai
     from openai import AsyncOpenAI
 except ImportError:
-    AsyncOpenAI = None
+    openai = AsyncOpenAI = None
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+# OpenRouter speaks the same API and offers free models. When its key is set
+# it wins, and CHAT_MODELS is tried in order: if a model is busy, rate
+# limited or down before it has said anything, the next one answers.
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+DEFAULT_FREE_CHAT_MODELS = "google/gemma-4-31b-it:free,thinkingmachines/inkling-small:free,nvidia/nemotron-3.5-lightning:free,openrouter/free"
+
+
+def _chat_setup():
+    if AsyncOpenAI is None:
+        return None, []
+    if OPENROUTER_API_KEY:
+        client = AsyncOpenAI(
+            api_key=OPENROUTER_API_KEY,
+            base_url="https://openrouter.ai/api/v1",
+            default_headers={"HTTP-Referer": os.environ.get("SITE_URL", "https://akshatsingh-solix.github.io/Website"), "X-Title": "Solix website concierge"},
+        )
+        models = [m.strip() for m in os.environ.get("CHAT_MODELS", DEFAULT_FREE_CHAT_MODELS).split(",") if m.strip()]
+        return client, models
+    if OPENAI_API_KEY:
+        return AsyncOpenAI(api_key=OPENAI_API_KEY), [OPENAI_MODEL]
+    return None, []
+
+
 # None when the openai package isn't installed or no key is set - the
 # concierge endpoint degrades to a clean 503 rather than the whole API
 # failing to start.
-_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if (AsyncOpenAI is not None and OPENAI_API_KEY) else None
+_client, CHAT_MODELS = _chat_setup()
 
 HISTORY_LIMIT = 24
 MAX_TOOL_ROUNDS = 3
@@ -140,35 +164,47 @@ async def chat_stream(req: ChatRequest):
         full = ""
         try:
             for _ in range(MAX_TOOL_ROUNDS):
-                stream = await _client.chat.completions.create(
-                    model=OPENAI_MODEL,
-                    messages=messages,
-                    tools=[DEMO_TOOL],
-                    tool_choice="auto",
-                    stream=True,
-                )
-
                 text_chunk = ""
                 tool_calls: dict[int, dict] = {}
                 finish_reason = None
 
-                async for event in stream:
-                    choice = event.choices[0]
-                    delta = choice.delta
-                    if delta.content:
-                        text_chunk += delta.content
-                        yield sse({"delta": delta.content})
-                    if delta.tool_calls:
-                        for tc_delta in delta.tool_calls:
-                            slot = tool_calls.setdefault(tc_delta.index, {"id": None, "name": None, "arguments": ""})
-                            if tc_delta.id:
-                                slot["id"] = tc_delta.id
-                            if tc_delta.function and tc_delta.function.name:
-                                slot["name"] = tc_delta.function.name
-                            if tc_delta.function and tc_delta.function.arguments:
-                                slot["arguments"] += tc_delta.function.arguments
-                    if choice.finish_reason:
-                        finish_reason = choice.finish_reason
+                for i, model in enumerate(CHAT_MODELS):
+                    try:
+                        stream = await _client.chat.completions.create(
+                            model=model,
+                            messages=messages,
+                            tools=[DEMO_TOOL],
+                            tool_choice="auto",
+                            stream=True,
+                        )
+                        async for event in stream:
+                            if not event.choices:
+                                continue
+                            choice = event.choices[0]
+                            delta = choice.delta
+                            if delta.content:
+                                text_chunk += delta.content
+                                yield sse({"delta": delta.content})
+                            if delta.tool_calls:
+                                for tc_delta in delta.tool_calls:
+                                    slot = tool_calls.setdefault(tc_delta.index, {"id": None, "name": None, "arguments": ""})
+                                    if tc_delta.id:
+                                        slot["id"] = tc_delta.id
+                                    if tc_delta.function and tc_delta.function.name:
+                                        slot["name"] = tc_delta.function.name
+                                    if tc_delta.function and tc_delta.function.arguments:
+                                        slot["arguments"] += tc_delta.function.arguments
+                            if choice.finish_reason:
+                                finish_reason = choice.finish_reason
+                        if text_chunk or tool_calls or i == len(CHAT_MODELS) - 1:
+                            break
+                        logger.warning("chat model %s returned an empty reply; trying %s", model, CHAT_MODELS[i + 1])
+                    except openai.APIError as e:
+                        # Fall through to the next model only if this one hasn't
+                        # started answering; a half-sent reply can't be retried.
+                        if text_chunk or tool_calls or i == len(CHAT_MODELS) - 1:
+                            raise
+                        logger.warning("chat model %s unavailable (%s); trying %s", model, getattr(e, "status_code", type(e).__name__), CHAT_MODELS[i + 1])
 
                 full += text_chunk
 
