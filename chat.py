@@ -27,8 +27,13 @@ HISTORY_CHARS = 1500
 # Everything sent per request (instructions, tools, site knowledge, history) is
 # kept under this many tokens, so one message fits well inside free tiers'
 # per-minute caps (Groq: 8K tokens/min) and each day's quota stretches further.
-INPUT_TOKEN_BUDGET = int(os.environ.get("SOL_INPUT_TOKEN_BUDGET", "4500"))
-MAX_OUTPUT_TOKENS = int(os.environ.get("SOL_MAX_OUTPUT_TOKENS", "700"))
+INPUT_TOKEN_BUDGET = int(os.environ.get("SOL_INPUT_TOKEN_BUDGET", "5000"))
+MAX_OUTPUT_TOKENS = int(os.environ.get("SOL_MAX_OUTPUT_TOKENS", "900"))
+# Higher is more conversational and varied; lower is more literal.
+TEMPERATURE = float(os.environ.get("SOL_TEMPERATURE", "0.6"))
+# "How is it better", "vs Informatica", "why choose you": always bring the differentiators.
+COMPARISON_RX = re.compile(r"\b(better|best|vs\.?|versus|compare[sd]?|comparison|competitor|competition|alternative|differen\w*|unique|stand out|why (choose|solix|you|pick|should))\b", re.I)
+DIFFERENTIATOR_IDS = ("platform:why-solix", "platform:it-leaders")
 CONTEXT_CHARS = 4000
 MAX_TOOL_ROUNDS = 4
 EMAIL_RX = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -206,6 +211,8 @@ def _retrieve(message: str, history: List[dict], page: Optional[str]) -> List[di
         hits += sol_search.search(f"{last_user} {message}", 4)
     if page and page not in ("/", ""):
         hits = [c for c in sol_search.index().chunks if c["url"] == page.split("?")[0]][:2] + hits
+    if COMPARISON_RX.search(message):
+        hits = [c for c in sol_search.index().chunks if c["id"] in DIFFERENTIATOR_IDS] + hits
     seen, per_url, out = set(), defaultdict(int), []
     for h in hits:
         if h["id"] in seen or per_url[h["url"]] >= 3:
@@ -264,7 +271,7 @@ async def chat_stream(req: ChatRequest, request: Request):
     visitor = f"The visitor is on page {req.page}" + (f' ("{req.page_title}")' if req.page_title else "") + "." if req.page else "Page unknown."
     turn_system = (
         f"{visitor} Reply in {lang} unless the visitor writes in another language; keep product names and page paths as they are.\n\n"
-        f"Site knowledge for this turn:\n{context or '(no matching pages; use search_site or offer an expert)'}"
+        f"Site knowledge for this turn:\n{context or '(no Solix pages match this message; answer from your own knowledge, and use search_site only if it asks about Solix specifics)'}"
     )
     # One leading system message: some providers reject system turns mid-conversation.
     system = f"{CONCIERGE_SYSTEM_PROMPT}\n\n## This turn\n{turn_system}"
@@ -278,7 +285,7 @@ async def chat_stream(req: ChatRequest, request: Request):
             for round_no in range(MAX_TOOL_ROUNDS):
                 text, calls = "", []
                 # The last round gets no tools so the model must answer.
-                async for event in stream_completion(messages, TOOLS if round_no < MAX_TOOL_ROUNDS - 1 else None, max_tokens=MAX_OUTPUT_TOKENS):
+                async for event in stream_completion(messages, TOOLS if round_no < MAX_TOOL_ROUNDS - 1 else None, max_tokens=MAX_OUTPUT_TOKENS, temperature=TEMPERATURE):
                     if event["type"] == "text":
                         text += event["text"]
                         yield sse({"delta": event["text"]})

@@ -91,8 +91,8 @@ def _available(key: tuple) -> bool:
     return _cooldown.get(key, 0) <= time.monotonic()
 
 
-async def _stream_one(client: httpx.AsyncClient, p: Provider, model: str, messages: list, tools: Optional[list], max_tokens: int) -> AsyncIterator[dict]:
-    body = {"model": model, "messages": messages, "stream": True, "max_tokens": max_tokens, "temperature": 0.3, **p.extra}
+async def _stream_one(client: httpx.AsyncClient, p: Provider, model: str, messages: list, tools: Optional[list], max_tokens: int, temperature: float) -> AsyncIterator[dict]:
+    body = {"model": model, "messages": messages, "stream": True, "max_tokens": max_tokens, "temperature": temperature, **p.extra}
     if p.name == "gemini":
         # 2.5 models can skip thinking (faster first token); 3.x models can't, so keep it low.
         body["reasoning_effort"] = "none" if model.startswith("gemini-2.5") else "low"
@@ -145,7 +145,7 @@ async def _stream_one(client: httpx.AsyncClient, p: Provider, model: str, messag
             yield {"type": "tool_calls", "calls": out}
 
 
-async def stream_completion(messages: list, tools: Optional[list] = None, max_tokens: int = 900, providers: Optional[List[Provider]] = None,
+async def stream_completion(messages: list, tools: Optional[list] = None, max_tokens: int = 900, temperature: float = 0.6, providers: Optional[List[Provider]] = None,
                             client: Optional[httpx.AsyncClient] = None) -> AsyncIterator[dict]:
     """Streams one assistant turn, failing over across providers and models.
 
@@ -166,7 +166,7 @@ async def stream_completion(messages: list, tools: Optional[list] = None, max_to
         for p, model in ready:
             started = False
             try:
-                async for event in _stream_one(client, p, model, messages, tools, max_tokens):
+                async for event in _stream_one(client, p, model, messages, tools, max_tokens, temperature):
                     started = True
                     yield event
                 if not started:
