@@ -74,7 +74,7 @@ EVENT_WEIGHTS: Dict[str, float] = {
 }
 # Points for form submissions, added to the submission's interest.
 SUBMISSION_WEIGHTS: Dict[str, float] = {
-    "demo": 30, "trial": 25, "event": 20, "contact": 15, "download": 15, "partner": 5, "newsletter": 5, "career": 0,
+    "demo": 30, "trial": 25, "event": 20, "contact": 15, "download": 15, "chat": 10, "partner": 5, "newsletter": 5, "career": 0,
 }
 HAND_RAISE = {"demo", "trial", "contact"}
 EVENT_TYPES = set(EVENT_WEIGHTS) | {"session_start", "cta", "form_view"}

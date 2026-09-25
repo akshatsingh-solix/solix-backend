@@ -31,7 +31,7 @@ logger = logging.getLogger("solix")
 app = FastAPI(title="Solix Technologies API")
 api_router = APIRouter(prefix="/api")
 
-SubmissionType = Literal["demo", "contact", "newsletter", "career", "partner", "download", "trial", "event"]
+SubmissionType = Literal["demo", "contact", "newsletter", "career", "partner", "download", "trial", "event", "chat"]
 
 
 class SubmissionCreate(BaseModel):

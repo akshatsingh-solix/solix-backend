@@ -16,6 +16,7 @@ from database import db, now_iso
 from knowledge import CONCIERGE_SYSTEM_PROMPT, LANGUAGE_NAMES
 from emailer import notify_lead
 from intent import record_submission
+import chat_leads
 from llm import ProviderError, configured_providers, stream_completion
 import sol_search
 
@@ -54,8 +55,27 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "save_visitor_details",
+            "description": "Save contact or company details the visitor has shared (name, email, phone, company, job title, what they're interested in). Call it as soon as any such detail appears in the conversation, without asking for confirmation, then carry on the conversation normally. Never invent values.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "email": {"type": "string"},
+                    "phone": {"type": "string"},
+                    "company": {"type": "string"},
+                    "job_title": {"type": "string"},
+                    "interest": {"type": "string", "description": "Product, solution or problem they care about"},
+                    "notes": {"type": "string", "description": "One line on their situation or need, useful for sales follow-up"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_demo_request",
-            "description": "Save a demo or pricing-conversation request. Call ONLY after the visitor gave full name, work email and company AND confirmed. Never invent values.",
+            "description": "Book a demo or pricing conversation. Needs the visitor's email; include name and company if known. Call once the visitor has said they want it. Never invent values.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -65,7 +85,7 @@ TOOLS = [
                     "interest": {"type": "string", "description": "Product or solution of interest, if mentioned"},
                     "notes": {"type": "string", "description": "One-sentence summary of what the visitor wants to see or solve"},
                 },
-                "required": ["name", "email", "company"],
+                "required": ["email"],
             },
         },
     },
@@ -73,7 +93,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "request_expert_contact",
-            "description": "Pass a visitor's question to a Solix expert who will reply by email. Call ONLY after the visitor gave name, email and their question AND confirmed.",
+            "description": "Pass a visitor's question to a Solix expert who will reply by email. Needs their email and question; include name if known. Call once the visitor has asked for it.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -82,7 +102,7 @@ TOOLS = [
                     "company": {"type": "string"},
                     "question": {"type": "string", "description": "The visitor's question or request, in their words"},
                 },
-                "required": ["name", "email", "question"],
+                "required": ["email", "question"],
             },
         },
     },
@@ -95,6 +115,8 @@ class ChatRequest(BaseModel):
     language: str = Field(default="en", max_length=8)
     page: Optional[str] = Field(default=None, max_length=300)
     page_title: Optional[str] = Field(default=None, max_length=200)
+    # Links the chat lead to this visitor's browsing (only sent with analytics consent).
+    visitor_id: Optional[str] = Field(default=None, max_length=64)
 
 
 class ChatMessage(BaseModel):
@@ -144,8 +166,10 @@ async def _save_lead(session_id: str, kind: str, args: dict, message: Optional[s
         "id": str(uuid.uuid4()),
         "type": kind,
         "email": _clean(args, "email"),
-        "name": _clean(args, "name"),
+        "name": _clean(args, "name") or None,
         "company": _clean(args, "company") or None,
+        "phone": _clean(args, "phone") or None,
+        "job_title": _clean(args, "job_title") or None,
         "interest": _clean(args, "interest") or None,
         "message": message,
         "source": "chat",
@@ -162,22 +186,30 @@ async def _save_lead(session_id: str, kind: str, args: dict, message: Optional[s
     return doc
 
 
+async def _fill_from_chat(session_id: str, args: dict) -> dict:
+    """Bookings reuse whatever the visitor already shared earlier in the chat."""
+    known = await chat_leads.get_contact(session_id) or {}
+    return {**{k: known.get(k) for k in ("name", "company", "phone", "job_title") if known.get(k)}, **{k: v for k, v in args.items() if v}}
+
+
 async def create_demo_request(session_id: str, args: dict) -> dict:
-    email, name, company = _clean(args, "email"), _clean(args, "name"), _clean(args, "company")
+    args = await _fill_from_chat(session_id, args)
+    email = _clean(args, "email")
     if not EMAIL_RX.match(email):
-        return {"ok": False, "error": "The email address looks invalid. Ask the visitor to re-enter their work email."}
-    if len(name) < 2 or len(company) < 2:
-        return {"ok": False, "error": "Name and company are required. Ask the visitor for the missing detail."}
+        return {"ok": False, "error": "The email address is missing or looks invalid. Ask the visitor for their work email."}
+    await chat_leads.capture(session_id, args, trusted=True, alert=False)
     doc = await _save_lead(session_id, "demo", args, _clean(args, "notes") or None)
     return {"ok": True, "submission_id": doc["id"], "message": "Demo request saved. A Solix expert will reach out within one business day."}
 
 
 async def request_expert_contact(session_id: str, args: dict) -> dict:
-    email, name, question = _clean(args, "email"), _clean(args, "name"), _clean(args, "question")
+    args = await _fill_from_chat(session_id, args)
+    email, question = _clean(args, "email"), _clean(args, "question")
     if not EMAIL_RX.match(email):
-        return {"ok": False, "error": "The email address looks invalid. Ask the visitor to re-enter it."}
-    if len(name) < 2 or len(question) < 3:
-        return {"ok": False, "error": "Name and the question are required. Ask the visitor for the missing detail."}
+        return {"ok": False, "error": "The email address is missing or looks invalid. Ask the visitor for it."}
+    if len(question) < 3:
+        return {"ok": False, "error": "The question is missing. Ask the visitor what they'd like the expert to answer."}
+    await chat_leads.capture(session_id, args, trusted=True, alert=False)
     doc = await _save_lead(session_id, "contact", args, question)
     return {"ok": True, "submission_id": doc["id"], "message": "Question passed to a Solix expert, who will reply by email within one business day."}
 
@@ -257,10 +289,19 @@ async def clear_chat_history(session_id: str):
 
 @router.post("/stream")
 async def chat_stream(req: ChatRequest, request: Request):
-    if not configured_providers():
-        raise HTTPException(status_code=503, detail="AI concierge is not configured")
     if _rate_limited("session", req.session_id) or _rate_limited("ip", _client_ip(request)):
         raise HTTPException(status_code=429, detail="Too many messages. Please wait a moment.")
+    # Contact details are saved from the message itself before any model runs,
+    # so a lead is never lost to a model that didn't notice, or wasn't up.
+    captured = {}
+    try:
+        found = chat_leads.extract_contact(req.message)
+        if found:
+            captured = await chat_leads.capture(req.session_id, found, trusted=False, page=req.page, language=req.language, visitor_id=req.visitor_id)
+    except Exception:
+        logger.exception("chat lead capture failed")
+    if not configured_providers():
+        raise HTTPException(status_code=503, detail="AI concierge is not configured")
 
     recent = await db.chat_messages.find({"session_id": req.session_id}, {"_id": 0, "role": 1, "content": 1}).sort("created_at", -1).to_list(HISTORY_LIMIT)
     history = [{"role": m["role"], "content": m["content"][:HISTORY_CHARS]} for m in reversed(recent)]
@@ -269,8 +310,12 @@ async def chat_stream(req: ChatRequest, request: Request):
     lang = LANGUAGE_NAMES.get(req.language.split("-")[0].lower(), "English")
     context = sol_search.format_context(_retrieve(req.message, history, req.page), max_chars=CONTEXT_CHARS)
     visitor = f"The visitor is on page {req.page}" + (f' ("{req.page_title}")' if req.page_title else "") + "." if req.page else "Page unknown."
+    contact = await chat_leads.get_contact(req.session_id) or {}
+    known = ", ".join(f"{k.replace('_', ' ')}: {contact[k]}" for k in chat_leads.CONTACT_FIELDS if contact.get(k))
+    known_line = (f"Visitor details already saved: {known}. Don't ask for these again; use their name naturally."
+                  if known else "No contact details saved yet.")
     turn_system = (
-        f"{visitor} Reply in {lang} unless the visitor writes in another language; keep product names and page paths as they are.\n\n"
+        f"{visitor} {known_line} Reply in {lang} unless the visitor writes in another language; keep product names and page paths as they are.\n\n"
         f"Site knowledge for this turn:\n{context or '(no Solix pages match this message; answer from your own knowledge, and use search_site only if it asks about Solix specifics)'}"
     )
     # One leading system message: some providers reject system turns mid-conversation.
@@ -281,6 +326,8 @@ async def chat_stream(req: ChatRequest, request: Request):
     async def generate():
         await save_message(req.session_id, "user", req.message, page=req.page, language=req.language)
         full, meta, tools_used = "", {}, []
+        if captured:
+            yield sse({"event": "lead_captured", "fields": sorted(captured)})
         try:
             for round_no in range(MAX_TOOL_ROUNDS):
                 text, calls = "", []
@@ -303,6 +350,11 @@ async def chat_stream(req: ChatRequest, request: Request):
                     if c["name"] == "search_site":
                         hits = sol_search.search(str(c["arguments"].get("query", "")), 4)
                         outcome = {"results": [{"title": h["title"], "page": h["url"], "text": h["text"][:800]} for h in hits]} if hits else {"results": [], "note": "Nothing on the site matches."}
+                    elif c["name"] == "save_visitor_details":
+                        saved = await chat_leads.capture(req.session_id, c["arguments"], trusted=True, page=req.page, language=req.language, visitor_id=req.visitor_id)
+                        outcome = {"ok": True, "saved": sorted(saved)} if saved else {"ok": True, "note": "Nothing new to save."}
+                        if saved:
+                            yield sse({"event": "lead_captured", "fields": sorted(saved)})
                     elif c["name"] == "create_demo_request":
                         outcome = await create_demo_request(req.session_id, c["arguments"])
                         if outcome.get("ok"):

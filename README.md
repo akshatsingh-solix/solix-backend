@@ -60,6 +60,16 @@ Sol answers visitors in the site's chat widget on free-tier models.
 - **Tools.** `search_site`, `create_demo_request` and
   `request_expert_contact`; bookings and questions become scored leads with
   `source: chat` and trigger the sales alert.
+- **Lead capture.** Every visitor message is scanned for an email, phone,
+  name, company and job title (`chat_leads.py`), before any model runs, so
+  capture never depends on the model and still works when no AI provider is
+  up. The model adds what it understands from context via the
+  `save_visitor_details` tool. Each conversation keeps one `chat` submission
+  in the form inbox; once it has an email it becomes a scored lead (tag
+  `chat`, linked to the visitor's browsing) and sales gets one "Chat lead"
+  alert. Work-email domains fill in the company. Demo bookings need only an
+  email and reuse details shared earlier. Sol is prompted to earn at least
+  one contact detail per conversation without holding answers back.
 - **Context.** The visitor's current page, the recent conversation (trimmed
   to a token budget) and their site language.
 - **Failover.** Providers and models are tried in order; one that is rate
