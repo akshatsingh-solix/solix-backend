@@ -156,3 +156,42 @@ async def update_settings(body: AlertSettings):
 @router.get("/notifications")
 async def list_notifications(limit: int = Query(20, le=100)) -> List[dict]:
     return await db.notifications.find({}, {"_id": 0}).sort("created_at", -1).to_list(limit)
+
+
+# --- Sol concierge conversations ---
+@router.get("/chats", dependencies=[Depends(require_roles("admin", "sales"))])
+async def list_chats(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), q: Optional[str] = None):
+    """One row per conversation, newest first, with whether it produced a lead."""
+    match = {"content": {"$regex": q.strip(), "$options": "i"}} if q and q.strip() else {}
+    pipeline = [
+        {"$match": match},
+        {"$sort": {"created_at": 1}},
+        {"$group": {
+            "_id": "$session_id",
+            "started_at": {"$first": "$created_at"},
+            "last_at": {"$last": "$created_at"},
+            "messages": {"$sum": 1},
+            "first_question": {"$first": {"$cond": [{"$eq": ["$role", "user"]}, "$content", None]}},
+            "pages": {"$addToSet": "$page"},
+            "models": {"$addToSet": "$model"},
+        }},
+        {"$sort": {"last_at": -1}},
+        {"$facet": {"total": [{"$count": "n"}], "items": [{"$skip": (page - 1) * page_size}, {"$limit": page_size}]}},
+    ]
+    res = (await db.chat_messages.aggregate(pipeline).to_list(1))[0]
+    items = res["items"]
+    leads = {d["source_page"][5:]: d["type"] async for d in db.submissions.find(
+        {"source": "chat", "source_page": {"$in": [f"chat:{i['_id']}" for i in items]}}, {"_id": 0, "source_page": 1, "type": 1})}
+    return {
+        "total": res["total"][0]["n"] if res["total"] else 0,
+        "items": [{
+            "session_id": i["_id"], "started_at": i["started_at"], "last_at": i["last_at"], "messages": i["messages"],
+            "first_question": (i["first_question"] or "")[:200], "pages": [p for p in i["pages"] if p][:5],
+            "models": [m for m in i["models"] if m], "lead": leads.get(i["_id"]),
+        } for i in items],
+    }
+
+
+@router.get("/chats/{session_id}", dependencies=[Depends(require_roles("admin", "sales"))])
+async def get_chat(session_id: str):
+    return await db.chat_messages.find({"session_id": session_id}, {"_id": 0}).sort("created_at", 1).to_list(500)

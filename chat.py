@@ -1,91 +1,95 @@
 import os
 import re
 import json
+import time
 import uuid
 import asyncio
 import logging
-from typing import List, Literal
+from collections import defaultdict, deque
+from typing import List, Literal, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ConfigDict
 
 from database import db, now_iso
-from knowledge import CONCIERGE_SYSTEM_PROMPT
+from knowledge import CONCIERGE_SYSTEM_PROMPT, LANGUAGE_NAMES
 from emailer import notify_lead
 from intent import record_submission
+from llm import ProviderError, configured_providers, stream_completion
+import sol_search
 
 logger = logging.getLogger("solix.chat")
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
-try:
-    import openai
-    from openai import AsyncOpenAI
-except ImportError:
-    openai = AsyncOpenAI = None
-
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-# OpenRouter speaks the same API and offers free models. When its key is set
-# it wins, and CHAT_MODELS is tried in order: if a model is busy, rate
-# limited or down before it has said anything, the next one answers.
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-DEFAULT_FREE_CHAT_MODELS = "google/gemma-4-31b-it:free,thinkingmachines/inkling-small:free,nvidia/nemotron-3.5-lightning:free,openrouter/free"
-
-
-def _chat_setup():
-    if AsyncOpenAI is None:
-        return None, []
-    if OPENROUTER_API_KEY:
-        client = AsyncOpenAI(
-            api_key=OPENROUTER_API_KEY,
-            base_url="https://openrouter.ai/api/v1",
-            default_headers={"HTTP-Referer": os.environ.get("SITE_URL", "https://akshatsingh-solix.github.io/Website"), "X-Title": "Solix website concierge"},
-        )
-        models = [m.strip() for m in os.environ.get("CHAT_MODELS", DEFAULT_FREE_CHAT_MODELS).split(",") if m.strip()]
-        return client, models
-    if OPENAI_API_KEY:
-        return AsyncOpenAI(api_key=OPENAI_API_KEY), [OPENAI_MODEL]
-    return None, []
-
-
-# None when the openai package isn't installed or no key is set - the
-# concierge endpoint degrades to a clean 503 rather than the whole API
-# failing to start.
-_client, CHAT_MODELS = _chat_setup()
-
-HISTORY_LIMIT = 24
-MAX_TOOL_ROUNDS = 3
+HISTORY_LIMIT = 16
+HISTORY_CHARS = 1500
+# Everything sent per request (instructions, tools, site knowledge, history) is
+# kept under this many tokens, so one message fits well inside free tiers'
+# per-minute caps (Groq: 8K tokens/min) and each day's quota stretches further.
+INPUT_TOKEN_BUDGET = int(os.environ.get("SOL_INPUT_TOKEN_BUDGET", "4500"))
+MAX_OUTPUT_TOKENS = int(os.environ.get("SOL_MAX_OUTPUT_TOKENS", "700"))
+CONTEXT_CHARS = 4000
+MAX_TOOL_ROUNDS = 4
 EMAIL_RX = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
-DEMO_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "create_demo_request",
-        "description": "Save a demo request for the visitor. Call this ONLY after the visitor has given their full name, work email and company AND confirmed they want a demo. Never invent values.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Visitor's full name"},
-                "email": {"type": "string", "description": "Visitor's work email address"},
-                "company": {"type": "string", "description": "Visitor's company"},
-                "interest": {"type": "string", "description": "Product or solution of interest, if mentioned"},
-                "notes": {"type": "string", "description": "One-sentence summary of what the visitor wants to see or solve"},
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_site",
+            "description": "Search the Solix website (products, solutions, industries, articles, case studies, newsroom, careers, partners, company) and return matching excerpts with their page paths.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "Keywords to search for, e.g. 'SAP ECC retirement' or 'HIPAA archiving'"}},
+                "required": ["query"],
             },
-            "required": ["name", "email", "company"],
         },
     },
-}
-
-
-LANGUAGE_NAMES = {"es": "Spanish", "fr": "French", "de": "German"}
+    {
+        "type": "function",
+        "function": {
+            "name": "create_demo_request",
+            "description": "Save a demo or pricing-conversation request. Call ONLY after the visitor gave full name, work email and company AND confirmed. Never invent values.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Visitor's full name"},
+                    "email": {"type": "string", "description": "Visitor's work email address"},
+                    "company": {"type": "string", "description": "Visitor's company"},
+                    "interest": {"type": "string", "description": "Product or solution of interest, if mentioned"},
+                    "notes": {"type": "string", "description": "One-sentence summary of what the visitor wants to see or solve"},
+                },
+                "required": ["name", "email", "company"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "request_expert_contact",
+            "description": "Pass a visitor's question to a Solix expert who will reply by email. Call ONLY after the visitor gave name, email and their question AND confirmed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "email": {"type": "string"},
+                    "company": {"type": "string"},
+                    "question": {"type": "string", "description": "The visitor's question or request, in their words"},
+                },
+                "required": ["name", "email", "question"],
+            },
+        },
+    },
+]
 
 
 class ChatRequest(BaseModel):
     session_id: str = Field(min_length=6, max_length=80)
     message: str = Field(min_length=1, max_length=2000)
-    # The site language the visitor has selected (en/es/fr/de).
     language: str = Field(default="en", max_length=8)
+    page: Optional[str] = Field(default=None, max_length=300)
+    page_title: Optional[str] = Field(default=None, max_length=200)
 
 
 class ChatMessage(BaseModel):
@@ -97,30 +101,48 @@ class ChatMessage(BaseModel):
     created_at: str
 
 
-async def save_message(session_id: str, role: str, content: str) -> None:
-    await db.chat_messages.insert_one({"id": str(uuid.uuid4()), "session_id": session_id, "role": role, "content": content, "created_at": now_iso()})
+# --- abuse protection: per-session and per-IP sliding windows (in memory; one instance) ---
+_hits = defaultdict(deque)
+LIMITS = {"session": (20, 300), "ip": (60, 3600)}  # (messages, seconds)
+
+
+def _rate_limited(kind: str, key: str) -> bool:
+    limit, window = LIMITS[kind]
+    q, now = _hits[(kind, key)], time.monotonic()
+    while q and q[0] < now - window:
+        q.popleft()
+    if len(q) >= limit:
+        return True
+    q.append(now)
+    return False
+
+
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for", "")
+    return fwd.split(",")[0].strip() or (request.client.host if request.client else "unknown")
+
+
+async def save_message(session_id: str, role: str, content: str, **meta) -> None:
+    await db.chat_messages.insert_one({"id": str(uuid.uuid4()), "session_id": session_id, "role": role, "content": content, "created_at": now_iso(), **meta})
 
 
 def sse(data: dict) -> str:
     return f"data: {json.dumps(data)}\n\n"
 
 
-async def create_demo_request(session_id: str, args: dict) -> dict:
-    email = (args.get("email") or "").strip()
-    name = (args.get("name") or "").strip()
-    company = (args.get("company") or "").strip()
-    if not EMAIL_RX.match(email):
-        return {"ok": False, "error": "The email address looks invalid. Ask the visitor to re-enter their work email."}
-    if len(name) < 2 or len(company) < 2:
-        return {"ok": False, "error": "Name and company are required. Ask the visitor for the missing detail."}
+def _clean(args: dict, key: str) -> str:
+    return str(args.get(key) or "").strip()
+
+
+async def _save_lead(session_id: str, kind: str, args: dict, message: Optional[str]) -> dict:
     doc = {
         "id": str(uuid.uuid4()),
-        "type": "demo",
-        "email": email,
-        "name": name,
-        "company": company,
-        "interest": (args.get("interest") or None),
-        "message": (args.get("notes") or None),
+        "type": kind,
+        "email": _clean(args, "email"),
+        "name": _clean(args, "name"),
+        "company": _clean(args, "company") or None,
+        "interest": _clean(args, "interest") or None,
+        "message": message,
         "source": "chat",
         "source_page": f"chat:{session_id}",
         "created_at": now_iso(),
@@ -130,9 +152,88 @@ async def create_demo_request(session_id: str, args: dict) -> dict:
     try:
         await record_submission(doc)
     except Exception:
-        logger.exception("lead scoring failed for chat booking %s", doc["id"])
-    logger.info("chat demo request saved %s", doc["id"])
+        logger.exception("lead scoring failed for chat %s %s", kind, doc["id"])
+    logger.info("chat %s request saved %s", kind, doc["id"])
+    return doc
+
+
+async def create_demo_request(session_id: str, args: dict) -> dict:
+    email, name, company = _clean(args, "email"), _clean(args, "name"), _clean(args, "company")
+    if not EMAIL_RX.match(email):
+        return {"ok": False, "error": "The email address looks invalid. Ask the visitor to re-enter their work email."}
+    if len(name) < 2 or len(company) < 2:
+        return {"ok": False, "error": "Name and company are required. Ask the visitor for the missing detail."}
+    doc = await _save_lead(session_id, "demo", args, _clean(args, "notes") or None)
     return {"ok": True, "submission_id": doc["id"], "message": "Demo request saved. A Solix expert will reach out within one business day."}
+
+
+async def request_expert_contact(session_id: str, args: dict) -> dict:
+    email, name, question = _clean(args, "email"), _clean(args, "name"), _clean(args, "question")
+    if not EMAIL_RX.match(email):
+        return {"ok": False, "error": "The email address looks invalid. Ask the visitor to re-enter it."}
+    if len(name) < 2 or len(question) < 3:
+        return {"ok": False, "error": "Name and the question are required. Ask the visitor for the missing detail."}
+    doc = await _save_lead(session_id, "contact", args, question)
+    return {"ok": True, "submission_id": doc["id"], "message": "Question passed to a Solix expert, who will reply by email within one business day."}
+
+
+def _tokens(text: str) -> int:
+    """Rough token count (about 4 characters per token for English)."""
+    return len(text) // 4 + 4
+
+
+def _fit_history(history: List[dict], room: int) -> List[dict]:
+    """The most recent turns that fit in `room` tokens, oldest first."""
+    kept = []
+    for m in reversed(history):
+        room -= _tokens(m["content"])
+        if room < 0:
+            break
+        kept.append(m)
+    kept.reverse()
+    # Start on a visitor turn; some providers reject a leading assistant message.
+    while kept and kept[0]["role"] != "user":
+        kept.pop(0)
+    return kept
+
+
+def _retrieve(message: str, history: List[dict], page: Optional[str]) -> List[dict]:
+    """Top excerpts for this turn, plus the page the visitor is reading."""
+    last_user = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
+    hits = sol_search.search(message, 6)
+    # Short follow-ups ("and for healthcare?") lean on the previous question.
+    if len(message.split()) < 8 and last_user:
+        hits += sol_search.search(f"{last_user} {message}", 4)
+    if page and page not in ("/", ""):
+        hits = [c for c in sol_search.index().chunks if c["url"] == page.split("?")[0]][:2] + hits
+    seen, per_url, out = set(), defaultdict(int), []
+    for h in hits:
+        if h["id"] in seen or per_url[h["url"]] >= 3:
+            continue
+        seen.add(h["id"])
+        per_url[h["url"]] += 1
+        out.append(h)
+    return out[:7]
+
+
+def _sources(message: str) -> List[dict]:
+    """Pages worth showing as 'Related' chips: only clearly relevant ones."""
+    hits = sol_search.search(message, 8)
+    if not hits or hits[0]["score"] < 6:
+        return []
+    top, out, urls = hits[0]["score"], [], set()
+    for h in hits:
+        if h["score"] < top * 0.6 or h["url"] in urls:
+            continue
+        urls.add(h["url"])
+        out.append({"title": h["title"].split(":")[0], "url": h["url"]})
+    return out[:3]
+
+
+@router.get("/status")
+async def chat_status():
+    """Which AI providers are configured (names only), for health checks."""
+    return {"ai": bool(configured_providers()), "providers": [p.name for p in configured_providers()], "knowledge_chunks": len(sol_search.index().chunks)}
 
 
 @router.get("/{session_id}", response_model=List[ChatMessage])
@@ -148,96 +249,80 @@ async def clear_chat_history(session_id: str):
 
 
 @router.post("/stream")
-async def chat_stream(req: ChatRequest):
-    if _client is None:
+async def chat_stream(req: ChatRequest, request: Request):
+    if not configured_providers():
         raise HTTPException(status_code=503, detail="AI concierge is not configured")
+    if _rate_limited("session", req.session_id) or _rate_limited("ip", _client_ip(request)):
+        raise HTTPException(status_code=429, detail="Too many messages. Please wait a moment.")
 
-    history = await db.chat_messages.find({"session_id": req.session_id}, {"_id": 0, "role": 1, "content": 1}).sort("created_at", 1).to_list(HISTORY_LIMIT)
-    system_prompt = CONCIERGE_SYSTEM_PROMPT
-    if req.language in LANGUAGE_NAMES:
-        name = LANGUAGE_NAMES[req.language]
-        system_prompt += f"\n\nThe visitor is browsing the site in {name}. Reply in {name} unless they write to you in another language."
-    messages = [{"role": "system", "content": system_prompt}] + [{"role": m["role"], "content": m["content"]} for m in history] + [{"role": "user", "content": req.message}]
+    recent = await db.chat_messages.find({"session_id": req.session_id}, {"_id": 0, "role": 1, "content": 1}).sort("created_at", -1).to_list(HISTORY_LIMIT)
+    history = [{"role": m["role"], "content": m["content"][:HISTORY_CHARS]} for m in reversed(recent)]
+
+    await sol_search.refresh_cms(db)
+    lang = LANGUAGE_NAMES.get(req.language.split("-")[0].lower(), "English")
+    context = sol_search.format_context(_retrieve(req.message, history, req.page), max_chars=CONTEXT_CHARS)
+    visitor = f"The visitor is on page {req.page}" + (f' ("{req.page_title}")' if req.page_title else "") + "." if req.page else "Page unknown."
+    turn_system = (
+        f"{visitor} Reply in {lang} unless the visitor writes in another language; keep product names and page paths as they are.\n\n"
+        f"Site knowledge for this turn:\n{context or '(no matching pages; use search_site or offer an expert)'}"
+    )
+    # One leading system message: some providers reject system turns mid-conversation.
+    system = f"{CONCIERGE_SYSTEM_PROMPT}\n\n## This turn\n{turn_system}"
+    history = _fit_history(history, INPUT_TOKEN_BUDGET - _tokens(system) - _tokens(json.dumps(TOOLS)) - _tokens(req.message))
+    messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": req.message}]
 
     async def generate():
-        await save_message(req.session_id, "user", req.message)
-        full = ""
+        await save_message(req.session_id, "user", req.message, page=req.page, language=req.language)
+        full, meta, tools_used = "", {}, []
         try:
-            for _ in range(MAX_TOOL_ROUNDS):
-                text_chunk = ""
-                tool_calls: dict[int, dict] = {}
-                finish_reason = None
-
-                for i, model in enumerate(CHAT_MODELS):
-                    try:
-                        stream = await _client.chat.completions.create(
-                            model=model,
-                            messages=messages,
-                            tools=[DEMO_TOOL],
-                            tool_choice="auto",
-                            stream=True,
-                        )
-                        async for event in stream:
-                            if not event.choices:
-                                continue
-                            choice = event.choices[0]
-                            delta = choice.delta
-                            if delta.content:
-                                text_chunk += delta.content
-                                yield sse({"delta": delta.content})
-                            if delta.tool_calls:
-                                for tc_delta in delta.tool_calls:
-                                    slot = tool_calls.setdefault(tc_delta.index, {"id": None, "name": None, "arguments": ""})
-                                    if tc_delta.id:
-                                        slot["id"] = tc_delta.id
-                                    if tc_delta.function and tc_delta.function.name:
-                                        slot["name"] = tc_delta.function.name
-                                    if tc_delta.function and tc_delta.function.arguments:
-                                        slot["arguments"] += tc_delta.function.arguments
-                            if choice.finish_reason:
-                                finish_reason = choice.finish_reason
-                        if text_chunk or tool_calls or i == len(CHAT_MODELS) - 1:
-                            break
-                        logger.warning("chat model %s returned an empty reply; trying %s", model, CHAT_MODELS[i + 1])
-                    except openai.APIError as e:
-                        # Fall through to the next model only if this one hasn't
-                        # started answering; a half-sent reply can't be retried.
-                        if text_chunk or tool_calls or i == len(CHAT_MODELS) - 1:
-                            raise
-                        logger.warning("chat model %s unavailable (%s); trying %s", model, getattr(e, "status_code", type(e).__name__), CHAT_MODELS[i + 1])
-
-                full += text_chunk
-
-                if finish_reason != "tool_calls" or not tool_calls:
+            for round_no in range(MAX_TOOL_ROUNDS):
+                text, calls = "", []
+                # The last round gets no tools so the model must answer.
+                async for event in stream_completion(messages, TOOLS if round_no < MAX_TOOL_ROUNDS - 1 else None, max_tokens=MAX_OUTPUT_TOKENS):
+                    if event["type"] == "text":
+                        text += event["text"]
+                        yield sse({"delta": event["text"]})
+                    elif event["type"] == "tool_calls":
+                        calls = event["calls"]
+                    elif event["type"] == "meta":
+                        meta = {"provider": event["provider"], "model": event["model"]}
+                full += text
+                if not calls:
                     break
-
-                messages.append({
-                    "role": "assistant",
-                    "content": text_chunk or None,
-                    "tool_calls": [
-                        {"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": tc["arguments"]}}
-                        for tc in tool_calls.values()
-                    ],
-                })
-
-                for tc in tool_calls.values():
-                    try:
-                        args = json.loads(tc["arguments"] or "{}")
-                    except json.JSONDecodeError:
-                        args = {}
-                    if tc["name"] == "create_demo_request":
-                        outcome = await create_demo_request(req.session_id, args)
+                messages.append({"role": "assistant", "content": text or None, "tool_calls": [
+                    {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": json.dumps(c["arguments"])}} for c in calls]})
+                for c in calls:
+                    tools_used.append(c["name"])
+                    if c["name"] == "search_site":
+                        hits = sol_search.search(str(c["arguments"].get("query", "")), 4)
+                        outcome = {"results": [{"title": h["title"], "page": h["url"], "text": h["text"][:800]} for h in hits]} if hits else {"results": [], "note": "Nothing on the site matches."}
+                    elif c["name"] == "create_demo_request":
+                        outcome = await create_demo_request(req.session_id, c["arguments"])
                         if outcome.get("ok"):
-                            yield sse({"event": "demo_booked", "submission_id": outcome["submission_id"], "name": args.get("name"), "email": args.get("email"), "company": args.get("company")})
+                            yield sse({"event": "demo_booked", "submission_id": outcome["submission_id"], "name": c["arguments"].get("name"), "email": c["arguments"].get("email"), "company": c["arguments"].get("company")})
+                    elif c["name"] == "request_expert_contact":
+                        outcome = await request_expert_contact(req.session_id, c["arguments"])
+                        if outcome.get("ok"):
+                            yield sse({"event": "expert_requested", "submission_id": outcome["submission_id"], "name": c["arguments"].get("name"), "email": c["arguments"].get("email")})
                     else:
-                        outcome = {"ok": False, "error": f"Unknown tool {tc['name']}"}
-                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": json.dumps(outcome)})
+                        outcome = {"ok": False, "error": f"Unknown tool {c['name']}"}
+                    messages.append({"role": "tool", "tool_call_id": c["id"], "name": c["name"], "content": json.dumps(outcome)})
+                if text and not text.endswith(("\n", " ")):
+                    full += "\n\n"
+                    yield sse({"delta": "\n\n"})
+        except ProviderError as e:
+            logger.error("Sol could not answer: %s", e)
+            yield sse({"error": "The concierge is temporarily unavailable. Please try again."})
+            return
         except Exception:
             logger.exception("chat stream failed")
             yield sse({"error": "The concierge is temporarily unavailable. Please try again."})
             return
+        sources = _sources(req.message)
+        if sources:
+            yield sse({"event": "sources", "sources": sources})
         if full:
-            await save_message(req.session_id, "assistant", full)
+            await save_message(req.session_id, "assistant", full, tools=tools_used or None, **meta)
         yield sse({"done": True})
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

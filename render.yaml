@@ -18,9 +18,20 @@ services:
         sync: false
       - key: CORS_ORIGINS
         value: https://akshatsingh-solix.github.io
+      # Sol, the AI concierge: set at least one key. Providers are tried in
+      # SOL_PROVIDER_ORDER and Sol fails over when one is rate limited.
+      # GROQ_API_KEY alone is enough. See README "Sol".
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: MISTRAL_API_KEY
+        sync: false
+      - key: SOL_PROVIDER_ORDER
+        value: gemini,groq,mistral,openrouter,openai,custom
       - key: OPENAI_API_KEY
         sync: false
-      # Free alternative for the chat concierge and the SEO AI answer check.
+      # Free models for Sol (CHAT_MODELS) and the SEO AI answer check (OPENROUTER_MODELS).
       - key: OPENROUTER_API_KEY
         sync: false
       - key: CHAT_MODELS

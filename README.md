@@ -9,9 +9,9 @@ static files — it cannot run this service.
 Once deployed with a database and the four required secrets below, everything
 works except two optional Emergent-platform integrations:
 
-- **AI concierge chat** (`EMERGENT_LLM_KEY`) — without it, `/api/chat/stream`
-  returns a clean 503 and the widget shows "temporarily unavailable" instead
-  of crashing.
+- **AI concierge chat (Sol)** — needs one free AI key such as
+  `GROQ_API_KEY` (see "Sol" below). Without one, `/api/chat/stream` returns a
+  clean 503 and the widget answers with its built-in scripted concierge.
 - **Outbound lead email alerts** (`EMERGENT_EMAIL_KEY`) — without it, leads
   still save to MongoDB and show up in the admin dashboard; only the email
   ping to your sales inbox is skipped.
@@ -38,6 +38,52 @@ fully with just MongoDB configured.
 - **Caching**: gzip, ETag/304 and `Cache-Control` on public content, a short
   in-process cache for published content and reports, and a 180-day TTL on
   raw events.
+
+## Sol, the AI concierge
+
+Sol answers visitors in the site's chat widget on free-tier models.
+
+- **Grounded answers.** `sol_knowledge.json` holds every product, solution,
+  industry, article, press release, job, partner programme and service page
+  of the site (~150 sections, each with its URL), generated in the Website
+  repo by `frontend/scripts/sol-knowledge.js`; copy the regenerated file here
+  after big site-content changes. Published CMS content is merged in
+  automatically every 10 minutes (gated items: summary only). Each question
+  is matched with BM25 keyword search in-process, and the best sections go
+  into the prompt, so Sol quotes the site and links the page it drew on.
+- **Tools.** `search_site`, `create_demo_request` and
+  `request_expert_contact`; bookings and questions become scored leads with
+  `source: chat` and trigger the sales alert.
+- **Context.** The visitor's current page, the recent conversation (trimmed
+  to a token budget) and their site language.
+- **Failover.** Providers and models are tried in order; one that is rate
+  limited, down or returns an empty reply is skipped and rested for a minute.
+  If all fail, the widget falls back to its scripted concierge.
+- **Limits.** Each request stays under `SOL_INPUT_TOKEN_BUDGET` (default
+  4500) input tokens and `SOL_MAX_OUTPUT_TOKENS` (default 700), so it always
+  fits Groq's free 8K tokens-per-minute cap. Visitors are rate-limited per
+  session (20 per 5 min) and per IP (60 per hour).
+- **Admin → Sol chats** (admin and sales roles): every conversation, its
+  page, the model that answered, and whether it became a lead.
+  `GET /api/chat/status` shows which providers are active.
+
+Set at least one key (Groq alone is enough):
+
+| Provider | Env var | Default models (override with) |
+|---|---|---|
+| Groq | `GROQ_API_KEY` | `openai/gpt-oss-120b,openai/gpt-oss-20b` (`SOL_GROQ_MODELS`) |
+| Google Gemini | `GEMINI_API_KEY` | `gemini-2.5-flash,gemini-2.5-flash-lite` (`SOL_GEMINI_MODELS`) |
+| Mistral | `MISTRAL_API_KEY` | `mistral-small-latest` (`SOL_MISTRAL_MODELS`) |
+| OpenRouter | `OPENROUTER_API_KEY` | `CHAT_MODELS` (or `SOL_OPENROUTER_MODELS`) |
+| OpenAI (paid) | `OPENAI_API_KEY` | `OPENAI_MODEL` (default `gpt-4o-mini`) |
+| Any OpenAI-compatible server | `SOL_CUSTOM_BASE_URL`, `SOL_CUSTOM_API_KEY`, `SOL_CUSTOM_MODELS` | — |
+
+`SOL_PROVIDER_ORDER` (default `gemini,groq,mistral,openrouter,openai,custom`)
+sets the order among the providers that have keys. With Groq only, free
+limits (per model: 30 requests/min, 1,000/day, 8K tokens/min, 200K
+tokens/day) cover roughly 100+ visitor messages a day. Free tiers may use
+prompts to improve their models; switch to a paid key (same variables)
+before handling sensitive customer data.
 
 ## Deploy (Render, free tier)
 
