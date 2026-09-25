@@ -1,0 +1,1069 @@
+{
+ "version": 1,
+ "chunks": [
+  {
+   "id": "product:enterprise-edition",
+   "kind": "product",
+   "title": "Solix Enterprise Edition",
+   "url": "/products/enterprise-edition",
+   "text": "Solix Enterprise Edition (Platform). Put AI in the hands of your business.\nEnterprise Edition activates your data across every system and every era, so the people who know your business can build the solutions they need, inside the trust perimeter IT defines.\nKey capabilities:\n- Every system, every era: Connect live ERP, CRM and SaaS alongside retired applications, mainframe extracts and file shares.\n- Trust perimeter: Policy-driven access, masking and lineage so business builders never step outside governance.\n- Builder workspace: Low-code agents, copilots and dashboards on curated, semantic data products.\n- Unified metadata: One catalog across archive, lake and operational sources with automated classification.\n- Any deployment: SOLIXCloud, your cloud, on-premises or hybrid, with the same controls everywhere.\n- Outcome telemetry: Track adoption, cost savings and compliance posture from a single console.\nHow it works:\n- Connect: Ingest from 150+ connectors and any file format with schema evolution handled for you.\n- Govern: Classify, retain, mask and audit automatically against policy templates.\n- Activate: Publish trusted data products to analysts, agents and applications.\nTypical outcomes:\n- 10x faster time to first AI use case\n- 1 governed platform instead of six point tools\n- 0 copies of sensitive data outside policy"
+  },
+  {
+   "id": "product:common-data-platform",
+   "kind": "product",
+   "title": "Common Data Platform",
+   "url": "/products/common-data-platform",
+   "text": "Common Data Platform (Enterprise Foundation). Enterprise data management. Migration. Preservation.\nThe enterprise-scale data platform that connects to 150+ applications, ingests structured and unstructured data, and provides the governed Preservation Zone that powers every Solix solution. Deployable today.\nKey capabilities:\n- 150+ connectors: SAP, Oracle, PeopleSoft, Salesforce, Workday, ServiceNow, mainframe, email and files.\n- Preservation Zone: Immutable, WORM-capable storage with retention, legal hold and defensible deletion.\n- Open formats: Parquet, Iceberg and JSON so your data is never locked in.\n- Metadata & catalog: Business glossary, lineage and automated PII discovery.\n- Elastic compute: Scale ingest and query independently in any cloud.\n- Security by design: Encryption at rest and in transit, RBAC/ABAC, SSO, full audit.\nHow it works:\n- Land: Bulk and incremental ingest with validation and reconciliation reports.\n- Organize: Zones for raw, curated, preserved and published data.\n- Serve: SQL, REST, search and vector interfaces for every consumer.\nTypical outcomes:\n- PB scale, proven in production\n- 150+ application connectors\n- 3 deployment models, one control plane"
+  },
+  {
+   "id": "product:enterprise-archiving",
+   "kind": "product",
+   "title": "Enterprise Archiving",
+   "url": "/products/enterprise-archiving",
+   "text": "Enterprise Archiving (Cloud Archive Products). Move inactive data out of production. Keep it one click away.\nTier inactive records from ERP, CRM, databases and files to a low-cost, compliant archive with full-text search, retention policies and legal hold, while production gets faster and cheaper.\nKey capabilities:\n- Policy-based tiering: Business rules decide what moves, when and where.\n- Transparent access: Users query archived data from familiar screens and reports.\n- Compliance ready: SEC 17a-4, HIPAA, GDPR retention and hold templates.\n- Any source: Databases, applications, email, documents, logs.\n- Cost intelligence: Chargeback and savings dashboards per application.\n- Search everything: Elastic full-text and structured search across the archive.\nHow it works:\n- Assess: Profile growth, access patterns and regulatory retention.\n- Archive: Move eligible data with validation and referential integrity.\n- Retire: Defensibly delete at end of life with full audit trail.\nTypical outcomes:\n- 80% lower infrastructure cost\n- 3x faster batch and reporting cycles\n- 100% audit-ready retention"
+  },
+  {
+   "id": "product:enterprise-data-lake",
+   "kind": "product",
+   "title": "Enterprise Data Lake",
+   "url": "/products/enterprise-data-lake",
+   "text": "Enterprise Data Lake (Enterprise Foundation). A governed lake your analysts and models actually trust.\nConsolidate structured, semi-structured and unstructured data into an open, catalogued lake with self-service access, quality controls and lineage, ready for BI, data science and AI.\nKey capabilities:\n- Open table formats: Iceberg and Parquet with time travel and schema evolution.\n- Data quality: Rules, anomaly detection and scorecards per dataset.\n- Self-service: Marketplace of certified data products with request workflows.\n- Lineage: Column-level lineage from source to dashboard to model.\n- Vector ready: Embeddings and semantic search for RAG use cases.\n- Fine-grained security: Row, column and attribute-based access control.\nHow it works:\n- Ingest: Streaming and batch pipelines with CDC.\n- Curate: Transform, certify and publish governed products.\n- Analyze: Connect any BI, notebook or AI framework.\nTypical outcomes:\n- 60% less time finding data\n- 1 catalog for lake, archive and apps\n- ∞ consumers, zero copies"
+  },
+  {
+   "id": "product:application-retirement",
+   "kind": "product",
+   "title": "Application Retirement",
+   "url": "/products/application-retirement",
+   "text": "Application Retirement (Cloud Archive Products). Switch off legacy applications. Never lose the data.\nDecommission redundant, obsolete and legacy applications while preserving data with full business context for reporting, compliance and eDiscovery. Eliminate licenses, hardware and specialist skills.\nKey capabilities:\n- Any application: SAP ECC, Oracle EBS, PeopleSoft, JDE, Lotus Notes, mainframe, custom.\n- Context preserved: Retain relationships, attachments and business views.\n- Report continuity: Pre-built and custom reports on retired data.\n- Factory approach: Templates and automation to retire portfolios, not one-offs.\n- Chain of custody: Validation, reconciliation and certified extracts.\n- Retention by record: Apply granular retention and hold to retired data.\nHow it works:\n- Inventory: Rationalize the portfolio, prioritize by cost and risk.\n- Extract: Move data and metadata to the Preservation Zone.\n- Decommission: Shut down, cancel licenses, reclaim budget.\nTypical outcomes:\n- $M annual license and hardware savings\n- 90% faster than manual decommissioning\n- 0 compliance gaps"
+  },
+  {
+   "id": "product:ediscovery",
+   "kind": "product",
+   "title": "eDiscovery",
+   "url": "/products/ediscovery",
+   "text": "eDiscovery (Cloud Archive Products). Find, hold and produce records in hours, not weeks.\nSearch across archived and live data, place legal holds, cull and review, and produce defensible records for litigation, audits and investigations, all on the same governed platform.\nKey capabilities:\n- Unified search: Email, documents, structured records and chat in one query.\n- Legal hold: Custodian-based holds with notifications and audit.\n- Early case assessment: Cull by date, custodian, keywords and concepts.\n- Review & tag: Collaborative review with privilege and redaction.\n- Production: Export to standard load files and formats.\n- Defensibility: Immutable audit trail for every action.\nHow it works:\n- Identify: Locate relevant data across every source.\n- Preserve: Apply holds instantly, across systems.\n- Produce: Review and export with a full chain of custody.\nTypical outcomes:\n- 70% lower outside review cost\n- hrs from request to hold\n- 1 source of truth for legal and IT"
+  },
+  {
+   "id": "product:consumer-data-privacy",
+   "kind": "product",
+   "title": "Consumer Data Privacy",
+   "url": "/products/consumer-data-privacy",
+   "text": "Consumer Data Privacy (Enterprise Foundation). Know where personal data lives. Prove you handle it right.\nDiscover and classify personal data across the enterprise, automate DSAR and right-to-be-forgotten requests, enforce consent and retention, and demonstrate compliance with GDPR, CCPA, HIPAA and more.\nKey capabilities:\n- PII discovery: ML classification across structured and unstructured data.\n- DSAR automation: Intake, verification, fulfilment and reporting workflows.\n- Right to be forgotten: Orchestrated deletion with legal exceptions.\n- Consent management: Capture and enforce purpose-based consent.\n- Retention enforcement: Policy-driven minimization across sources.\n- Regulator-ready reports: Evidence packs for audits and assessments.\nHow it works:\n- Discover: Map personal data and processing activities.\n- Automate: Turn regulations into executable policies.\n- Prove: Continuous evidence for every jurisdiction.\nTypical outcomes:\n- 95% DSARs fulfilled without manual effort\n- 30+ regulations covered by templates\n- 1 privacy view across the enterprise"
+  },
+  {
+   "id": "product:enterprise-ai",
+   "kind": "product",
+   "title": "Enterprise AI",
+   "url": "/products/enterprise-ai",
+   "text": "Enterprise AI (Enterprise AI (EAI)). Agents and copilots on data you already trust.\nBuild governed retrieval, agents and AI-ready pipelines on the Common Data Platform. Business users create copilots on curated data products while IT keeps policy, lineage and cost under control.\nKey capabilities:\n- Governed RAG: Retrieval respects access policy, masking and retention.\n- Agent studio: Compose tools, prompts and guardrails without code.\n- Model choice: Bring OpenAI, Anthropic, Gemini or private models.\n- Evaluation: Test sets, grounding scores and drift monitoring.\n- Cost control: Budgets, quotas and per-team attribution.\n- Audit every answer: Trace each response to its sources.\nHow it works:\n- Curate: Publish AI-ready data products with semantic context.\n- Build: Assemble agents and copilots in the studio.\n- Operate: Monitor quality, cost and compliance in production.\nTypical outcomes:\n- weeks not quarters, to production AI\n- 100% answers traceable to source\n- 0 shadow data copies"
+  },
+  {
+   "id": "product:data-sense",
+   "kind": "product",
+   "title": "Data Sense",
+   "url": "/products/data-sense",
+   "text": "Data Sense (Enterprise AI (EAI)). Know what you have before you build on it.\nAutomatically classify, profile and map data across every connected system, so every downstream AI product starts from an accurate, current picture of the estate instead of a stale inventory.\nKey capabilities:\n- Automated classification: ML models tag sensitivity, domain and quality on ingest.\n- Living data map: A catalog that updates as systems and schemas change.\n- Cross-system profiling: See the same entity across SAP, Salesforce, files and archive.\n- Feeds every EAI product: Data Ask, AI Warehouse and Agentic all start from Data Sense.\nHow it works:\n- Connect: Point Data Sense at any connected source.\n- Classify: Profile, tag and score data quality automatically.\n- Publish: Make the map available to every downstream product.\nTypical outcomes:\n- 90% less manual data mapping\n- 1 living catalog, not a point-in-time audit\n- days not quarters, to a governed inventory"
+  },
+  {
+   "id": "product:data-ask",
+   "kind": "product",
+   "title": "Data Ask",
+   "url": "/products/data-ask",
+   "text": "Data Ask (Enterprise AI (EAI)). Ask your enterprise data a question. Get a governed answer.\nA natural-language interface over the Common Data Platform, so business teams get direct, policy-checked answers from live, archived and lake data without waiting on a report or a query.\nKey capabilities:\n- Natural language, real data: Ask in plain English, get answers grounded in governed sources.\n- Access-aware: Every answer respects the asker's existing permissions.\n- Cites its sources: Every response links back to the records behind it.\n- Works across eras: Live, archived and lake data answer the same question.\nHow it works:\n- Ask: Type a question in plain language.\n- Retrieve: Data Ask queries governed sources under the asker's access.\n- Answer: Get a traceable answer, not a black box.\nTypical outcomes:\n- mins not days, from question to answer\n- 100% answers traceable to source\n- 0 new report backlog created"
+  },
+  {
+   "id": "product:application-knowledge-graph",
+   "kind": "product",
+   "title": "Pre-Build Application Knowledge Graph",
+   "url": "/products/application-knowledge-graph",
+   "text": "Pre-Build Application Knowledge Graph (Enterprise AI (EAI)). A ready-made semantic map of the systems you already run.\nPackaged knowledge graphs for SAP, Oracle and other major applications, encoding entities, relationships and business logic so AI agents understand your systems on day one instead of after months of modeling.\nKey capabilities:\n- Pre-built for major ERPs: SAP, Oracle EBS and PeopleSoft graphs out of the box.\n- Business logic included: Not just tables and columns, but what they mean.\n- Extensible: Layer on your own entities and custom objects.\n- Built by our AKG team: Or construct your own with AKG Construction Services.\nHow it works:\n- Select: Choose the packaged graph for your core applications.\n- Extend: Add custom objects and organization-specific relationships.\n- Activate: Agents and copilots reason over the graph immediately.\nTypical outcomes:\n- weeks not quarters, to a usable knowledge graph\n- 1 shared semantic model across AI products\n- 0 manual entity mapping to start"
+  },
+  {
+   "id": "product:ai-warehouse",
+   "kind": "product",
+   "title": "AI Warehouse",
+   "url": "/products/ai-warehouse",
+   "text": "AI Warehouse (Enterprise AI (EAI)). Storage built for retrieval, not just reporting.\nA governed, AI-ready storage layer with embeddings, vector search and semantic indexing built in, so agents and copilots retrieve the right context without a separate vector database to secure and maintain.\nKey capabilities:\n- Vector-native: Embeddings and semantic search alongside structured data.\n- One governance model: The same access and masking policy as the rest of the platform.\n- Model-agnostic: Works with OpenAI, Anthropic, Gemini or private embeddings.\n- Elastic scale: Grows with corpus size without a re-architecture.\nHow it works:\n- Index: Embed governed data products automatically.\n- Retrieve: Agents query by meaning, not just keyword.\n- Refresh: Embeddings stay current as source data changes.\nTypical outcomes:\n- 1 governed store instead of a shadow vector DB\n- 0 sensitive data copied outside policy\n- PB scale, same as the rest of the platform"
+  },
+  {
+   "id": "product:agentic",
+   "kind": "product",
+   "title": "Agentic",
+   "url": "/products/agentic",
+   "text": "Agentic (Enterprise AI (EAI)). Multi-step agents that act on your data, inside policy.\nCompose agents that plan, call tools and take multi-step actions across governed data products, with every action logged, policy-checked and reversible before it touches production.\nKey capabilities:\n- Tool composition: Chain retrieval, analysis and write-back tools visually.\n- Guardrails by default: Every action checked against policy before it runs.\n- Human in the loop: Approval steps for anything above a defined risk threshold.\n- Full run history: Replay any agent run for audit or debugging.\nHow it works:\n- Compose: Assemble an agent from governed tools and data products.\n- Guard: Set approval thresholds and policy checks.\n- Operate: Run in production with full observability.\nTypical outcomes:\n- 100% agent actions logged and auditable\n- weeks not quarters, to a production agent\n- 0 unreviewed writes to production systems"
+  },
+  {
+   "id": "product:ai-governance",
+   "kind": "product",
+   "title": "AI Governance",
+   "url": "/products/ai-governance",
+   "text": "AI Governance (Enterprise AI (EAI)). The policy layer every model call runs through.\nCentralized policy, lineage and audit for every prompt, retrieval and model response across the enterprise, so risk, legal and IT can see and control AI usage without slowing builders down.\nKey capabilities:\n- Prompt and response logging: Every interaction retained and searchable for audit.\n- Policy enforcement: Access, masking and retention rules apply at inference time.\n- Model inventory: Know which models touch which data, everywhere.\n- Risk scoring: Flag and route higher-risk use cases for review.\nHow it works:\n- Register: Every model and agent registers with the governance layer.\n- Enforce: Policy applies automatically to every call.\n- Report: Give risk and legal a live view, not a quarterly audit.\nTypical outcomes:\n- 1 policy layer across every model and agent\n- 100% AI usage visible to risk and legal\n- 0 shadow AI outside the perimeter"
+  },
+  {
+   "id": "product:ai-healthcare",
+   "kind": "product",
+   "title": "AI Healthcare",
+   "url": "/products/ai-healthcare",
+   "text": "AI Healthcare (Enterprise AI (EAI)). Governed AI on clinical and claims data, HIPAA in mind from the start.\nPurpose-built retrieval and agent tooling for payer, provider and life-sciences data, with PHI-aware masking, consent enforcement and clinical terminology built into the governance layer.\nKey capabilities:\n- PHI-aware by default: Automatic detection and masking of protected health information.\n- Clinical terminology: ICD-10, CPT and HL7/FHIR-aware retrieval and mapping.\n- Consent-enforced: Patient consent status gates every retrieval.\n- Audit for regulators: HIPAA-ready logs for every access and answer.\nHow it works:\n- Map: Classify clinical and claims data across source systems.\n- Govern: Apply PHI masking and consent policy automatically.\n- Activate: Build copilots for care teams, ops and research.\nTypical outcomes:\n- 100% PHI-aware retrieval and masking\n- 0 consent violations by design\n- weeks not years, to a compliant clinical copilot"
+  },
+  {
+   "id": "product:data-preservation",
+   "kind": "product",
+   "title": "Data Preservation",
+   "url": "/products/data-preservation",
+   "text": "Data Preservation (Cloud Archive Products). Immutable, searchable records for every era.\nA governed Preservation Zone that keeps records from every system and every decade immutable, retrievable and defensible, whether the reason is regulation, litigation or institutional memory.\nKey capabilities:\n- WORM-capable storage: Write-once, read-many preservation with retention locks.\n- Full-text and structured search: Find any record without restoring a backup.\n- Legal hold: Suspend deletion instantly across affected records.\n- Defensible deletion: Delete only what policy allows, with a full audit trail.\nHow it works:\n- Classify: Apply retention schedules by record type and jurisdiction.\n- Preserve: Move eligible records into the Preservation Zone.\n- Prove: Produce evidence of compliant handling on demand.\nTypical outcomes:\n- PB scale in production today\n- 100% audit-ready retention\n- 0 records lost to format obsolescence"
+  },
+  {
+   "id": "product:sap-archiving",
+   "kind": "product",
+   "title": "SAP Archiving",
+   "url": "/products/sap-archiving",
+   "text": "SAP Archiving (Cloud Archive Products). Shrink ECC and S/4HANA. Keep every transaction one click away.\nPurpose-built archiving for SAP, using certified SAP ILM and ArchiveLink integration to move completed documents out of production while finance, audit and support keep full access.\nKey capabilities:\n- SAP-certified integration: ILM and ArchiveLink, no custom middleware required.\n- Transparent to end users: Archived documents still open from familiar SAP screens.\n- S/4HANA migration ready: Archive first to shrink the system you're moving.\n- Audit and retention templates: Pre-built rules for common finance and logistics objects.\nHow it works:\n- Assess: Profile SAP object growth and access patterns.\n- Archive: Move eligible documents with referential integrity intact.\n- Optimize: Resize the production system and cut infrastructure cost.\nTypical outcomes:\n- 50% smaller S/4HANA migration, typical\n- 80% lower SAP infrastructure cost\n- 0 loss of document access for end users"
+  },
+  {
+   "id": "product:oracle-oebs-archiving",
+   "kind": "product",
+   "title": "Oracle / OEBS Archiving",
+   "url": "/products/oracle-oebs-archiving",
+   "text": "Oracle / OEBS Archiving (Cloud Archive Products). Tier inactive Oracle EBS history without touching production.\nArchive completed transactions and history from Oracle E-Business Suite and Oracle databases, keeping production lean while finance, procurement and support retain full reporting access.\nKey capabilities:\n- Certified Oracle EBS objects: Pre-built templates for GL, AP, AR, procurement and HR.\n- Database-level archiving: Archive at the table level for custom and legacy schemas.\n- Reporting continuity: Existing reports run unchanged against archived history.\n- Upgrade acceleration: Smaller databases mean faster Oracle upgrades and patches.\nHow it works:\n- Profile: Identify inactive EBS and database objects by module.\n- Archive: Move history with full audit and rollback capability.\n- Verify: Reconcile and confirm reporting parity post-archive.\nTypical outcomes:\n- 70% smaller production database, typical\n- 3x faster patching and upgrade cycles\n- 100% reporting continuity"
+  },
+  {
+   "id": "product:mainframe-archiving",
+   "kind": "product",
+   "title": "Mainframe Archiving",
+   "url": "/products/mainframe-archiving",
+   "text": "Mainframe Archiving (Cloud Archive Products). Exit mainframe storage costs. Keep the history.\nExtract and archive VSAM, DB2 and sequential mainframe data to a modern, searchable archive, cutting MIPS and storage cost while preserving full access for audit, compliance and reporting.\nKey capabilities:\n- Any mainframe source: VSAM, DB2, IMS, sequential files and COBOL copybooks.\n- MIPS reduction: Move cold data off the mainframe to cut processing cost.\n- Business-readable output: Copybook-aware conversion, not raw hex dumps.\n- Full-text search: Query decades of mainframe history without JCL.\nHow it works:\n- Extract: Pull data and copybook definitions from the mainframe.\n- Transform: Convert to business-readable, searchable formats.\n- Retire: Decommission mainframe storage on your schedule.\nTypical outcomes:\n- $M annual MIPS and storage savings\n- 100% history preserved and searchable\n- 0 JCL required to access archived data"
+  },
+  {
+   "id": "product:email-archiving",
+   "kind": "product",
+   "title": "Email Archiving",
+   "url": "/products/email-archiving",
+   "text": "Email Archiving (Cloud Archive Products). Every mailbox, compliant and searchable.\nCapture, retain and search email and messaging across the enterprise with defensible retention, legal hold and eDiscovery-ready export, without asking users to manage their own inbox size.\nKey capabilities:\n- Journaling capture: Every message captured at the source, tamper-proof.\n- Retention by policy: Rules by role, department or regulation.\n- Legal hold in seconds: Hold a custodian's mailbox instantly, enterprise-wide.\n- eDiscovery export: Standard load-file export for review platforms.\nHow it works:\n- Capture: Journal messages from Exchange, Google Workspace or both.\n- Retain: Apply retention and legal hold automatically.\n- Search: Full-text search across every mailbox, live or archived.\nTypical outcomes:\n- 100% of mailboxes covered by policy\n- mins not days, to apply a legal hold\n- 0 unmanaged mailbox growth"
+  },
+  {
+   "id": "product:file-archiving",
+   "kind": "product",
+   "title": "File Archiving",
+   "url": "/products/file-archiving",
+   "text": "File Archiving (Cloud Archive Products). Tier cold files off primary storage, keep them one click away.\nIdentify and move inactive files from file shares, NAS and cloud drives to low-cost archive storage with stub-based access, so users and applications never notice the difference.\nKey capabilities:\n- Transparent stubbing: Files open normally; retrieval is automatic and invisible.\n- Policy-based tiering: Age, size and access-pattern rules decide what moves.\n- Any source: Windows and Linux file shares, NAS and cloud drives.\n- Storage cost visibility: See savings by share, department or business unit.\nHow it works:\n- Scan: Profile file shares for cold, duplicate and orphaned data.\n- Archive: Move eligible files with stubs left in place.\n- Reclaim: Free primary storage and defer expensive upgrades.\nTypical outcomes:\n- 60% less primary file storage, typical\n- 0 user-visible change in file access\n- $ storage upgrades deferred or avoided"
+  },
+  {
+   "id": "product:database-archiving",
+   "kind": "product",
+   "title": "Database Archiving",
+   "url": "/products/database-archiving",
+   "text": "Database Archiving (Cloud Archive Products). Archive inactive rows. Keep every relationship intact.\nMove aged records out of production databases at the row level, preserving referential integrity across related tables so applications, reports and queries keep working exactly as before.\nKey capabilities:\n- Referential integrity: Related rows across tables move and stay linked together.\n- Any major database: Oracle, SQL Server, DB2, PostgreSQL and more.\n- Application-transparent: Archived rows remain queryable through existing apps.\n- Growth control: Keep production databases at a predictable, stable size.\nHow it works:\n- Model: Map table relationships and define archive eligibility.\n- Archive: Move rows in referentially consistent batches.\n- Query: Access archived and live rows through the same interface.\nTypical outcomes:\n- 65% smaller production database, typical\n- 3x faster backup and recovery cycles\n- 0 broken foreign-key relationships"
+  },
+  {
+   "id": "product:active-archiving-compliance",
+   "kind": "product",
+   "title": "Active Archiving for Compliance",
+   "url": "/products/active-archiving-compliance",
+   "text": "Active Archiving for Compliance (Cloud Archive Products). Retention, legal hold and defensible deletion, always current.\nKeep archived records continuously compliant as regulations change, with policy-driven retention, automated legal hold and defensible deletion that produces evidence, not just a deletion log.\nKey capabilities:\n- Policy templates: SEC 17a-4, FINRA, HIPAA, GDPR and sector-specific rules.\n- Automated legal hold: Suspend deletion for affected records instantly.\n- Defensible deletion: Delete only what policy allows, with evidence retained.\n- Continuous compliance: Policies update centrally as regulations change.\nHow it works:\n- Configure: Apply retention templates by record type and jurisdiction.\n- Monitor: Track compliance posture across the archive continuously.\n- Evidence: Produce audit-ready proof of policy adherence.\nTypical outcomes:\n- 30+ regulations covered by templates\n- 100% audit-ready compliance posture\n- 0 premature or missed deletions"
+  },
+  {
+   "id": "product:eai-pharma",
+   "kind": "product",
+   "title": "Enterprise AI for Pharma",
+   "url": "/products/eai-pharma",
+   "text": "Enterprise AI for Pharma (EAI Pharma). Governed AI for research, regulatory and commercial data.\nA purpose-built edition of Enterprise AI for pharmaceutical and life-sciences data, with GxP-aware controls, regulatory document handling and research-data governance built into every retrieval.\nKey capabilities:\n- GxP-aware governance: Controls aligned to GxP validation and audit expectations.\n- Regulatory document handling: Structured retrieval across submissions and correspondence.\n- Research data lineage: Full provenance from raw lab data to published result.\n- Commercial and R&D, one platform: Shared governance across pipeline and go-to-market data.\nHow it works:\n- Map: Classify research, regulatory and commercial data sources.\n- Govern: Apply GxP-aligned controls and lineage tracking.\n- Activate: Build copilots for research, regulatory affairs and commercial teams.\nTypical outcomes:\n- 100% retrievals with full data lineage\n- weeks not years, to a validated AI use case\n- 0 unauthorized cross-study data access"
+  },
+  {
+   "id": "product:enterprise-data-governance",
+   "kind": "product",
+   "title": "Enterprise Data Governance",
+   "url": "/products/enterprise-data-governance",
+   "text": "Enterprise Data Governance (Enterprise Foundation). One policy layer across every system, every era.\nDefine access, retention, quality and privacy policy once, and enforce it consistently across live systems, the archive, the lake and every AI product built on top of them.\nKey capabilities:\n- Policy as code: Author rules once, enforce them everywhere automatically.\n- Unified access model: RBAC and ABAC consistent across every data era.\n- Data quality scorecards: Track and improve quality by domain and source.\n- Regulatory mapping: Map policies directly to the regulations that require them.\nHow it works:\n- Define: Author policy templates for access, retention and quality.\n- Enforce: Apply policy consistently across every connected system.\n- Report: Give compliance a continuous, not quarterly, view.\nTypical outcomes:\n- 1 policy layer instead of one per system\n- 100% policy coverage across connected sources\n- 0 conflicting access rules between systems"
+  },
+  {
+   "id": "product:enterprise-content-services",
+   "kind": "product",
+   "title": "Enterprise Content Services (ECS)",
+   "url": "/products/enterprise-content-services",
+   "text": "Enterprise Content Services (ECS) (Enterprise Foundation). Documents and unstructured content, governed like everything else.\nCapture, classify and manage documents, scans, contracts and unstructured content alongside structured records, so content lives under the same governance, search and retention as the rest of the platform.\nKey capabilities:\n- Any content type: Documents, scans, contracts, images and multimedia.\n- Automated classification: ML-based tagging and routing on capture.\n- Unified search: Content and structured records searched together.\n- Retention and disposition: The same policy engine as the rest of the platform.\nHow it works:\n- Capture: Ingest documents from scanners, email and existing repositories.\n- Classify: Tag content type, sensitivity and retention automatically.\n- Govern: Apply enterprise-wide retention and access policy.\nTypical outcomes:\n- 1 content and records repository\n- 80% faster document retrieval, typical\n- 0 content outside enterprise retention policy"
+  },
+  {
+   "id": "family:archiving",
+   "kind": "product-family",
+   "title": "Archiving & retirement",
+   "url": "/products",
+   "text": "Product family: Archiving & retirement. Move inactive data out of production. Keep every record one click away.\nProducts in this family: Enterprise Archiving, Application Retirement, Data Preservation, SAP Archiving, Oracle / OEBS Archiving, Mainframe Archiving, Email Archiving, File Archiving, Database Archiving, Active Archiving for Compliance"
+  },
+  {
+   "id": "family:ai",
+   "kind": "product-family",
+   "title": "Enterprise AI",
+   "url": "/products",
+   "text": "Product family: Enterprise AI. Ask questions of governed enterprise data and get answers you can cite.\nProducts in this family: Enterprise AI, Data Sense, Data Ask, Pre-Build Application Knowledge Graph, AI Warehouse, Agentic, AI Healthcare, Enterprise AI for Pharma"
+  },
+  {
+   "id": "family:governance",
+   "kind": "product-family",
+   "title": "Governance & privacy",
+   "url": "/products",
+   "text": "Product family: Governance & privacy. Find, protect and prove control of sensitive data in every jurisdiction.\nProducts in this family: AI Governance, Enterprise Data Governance, Consumer Data Privacy"
+  },
+  {
+   "id": "family:platform",
+   "kind": "product-family",
+   "title": "Platform",
+   "url": "/products",
+   "text": "Product family: Platform. One governed foundation that runs in our cloud, yours or your data centre.\nProducts in this family: Solix Enterprise Edition, Common Data Platform, Enterprise Data Lake"
+  },
+  {
+   "id": "family:content",
+   "kind": "product-family",
+   "title": "Content services & eDiscovery",
+   "url": "/products",
+   "text": "Product family: Content services & eDiscovery. Understand every document, in any language, and find what matters fast.\nProducts in this family: Enterprise Content Services (ECS), eDiscovery"
+  },
+  {
+   "id": "solution:infrastructure-optimization",
+   "kind": "solution",
+   "title": "Infrastructure Optimization",
+   "url": "/solutions#infrastructure-optimization",
+   "text": "Solution: Infrastructure Optimization (Preservation & Archive). Shrink production databases, retire redundant applications and reclaim storage, licenses and compute, without losing access to a single record.\nResult: 80% lower TCO\nProducts used: Enterprise Archiving, Application Retirement"
+  },
+  {
+   "id": "solution:compliance-governance",
+   "kind": "solution",
+   "title": "Compliance & Governance",
+   "url": "/solutions#compliance-governance",
+   "text": "Solution: Compliance & Governance (Preservation & Archive). Retention, legal hold, defensible deletion and audit trails that satisfy SEC, FINRA, HIPAA, GDPR and sector regulators.\nResult: 30+ regulations\nProducts used: eDiscovery, Consumer Data Privacy"
+  },
+  {
+   "id": "solution:ai-readiness",
+   "kind": "solution",
+   "title": "AI & Analytics Readiness",
+   "url": "/solutions#ai-readiness",
+   "text": "Solution: AI & Analytics Readiness (AI Solutions). Make every dataset discoverable, trustworthy and usable by analysts and AI agents through a governed lake and semantic catalog.\nResult: 10x faster to first use case\nProducts used: Enterprise Data Lake, Enterprise AI"
+  },
+  {
+   "id": "solution:cloud-migration",
+   "kind": "solution",
+   "title": "Cloud Migration",
+   "url": "/solutions#cloud-migration",
+   "text": "Solution: Cloud Migration (Preservation & Archive). Migrate less by archiving first. Move only active data to the cloud, preserve the rest, and cut migration time and cost dramatically.\nResult: 50% smaller migrations\nProducts used: Common Data Platform, Enterprise Archiving"
+  },
+  {
+   "id": "solution:data-preservation",
+   "kind": "solution",
+   "title": "Data Preservation",
+   "url": "/solutions#data-preservation",
+   "text": "Solution: Data Preservation (Preservation & Archive). Immutable, searchable preservation of records from every era and every system in a governed Preservation Zone.\nResult: PB-scale\nProducts used: Common Data Platform, Data Preservation"
+  },
+  {
+   "id": "solution:legacy-modernization",
+   "kind": "solution",
+   "title": "Active Archiving",
+   "url": "/solutions#legacy-modernization",
+   "text": "Solution: Active Archiving (Preservation & Archive). Exit mainframe, ERP and custom application debt on your timeline while keeping every record one click from production.\nResult: $M reclaimed annually\nProducts used: Application Retirement"
+  },
+  {
+   "id": "solution:ma-data-preservation",
+   "kind": "solution",
+   "title": "M&A Data Preservation",
+   "url": "/solutions#ma-data-preservation",
+   "text": "Solution: M&A Data Preservation (Preservation & Archive). Preserve acquired systems through integration and beyond, so due-diligence records and legacy history survive the merger.\nResult: 0 records lost in transition\nProducts used: Data Preservation, Application Retirement"
+  },
+  {
+   "id": "solution:archive-modernization",
+   "kind": "solution",
+   "title": "Archive Modernization",
+   "url": "/solutions#archive-modernization",
+   "text": "Solution: Archive Modernization (Preservation & Archive). Move off aging, unsupported archive platforms onto governed cloud archiving without a data migration project of its own.\nResult: Zero-downtime cutover\nProducts used: Data Preservation, Common Data Platform"
+  },
+  {
+   "id": "solution:unstructured-data-mgmt",
+   "kind": "solution",
+   "title": "Unstructured Data Mgmt",
+   "url": "/solutions#unstructured-data-mgmt",
+   "text": "Solution: Unstructured Data Mgmt (Preservation & Archive). Govern files, email and documents with the same policy engine as structured records, at petabyte scale.\nResult: 60% less primary storage\nProducts used: File Archiving, Email Archiving, Enterprise Content Services (ECS)"
+  },
+  {
+   "id": "solution:self-service-analytics",
+   "kind": "solution",
+   "title": "Self-Service Enterprise Analytics",
+   "url": "/solutions#self-service-analytics",
+   "text": "Solution: Self-Service Enterprise Analytics (AI Solutions). Business teams query governed data directly, without waiting on a report backlog or risking a shadow export.\nResult: 90% fewer ad hoc report requests\nProducts used: Data Ask, Enterprise Data Lake"
+  },
+  {
+   "id": "solution:hybrid-query",
+   "kind": "solution",
+   "title": "Hybrid Query",
+   "url": "/solutions#hybrid-query",
+   "text": "Solution: Hybrid Query (AI Solutions). One query plane across live systems, the lake and the archive, so a question about the last decade doesn't need three tools.\nResult: 1 query plane, every era\nProducts used: Common Data Platform, Data Ask"
+  },
+  {
+   "id": "solution:customer-built-ai",
+   "kind": "solution",
+   "title": "Customer-Built AI Applications",
+   "url": "/solutions#customer-built-ai",
+   "text": "Solution: Customer-Built AI Applications (AI Solutions). Business builders compose apps and copilots on curated data products, inside the guardrails IT already defined.\nResult: Weeks to production, not quarters\nProducts used: Agentic, Enterprise AI"
+  },
+  {
+   "id": "solution:ai-governance-trust",
+   "kind": "solution",
+   "title": "AI Governance & Trust",
+   "url": "/solutions#ai-governance-trust",
+   "text": "Solution: AI Governance & Trust (AI Solutions). Policy-aware retrieval and traceable answers, so every model call is visible to risk, legal and IT.\nResult: 100% of AI usage visible\nProducts used: AI Governance, Enterprise AI"
+  },
+  {
+   "id": "solution:intelligent-classification",
+   "kind": "solution",
+   "title": "Intelligent Classification & Discovery",
+   "url": "/solutions#intelligent-classification",
+   "text": "Solution: Intelligent Classification & Discovery (AI Solutions). Automatically find, classify and map data across every connected system before you build anything on top of it.\nResult: 90% less manual mapping\nProducts used: Data Sense"
+  },
+  {
+   "id": "solution:agentic-operations",
+   "kind": "solution",
+   "title": "Agentic Operations",
+   "url": "/solutions#agentic-operations",
+   "text": "Solution: Agentic Operations (AI Solutions). Agents that plan, retrieve and act across governed data products, with every step logged and policy-checked.\nResult: 100% of agent actions audited\nProducts used: Agentic"
+  },
+  {
+   "id": "industry:financial-services",
+   "kind": "industry",
+   "title": "Financial Services",
+   "url": "/industries/financial-services",
+   "text": "Industry: Financial Services. Compliance-grade archives and AI for banks, brokers and asset managers.\nMeet SEC 17a-4, FINRA and Basel retention while shrinking core banking and trading system footprints.\nChallenges:\n- Books-and-records retention across email, chat and trades\n- Legacy core systems too costly to run and too risky to retire\n- AI initiatives blocked by data lineage and privacy concerns"
+  },
+  {
+   "id": "industry:healthcare",
+   "kind": "industry",
+   "title": "Healthcare & Life Sciences",
+   "url": "/industries/healthcare",
+   "text": "Industry: Healthcare & Life Sciences. Protect patient data. Preserve clinical history. Accelerate research.\nArchive legacy EHRs, retire acquired systems and enable HIPAA-compliant analytics and AI.\nChallenges:\n- Dozens of legacy EHR/EMR systems after M&A\n- HIPAA retention and breach exposure\n- Research data locked in silos"
+  },
+  {
+   "id": "industry:manufacturing",
+   "kind": "industry",
+   "title": "Manufacturing",
+   "url": "/industries/manufacturing",
+   "text": "Industry: Manufacturing. Leaner ERP. Longer product memory. Smarter operations.\nArchive SAP and Oracle history, retire plant-level systems and unify OT/IT data for predictive AI.\nChallenges:\n- ERP growth slowing month-end and upgrades\n- Decades of product and quality records to preserve\n- OT and IT data never meet"
+  },
+  {
+   "id": "industry:public-sector",
+   "kind": "industry",
+   "title": "Government",
+   "url": "/industries/public-sector",
+   "text": "Industry: Government. Transparent, compliant, cost-effective records for the public.\nMeet records management mandates, respond to FOIA quickly and modernize aging systems within budget.\nChallenges:\n- Strict records schedules and FOIA response times\n- Aging systems with retiring specialist staff\n- Budget pressure and cloud mandates"
+  },
+  {
+   "id": "industry:pharma-biotech",
+   "kind": "industry",
+   "title": "Pharma & Biotech",
+   "url": "/industries/pharma-biotech",
+   "text": "Industry: Pharma & Biotech. Governed data and AI for research, regulatory and commercial teams.\nPreserve research and regulatory history, meet GxP and 21 CFR Part 11 expectations, and enable AI on trial, safety and commercial data without breaking chain of custody.\nChallenges:\n- Research and trial data locked in siloed, legacy systems\n- GxP validation and audit expectations on every change\n- Commercial and R&D teams need AI, but not shared data access"
+  },
+  {
+   "id": "industry:retail",
+   "kind": "industry",
+   "title": "Retail & CPG",
+   "url": "/industries/retail",
+   "text": "Industry: Retail & CPG. Every transaction preserved. Every customer respected.\nManage explosive POS and e-commerce growth, automate consumer privacy and power personalization safely.\nChallenges:\n- Billions of transactions inflating databases\n- CCPA/GDPR consumer requests at volume\n- Personalization needs trusted, consented data"
+  },
+  {
+   "id": "industry:energy",
+   "kind": "industry",
+   "title": "Energy & Utilities",
+   "url": "/industries/energy",
+   "text": "Industry: Energy & Utilities. Regulatory memory for critical infrastructure.\nPreserve asset, meter and safety records for decades while retiring legacy systems and enabling grid analytics.\nChallenges:\n- Multi-decade regulatory retention\n- Legacy asset systems after mergers\n- Smart-meter data volumes"
+  },
+  {
+   "id": "industry:telecom",
+   "kind": "industry",
+   "title": "Telecommunications",
+   "url": "/industries/telecom",
+   "text": "Industry: Telecommunications. CDR-scale data management, subscriber privacy built in.\nArchive call detail and billing records, retire legacy BSS/OSS and unlock churn and network AI.\nChallenges:\n- Petabytes of CDR and billing data\n- Lawful intercept and retention obligations\n- Legacy BSS/OSS after consolidation"
+  },
+  {
+   "id": "industry:insurance",
+   "kind": "industry",
+   "title": "Insurance",
+   "url": "/industries/insurance",
+   "text": "Industry: Insurance. Policies and claims preserved for the life of the promise.\nRetire legacy policy administration systems, meet retention rules and enable underwriting AI.\nChallenges:\n- Long-tail policy and claims retention\n- Multiple PAS platforms after acquisitions\n- Underwriting AI needs historical claims"
+  },
+  {
+   "id": "resource:build-enterprise-archive-in-the-cloud",
+   "kind": "resource",
+   "title": "How to Build an Enterprise Archive in the Cloud",
+   "url": "/resources/build-enterprise-archive-in-the-cloud",
+   "text": "How to Build an Enterprise Archive in the Cloud (whitepaper, gated download). A reference architecture for compliant, low-cost archiving with SOLIXCloud and the Common Data Platform.\nMost cloud migrations move everything and pay for it twice. This reference architecture shows how to land inactive data in a governed, low-cost archive first, then migrate only what production really needs.\nRelated products: Enterprise Archiving, Common Data Platform"
+  },
+  {
+   "id": "resource:build-enterprise-archive-in-the-cloud#0",
+   "kind": "article",
+   "title": "How to Build an Enterprise Archive in the Cloud: Why archives belong in the cloud now",
+   "url": "/resources/build-enterprise-archive-in-the-cloud",
+   "text": "From \"How to Build an Enterprise Archive in the Cloud\", section \"Why archives belong in the cloud now\":\nTen years ago the case for an on-premises archive was storage cost. Today the case for a cloud archive is everything else: elastic ingest, object storage that is cheaper than tape, immutable retention as a native feature, and the ability to put AI to work on records the moment they land. The economics flipped; most architectures have not.\nThe organizations getting this right treat the archive as the first system to move, not the last. An archive-first program shrinks the production estate before it migrates, so the migration itself is smaller, faster and safer.\n- 60-80% of ERP data typically inactive\n- 50% smaller migrations after archive-first\n- PB scale on object storage"
+  },
+  {
+   "id": "resource:build-enterprise-archive-in-the-cloud#1",
+   "kind": "article",
+   "title": "How to Build an Enterprise Archive in the Cloud: Reference architecture",
+   "url": "/resources/build-enterprise-archive-in-the-cloud",
+   "text": "From \"How to Build an Enterprise Archive in the Cloud\", section \"Reference architecture\":\nThe Solix Common Data Platform (CDP) provides four zones. The Landing zone ingests from 150+ connectors with validation and reconciliation. The Curated zone applies schema, classification and business context. The Preservation zone holds records under retention, legal hold and WORM controls. The Published zone exposes governed data products to search, SQL, REST and vector consumers.\n- Object storage (S3, ADLS, GCS) as the durable substrate, Parquet/Iceberg as the open format\n- Elastic compute for ingest and query, scaled independently\n- A single catalog spanning archive, lake and live applications\n- Policy engine for retention, hold, masking and defensible deletion\n- Audit log of every access and policy decision"
+  },
+  {
+   "id": "resource:build-enterprise-archive-in-the-cloud#2",
+   "kind": "article",
+   "title": "How to Build an Enterprise Archive in the Cloud: Ingest patterns that survive contact with reality",
+   "url": "/resources/build-enterprise-archive-in-the-cloud",
+   "text": "From \"How to Build an Enterprise Archive in the Cloud\", section \"Ingest patterns that survive contact with reality\":\nBulk historical loads and incremental deltas need different plumbing. Bulk loads prioritize throughput and reconciliation reports; incremental loads prioritize CDC fidelity and schema evolution. CDP handles both, but the design decision that matters most is where you draw the archive boundary: by date, by business status (closed fiscal year, completed order) or by regulatory class.\nThe most common failure mode is archiving by date alone. Closed-status rules keep referential integrity intact and make user access seamless because users see complete business objects, not truncated ones."
+  },
+  {
+   "id": "resource:build-enterprise-archive-in-the-cloud#3",
+   "kind": "article",
+   "title": "How to Build an Enterprise Archive in the Cloud: Compliance built in, not bolted on",
+   "url": "/resources/build-enterprise-archive-in-the-cloud",
+   "text": "From \"How to Build an Enterprise Archive in the Cloud\", section \"Compliance built in, not bolted on\":\nSEC 17a-4, FINRA 4511, HIPAA and GDPR all reward the same design: immutable storage, retention by record class, legal hold that spans systems, and an audit trail nobody can edit. The Preservation zone implements each as configuration, with regulator-ready evidence exports."
+  },
+  {
+   "id": "resource:build-enterprise-archive-in-the-cloud#4",
+   "kind": "article",
+   "title": "How to Build an Enterprise Archive in the Cloud: Cost model",
+   "url": "/resources/build-enterprise-archive-in-the-cloud",
+   "text": "From \"How to Build an Enterprise Archive in the Cloud\", section \"Cost model\":\nA typical program moves inactive data from tier-1 database storage (often $5-15/GB/year fully loaded) to object storage with lifecycle tiers (under $0.30/GB/year). Add avoided license growth, faster batch windows and smaller DR footprints, and archive-first programs usually pay back within the first year.\n\"Our S/4HANA migration was half the size it would have been. Archive-first paid for itself before cut-over.\" - VP, Enterprise Applications, global manufacturer"
+  },
+  {
+   "id": "resource:build-enterprise-archive-in-the-cloud#5",
+   "kind": "article",
+   "title": "How to Build an Enterprise Archive in the Cloud: Getting started",
+   "url": "/resources/build-enterprise-archive-in-the-cloud",
+   "text": "From \"How to Build an Enterprise Archive in the Cloud\", section \"Getting started\":\n- Assess: Profile growth, access patterns and retention obligations per application.\n- Pilot: Archive one high-growth module end to end with user access validated.\n- Scale: Apply templates across the portfolio with a run team and savings dashboards."
+  },
+  {
+   "id": "resource:archive-first-fastest-path-to-s4hana",
+   "kind": "resource",
+   "title": "Why Archive-First Is the Fastest Path to S/4HANA",
+   "url": "/resources/archive-first-fastest-path-to-s4hana",
+   "text": "Why Archive-First Is the Fastest Path to S/4HANA (blog). Migrate less, cut risk and land on time by moving inactive ERP history before you move the system.\nS/4HANA programs slip for one reason more than any other: they try to move two decades of history along with the system. Move the history first, and the migration gets smaller, cheaper and safer.\nRelated products: SAP Archiving, Enterprise Archiving"
+  },
+  {
+   "id": "resource:archive-first-fastest-path-to-s4hana#0",
+   "kind": "article",
+   "title": "Why Archive-First Is the Fastest Path to S/4HANA: The hidden variable in every S/4 plan",
+   "url": "/resources/archive-first-fastest-path-to-s4hana",
+   "text": "From \"Why Archive-First Is the Fastest Path to S/4HANA\", section \"The hidden variable in every S/4 plan\":\nAsk a program manager what determines S/4HANA migration duration and you will hear about custom code remediation, testing cycles and business readiness. Ask a database administrator and you will hear a single number: how many terabytes we have to move. In most ECC estates, 60 to 80 percent of that volume is closed, inactive history nobody reads but everybody must keep.\nArchive-first attacks the variable directly. Inactive documents, closed fiscal years and completed orders move to a governed archive before the conversion begins. What migrates is the live business. What remains accessible is everything."
+  },
+  {
+   "id": "resource:archive-first-fastest-path-to-s4hana#1",
+   "kind": "article",
+   "title": "Why Archive-First Is the Fastest Path to S/4HANA: What changes when the database is half the size",
+   "url": "/resources/archive-first-fastest-path-to-s4hana",
+   "text": "From \"Why Archive-First Is the Fastest Path to S/4HANA\", section \"What changes when the database is half the size\":\n- Conversion runtime drops, often from days to hours, so downtime windows become realistic\n- Test cycles complete faster and cover more scenarios\n- HANA memory sizing (and license) shrinks in proportion\n- DR, backup and refresh footprints follow the production reduction\n- Risk concentrates on live data, where the business is paying attention\n- 50% smaller conversion volume, typical\n- 3x faster test refresh cycles\n- 1 click from archived history for users"
+  },
+  {
+   "id": "resource:archive-first-fastest-path-to-s4hana#2",
+   "kind": "article",
+   "title": "Why Archive-First Is the Fastest Path to S/4HANA: But users still need the history",
+   "url": "/resources/archive-first-fastest-path-to-s4hana",
+   "text": "From \"Why Archive-First Is the Fastest Path to S/4HANA\", section \"But users still need the history\":\nThis is where many archive programs stalled in the past: archived data disappeared into a vault nobody could query. The Solix Common Data Platform keeps archived SAP data in open formats with full business context, including attachments and relationships, and exposes it through familiar transactions, reports and search. Auditors, controllers and customer service teams see complete records without touching production.\nBecause the archive is a governed Preservation Zone, retention, legal hold and defensible deletion come along for free. Many programs discover their first fully documented retention schedule as a side effect."
+  },
+  {
+   "id": "resource:archive-first-fastest-path-to-s4hana#3",
+   "kind": "article",
+   "title": "Why Archive-First Is the Fastest Path to S/4HANA: Sequencing the program",
+   "url": "/resources/archive-first-fastest-path-to-s4hana",
+   "text": "From \"Why Archive-First Is the Fastest Path to S/4HANA\", section \"Sequencing the program\":\n- Profile: Quantify inactive volume by module and closed-status rule; build the business case.\n- Archive: Move eligible history with validation, reconciliation and user access testing.\n- Convert: Run the S/4HANA conversion on a lean system with a smaller cut-over window.\n- Retire: Decommission the legacy ECC landscape and reclaim licenses.\n\"We stopped treating the archive as a phase-two nicety and made it phase zero. That decision saved the go-live date.\" - Program Director, S/4HANA transformation"
+  },
+  {
+   "id": "resource:governed-rag-enterprise-ai-without-shadow-copies",
+   "kind": "resource",
+   "title": "Governed RAG: Enterprise AI Without the Shadow Copies",
+   "url": "/resources/governed-rag-enterprise-ai-without-shadow-copies",
+   "text": "Governed RAG: Enterprise AI Without the Shadow Copies (webinar). Live walkthrough of building a policy-aware copilot on curated data products.\nRetrieval-augmented generation is only as trustworthy as the data it retrieves. This session shows how to build a copilot on curated data products that respects access policy, masking and retention on every query.\nRelated products: Enterprise AI, AI Governance"
+  },
+  {
+   "id": "resource:governed-rag-enterprise-ai-without-shadow-copies#0",
+   "kind": "article",
+   "title": "Governed RAG: Enterprise AI Without the Shadow Copies: What you'll see",
+   "url": "/resources/governed-rag-enterprise-ai-without-shadow-copies",
+   "text": "From \"Governed RAG: Enterprise AI Without the Shadow Copies\", section \"What you'll see\":\nIn this 45-minute recorded session, the Solix Enterprise AI team builds a working policy-aware copilot from scratch: publishing a curated data product, wiring governed retrieval, adding guardrails, and tracing every answer back to source records.\n- Why most RAG pilots create shadow copies of sensitive data, and how to avoid it\n- Publishing an AI-ready data product with semantic context and lineage\n- Retrieval that enforces row, column and attribute-level policy at query time\n- Grounding scores, evaluation sets and drift monitoring\n- Cost attribution per team and per agent"
+  },
+  {
+   "id": "resource:governed-rag-enterprise-ai-without-shadow-copies#1",
+   "kind": "article",
+   "title": "Governed RAG: Enterprise AI Without the Shadow Copies: The shadow copy problem",
+   "url": "/resources/governed-rag-enterprise-ai-without-shadow-copies",
+   "text": "From \"Governed RAG: Enterprise AI Without the Shadow Copies\", section \"The shadow copy problem\":\nMost enterprise AI experiments start with an export: a CSV, a dump into a vector database, a notebook with credentials. Each is a copy that escapes retention, masking and access control. Multiply by fifty teams and you have a governance problem larger than the one you started with.\nRetrieval should query governed data products in place. Policy decisions happen at query time, per user, with an audit record. No copies, no exports, no exceptions."
+  },
+  {
+   "id": "resource:governed-rag-enterprise-ai-without-shadow-copies#2",
+   "kind": "article",
+   "title": "Governed RAG: Enterprise AI Without the Shadow Copies: Architecture walkthrough",
+   "url": "/resources/governed-rag-enterprise-ai-without-shadow-copies",
+   "text": "From \"Governed RAG: Enterprise AI Without the Shadow Copies\", section \"Architecture walkthrough\":\nThe demo uses the Common Data Platform's Published zone as the retrieval surface, the Enterprise AI agent studio to compose tools and prompts, and a bring-your-own model (OpenAI, Anthropic, Gemini or private). Every response includes citations to preserved records, including data from retired applications.\n- 100% answers traceable to source\n- 0 data copies outside policy\n- weeks to production, not quarters"
+  },
+  {
+   "id": "resource:governed-rag-enterprise-ai-without-shadow-copies#3",
+   "kind": "article",
+   "title": "Governed RAG: Enterprise AI Without the Shadow Copies: Who should watch",
+   "url": "/resources/governed-rag-enterprise-ai-without-shadow-copies",
+   "text": "From \"Governed RAG: Enterprise AI Without the Shadow Copies\", section \"Who should watch\":\nData platform leaders, AI/ML engineering managers, security and privacy officers, and business technologists who have been asked to build a copilot and want to do it without a governance incident."
+  },
+  {
+   "id": "resource:retiring-60-applications-after-utility-merger",
+   "kind": "resource",
+   "title": "Retiring 60 Applications After a Utility Merger",
+   "url": "/resources/retiring-60-applications-after-utility-merger",
+   "text": "Retiring 60 Applications After a Utility Merger (casestudy, gated download). How one energy company preserved 12 PB of records and cut $18M in annual run cost.\nWhen two utilities merged, they inherited two of everything: asset systems, billing platforms, meter data stores. Here is how they retired 60 applications, preserved 12 PB of records and cut $18M in annual run cost.\nRelated products: Application Retirement"
+  },
+  {
+   "id": "resource:retiring-60-applications-after-utility-merger#0",
+   "kind": "article",
+   "title": "Retiring 60 Applications After a Utility Merger: The situation",
+   "url": "/resources/retiring-60-applications-after-utility-merger",
+   "text": "From \"Retiring 60 Applications After a Utility Merger\", section \"The situation\":\nThe combined company had more than 400 applications, dozens of them duplicates. Regulatory retention for asset, safety and meter records runs to decades. The IT budget assumed synergy savings that could not materialize while both estates kept running.\n- 60 applications retired\n- 12 PB records preserved\n- $18M annual run cost eliminated"
+  },
+  {
+   "id": "resource:retiring-60-applications-after-utility-merger#1",
+   "kind": "article",
+   "title": "Retiring 60 Applications After a Utility Merger: Why previous attempts stalled",
+   "url": "/resources/retiring-60-applications-after-utility-merger",
+   "text": "From \"Retiring 60 Applications After a Utility Merger\", section \"Why previous attempts stalled\":\n- Each retirement was a bespoke project with its own extract logic and access solution\n- Legal and compliance could not sign off without provable retention and hold\n- Business users feared losing access to history they needed for rate cases and audits\n- Specialist staff for legacy systems were retiring faster than the systems"
+  },
+  {
+   "id": "resource:retiring-60-applications-after-utility-merger#2",
+   "kind": "article",
+   "title": "Retiring 60 Applications After a Utility Merger: The factory approach",
+   "url": "/resources/retiring-60-applications-after-utility-merger",
+   "text": "From \"Retiring 60 Applications After a Utility Merger\", section \"The factory approach\":\nWorking with Solix Professional Services, the company established an Application Retirement Factory on the Common Data Platform. Templates covered discovery, extract and validation, retention mapping, business view design and decommission sign-off. Each wave retired 8 to 12 applications in 90 days.\n- Inventory: Rationalized 400+ applications; prioritized by run cost, risk and staff dependency.\n- Preserve: Extracted data and metadata into the Preservation Zone with reconciliation certificates.\n- Access: Published business views and reports so users kept working from familiar screens.\n- Decommission: Shut down, cancelled licenses and hardware, documented chain of custody.\nRecords from every retired system now carry retention by class and jurisdiction, with legal hold spanning the entire preserved estate. The first post-merger audit closed with zero findings."
+  },
+  {
+   "id": "resource:retiring-60-applications-after-utility-merger#3",
+   "kind": "article",
+   "title": "Retiring 60 Applications After a Utility Merger: What's next",
+   "url": "/resources/retiring-60-applications-after-utility-merger",
+   "text": "From \"Retiring 60 Applications After a Utility Merger\", section \"What's next\":\nWith 12 PB of governed history in one platform, the company is now building grid reliability and predictive maintenance models on Enterprise AI, using data that previously lived in systems nobody could safely query.\n\"We stopped paying to keep the lights on in systems whose only job was remembering. Now the memory is a platform capability.\" - CIO, combined utility"
+  },
+  {
+   "id": "resource:trust-perimeter-model-for-business-led-ai",
+   "kind": "resource",
+   "title": "The Trust Perimeter: A New Model for Business-Led AI",
+   "url": "/resources/trust-perimeter-model-for-business-led-ai",
+   "text": "The Trust Perimeter: A New Model for Business-Led AI (blog). Why IT should define boundaries, not build every solution, and how Enterprise Edition makes it real.\nCentral IT cannot build every AI solution the business wants, and the business cannot be trusted to build them without guardrails. The trust perimeter resolves the tension: IT defines the boundary, the business builds inside it.\nRelated products: Solix Enterprise Edition, Enterprise AI"
+  },
+  {
+   "id": "resource:trust-perimeter-model-for-business-led-ai#0",
+   "kind": "article",
+   "title": "The Trust Perimeter: A New Model for Business-Led AI: Two failure modes",
+   "url": "/resources/trust-perimeter-model-for-business-led-ai",
+   "text": "From \"The Trust Perimeter: A New Model for Business-Led AI\", section \"Two failure modes\":\nThe first failure mode is the bottleneck: every copilot, dashboard and agent waits in a central backlog while the business builds workarounds in spreadsheets and unsanctioned tools. The second is the free-for-all: teams spin up their own models on their own exports and nobody can answer where the data went.\nBoth are governance failures dressed as delivery problems. The fix is not more control or less; it is control in the right place."
+  },
+  {
+   "id": "resource:trust-perimeter-model-for-business-led-ai#1",
+   "kind": "article",
+   "title": "The Trust Perimeter: A New Model for Business-Led AI: What a trust perimeter is",
+   "url": "/resources/trust-perimeter-model-for-business-led-ai",
+   "text": "From \"The Trust Perimeter: A New Model for Business-Led AI\", section \"What a trust perimeter is\":\nA trust perimeter is the set of policies, data products and tools inside which business builders can create solutions without asking permission, because permission is already encoded. IT decides which data is published, how it is classified and masked, what models are approved, what budgets apply and how every action is audited. Everything inside that boundary is safe by construction.\n- Curated data products with semantic context and lineage\n- Access, masking and retention enforced at query time\n- Approved model catalog with per-team budgets\n- Evaluation and monitoring as platform services\n- A full audit trail of prompts, retrievals and answers\nIT moves from building solutions to building the perimeter. The business moves from waiting to shipping. Governance moves from a review gate to a property of the platform."
+  },
+  {
+   "id": "resource:trust-perimeter-model-for-business-led-ai#2",
+   "kind": "article",
+   "title": "The Trust Perimeter: A New Model for Business-Led AI: How Enterprise Edition makes it real",
+   "url": "/resources/trust-perimeter-model-for-business-led-ai",
+   "text": "From \"The Trust Perimeter: A New Model for Business-Led AI\", section \"How Enterprise Edition makes it real\":\nSolix Enterprise Edition combines the Common Data Platform, the governed Preservation Zone and the Enterprise AI builder workspace. Every system and every era of data is published through the same perimeter, so a business analyst can build an agent that reasons over live CRM records and a retired ERP's contract history with identical controls.\n- 10x faster time to first AI use case\n- 1 perimeter instead of fifty exceptions\n- 0 shadow data copies"
+  },
+  {
+   "id": "resource:trust-perimeter-model-for-business-led-ai#3",
+   "kind": "article",
+   "title": "The Trust Perimeter: A New Model for Business-Led AI: Start with one boundary",
+   "url": "/resources/trust-perimeter-model-for-business-led-ai",
+   "text": "From \"The Trust Perimeter: A New Model for Business-Led AI\", section \"Start with one boundary\":\nYou do not need a complete perimeter to begin. Pick one domain, publish three data products, approve one model, set a budget and let one team build. Measure time to value and policy exceptions. Then expand the boundary."
+  },
+  {
+   "id": "resource:consumer-data-privacy-automation-playbook",
+   "kind": "resource",
+   "title": "Consumer Data Privacy Automation Playbook",
+   "url": "/resources/consumer-data-privacy-automation-playbook",
+   "text": "Consumer Data Privacy Automation Playbook (whitepaper, gated download). From PII discovery to DSAR fulfilment: operating models, KPIs and reference workflows.\nPrivacy programs drown in manual work: finding personal data, fulfilling requests, proving deletion. This playbook lays out the operating model, KPIs and reference workflows that make privacy automation stick.\nRelated products: Consumer Data Privacy"
+  },
+  {
+   "id": "resource:consumer-data-privacy-automation-playbook#0",
+   "kind": "article",
+   "title": "Consumer Data Privacy Automation Playbook: The scale problem",
+   "url": "/resources/consumer-data-privacy-automation-playbook",
+   "text": "From \"Consumer Data Privacy Automation Playbook\", section \"The scale problem\":\nA single data subject access request can touch thirty systems. A right-to-be-forgotten request must find and delete personal data everywhere it lives, while respecting legal exceptions. At volume, manual fulfilment is not slow; it is impossible.\n- 30+ systems per typical DSAR\n- 95% of requests automatable\n- 2 hrs fulfilment time after automation"
+  },
+  {
+   "id": "resource:consumer-data-privacy-automation-playbook#1",
+   "kind": "article",
+   "title": "Consumer Data Privacy Automation Playbook: Operating model",
+   "url": "/resources/consumer-data-privacy-automation-playbook",
+   "text": "From \"Consumer Data Privacy Automation Playbook\", section \"Operating model\":\nSuccessful programs pair a privacy office that owns policy with a data platform team that owns execution. Solix Consumer Data Privacy sits between them: policy templates translate regulations into executable rules, and the Common Data Platform executes them across structured, unstructured, live and archived data.\n- Discovery: ML classification of personal data across every source, refreshed continuously\n- Intake: verified request capture with identity checks and jurisdiction routing\n- Fulfilment: orchestrated search, redaction, export or deletion with legal exception handling\n- Evidence: immutable audit packs per request and per regulation"
+  },
+  {
+   "id": "resource:consumer-data-privacy-automation-playbook#2",
+   "kind": "article",
+   "title": "Consumer Data Privacy Automation Playbook: Reference workflows",
+   "url": "/resources/consumer-data-privacy-automation-playbook",
+   "text": "From \"Consumer Data Privacy Automation Playbook\", section \"Reference workflows\":\n- DSAR: Intake, verify, discover, compile, redact, deliver, evidence. Target: under 4 hours.\n- Erasure: Discover, evaluate exceptions, delete or anonymize, confirm, evidence.\n- Consent: Capture purpose-based consent, enforce at query time, report on coverage.\n- Retention: Apply minimization schedules to live and archived data with defensible deletion.\nTime to fulfil, percentage automated, exceptions per hundred requests, and evidence completeness. Track them monthly and publish them to the board."
+  },
+  {
+   "id": "resource:consumer-data-privacy-automation-playbook#3",
+   "kind": "article",
+   "title": "Consumer Data Privacy Automation Playbook: Archived data is personal data too",
+   "url": "/resources/consumer-data-privacy-automation-playbook",
+   "text": "From \"Consumer Data Privacy Automation Playbook\", section \"Archived data is personal data too\":\nRegulators do not exempt backups, archives or retired systems. Because Solix privacy workflows run on the same platform that preserves that data, a single request reaches every era of the estate."
+  },
+  {
+   "id": "resource:data-of-every-era-conversations-on-preservation",
+   "kind": "resource",
+   "title": "Data of Every Era: Conversations on Preservation",
+   "url": "/resources/data-of-every-era-conversations-on-preservation",
+   "text": "Data of Every Era: Conversations on Preservation (podcast). Episode 14: A CDO on treating decades-old records as first-class AI inputs.\nIn episode 14 we sit down with a Chief Data Officer who inherited forty years of records and decided to treat them as an AI asset rather than a liability.\nRelated products: Data Preservation"
+  },
+  {
+   "id": "resource:data-of-every-era-conversations-on-preservation#0",
+   "kind": "article",
+   "title": "Data of Every Era: Conversations on Preservation: In this episode",
+   "url": "/resources/data-of-every-era-conversations-on-preservation",
+   "text": "From \"Data of Every Era: Conversations on Preservation\", section \"In this episode\":\nOur guest leads data for a global manufacturer with plants on four continents and quality records dating to the 1980s. When the company began its AI program, the first instinct was to start fresh. The CDO argued the opposite: the history was the moat.\n- Why decades-old quality records improved defect prediction more than any new sensor\n- Convincing legal that preservation and AI readiness are the same investment\n- The moment retired systems became the most-queried data in the company\n- Building a preservation-first culture in engineering\n\"Every era of our data is a witness to how the business actually behaved. You do not throw witnesses away.\" - Chief Data Officer, global manufacturer"
+  },
+  {
+   "id": "resource:data-of-every-era-conversations-on-preservation#1",
+   "kind": "article",
+   "title": "Data of Every Era: Conversations on Preservation: Key takeaways",
+   "url": "/resources/data-of-every-era-conversations-on-preservation",
+   "text": "From \"Data of Every Era: Conversations on Preservation\", section \"Key takeaways\":\nTreat preservation as an activation strategy, not a compliance cost. Publish preserved records through the same governed perimeter as live data. Measure how often archived data is queried; it is usually more than anyone expects.\nData of Every Era is available on all major podcast platforms. New episodes twice a month."
+  },
+  {
+   "id": "resource:solix-empower-2026-san-diego",
+   "kind": "resource",
+   "title": "SOLIXEmpower 2026: The Agentic Enterprise",
+   "url": "/resources/solix-empower-2026-san-diego",
+   "text": "SOLIXEmpower 2026: The Agentic Enterprise (event). Three days of Enterprise AI keynotes, panels and hands-on workshops at the Qualcomm Institute, UC San Diego. October 28-30.\nSOLIXEmpower 2026 brings CIOs, chief data officers, researchers and Solix users to UC San Diego for three days on the Agentic Enterprise: reimagining enterprise applications with Enterprise AI.\nRelated products: Enterprise AI, Agentic"
+  },
+  {
+   "id": "resource:solix-empower-2026-san-diego#0",
+   "kind": "article",
+   "title": "SOLIXEmpower 2026: The Agentic Enterprise: October 28-30, 2026 · The Qualcomm Institute, UC San Diego",
+   "url": "/resources/solix-empower-2026-san-diego",
+   "text": "From \"SOLIXEmpower 2026: The Agentic Enterprise\", section \"October 28-30, 2026 · The Qualcomm Institute, UC San Diego\":\nHosted in partnership with the UC San Diego School of Computing, Information and Data Science, the SPARK AI Consortium and the Halıcıoğlu Data Science Institute, SOLIXEmpower 2026 explores why data management is the lynchpin for data science and AI, now and into the future."
+  },
+  {
+   "id": "resource:solix-empower-2026-san-diego#1",
+   "kind": "article",
+   "title": "SOLIXEmpower 2026: The Agentic Enterprise: Key topics",
+   "url": "/resources/solix-empower-2026-san-diego",
+   "text": "From \"SOLIXEmpower 2026: The Agentic Enterprise\", section \"Key topics\":\n- Enterprise AI and agents: Data Sense, Data Ask and the Application Knowledge Graph\n- Enterprise data and AI governance, from secure semantic layers to agent regulation\n- Cloud data management and archive strategy to power AI\n- AI in finance, the public sector, healthcare and life sciences\n- AI-ready people and Solix Academy\n- 3 days\n- 25+ speakers\n- $299 full event pass"
+  },
+  {
+   "id": "resource:solix-empower-2026-san-diego#2",
+   "kind": "article",
+   "title": "SOLIXEmpower 2026: The Agentic Enterprise: Hands-on workshops and the hackathon",
+   "url": "/resources/solix-empower-2026-san-diego",
+   "text": "From \"SOLIXEmpower 2026: The Agentic Enterprise\", section \"Hands-on workshops and the hackathon\":\nBuild your first Application Knowledge Graph with Data Sense, go hands-on with Data Ask, and see the hackathon winners announced on the final morning. Evenings include the Solix User Group cocktails and dinner and a tour of the San Diego Supercomputer Center.\nThe Full Event Pass is $299 for all three days, paid securely through Eventbrite. Pass sales end October 28, and seats are limited: register on the SOLIXEmpower website."
+  },
+  {
+   "id": "resource:hipaa-compliant-legacy-ehr-retirement-at-scale",
+   "kind": "resource",
+   "title": "HIPAA-Compliant Legacy EHR Retirement at Scale",
+   "url": "/resources/hipaa-compliant-legacy-ehr-retirement-at-scale",
+   "text": "HIPAA-Compliant Legacy EHR Retirement at Scale (casestudy, gated download). A health system consolidated 23 EHR systems while keeping clinicians one click from history.\nAfter a decade of acquisitions, a regional health system was running 23 legacy EHR systems for read-only access. This is how they retired them all while keeping clinicians one click from patient history.\nRelated products: Application Retirement, AI Healthcare"
+  },
+  {
+   "id": "resource:hipaa-compliant-legacy-ehr-retirement-at-scale#0",
+   "kind": "article",
+   "title": "HIPAA-Compliant Legacy EHR Retirement at Scale: The situation",
+   "url": "/resources/hipaa-compliant-legacy-ehr-retirement-at-scale",
+   "text": "From \"HIPAA-Compliant Legacy EHR Retirement at Scale\", section \"The situation\":\nEach acquired hospital brought its own EHR. After migration to the enterprise platform, the legacy systems stayed alive for one reason: clinicians and coders needed historical records, and regulators required them for years. Twenty-three systems, twenty-three vendor contracts, twenty-three attack surfaces.\n- 23 legacy EHR systems retired\n- 1 click from patient history in the live EHR\n- $6.4M annual maintenance eliminated"
+  },
+  {
+   "id": "resource:hipaa-compliant-legacy-ehr-retirement-at-scale#1",
+   "kind": "article",
+   "title": "HIPAA-Compliant Legacy EHR Retirement at Scale: Constraints",
+   "url": "/resources/hipaa-compliant-legacy-ehr-retirement-at-scale",
+   "text": "From \"HIPAA-Compliant Legacy EHR Retirement at Scale\", section \"Constraints\":\n- HIPAA retention and minimum-necessary access for every record\n- Clinician workflow could not change; history had to appear in the enterprise EHR context\n- PHI discovery and audit for every retired dataset\n- Legal hold for ongoing litigation on two of the systems"
+  },
+  {
+   "id": "resource:hipaa-compliant-legacy-ehr-retirement-at-scale#2",
+   "kind": "article",
+   "title": "HIPAA-Compliant Legacy EHR Retirement at Scale: Approach",
+   "url": "/resources/hipaa-compliant-legacy-ehr-retirement-at-scale",
+   "text": "From \"HIPAA-Compliant Legacy EHR Retirement at Scale\", section \"Approach\":\n- Extract: Clinical, financial and document data with attachments into the Preservation Zone, reconciled to source.\n- Classify: Automated PHI discovery; access by role with minimum-necessary policy.\n- Embed: Patient-context launch from the live EHR to a longitudinal history view.\n- Retire: Decommission in waves, with legal hold preserved on affected records.\nBecause history opens from the patient banner in the enterprise EHR, training was a single screen. Support tickets related to legacy access fell by 90 percent within one quarter."
+  },
+  {
+   "id": "resource:hipaa-compliant-legacy-ehr-retirement-at-scale#3",
+   "kind": "article",
+   "title": "HIPAA-Compliant Legacy EHR Retirement at Scale: Beyond retirement",
+   "url": "/resources/hipaa-compliant-legacy-ehr-retirement-at-scale",
+   "text": "From \"HIPAA-Compliant Legacy EHR Retirement at Scale\", section \"Beyond retirement\":\nThe preserved clinical history is now feeding a governed research lake, with de-identification enforced at query time, giving researchers longitudinal data that was previously locked in systems nobody could safely query."
+  },
+  {
+   "id": "resource:application-retirement-factory-templates-that-scale",
+   "kind": "resource",
+   "title": "Application Retirement Factory: Templates That Scale",
+   "url": "/resources/application-retirement-factory-templates-that-scale",
+   "text": "Application Retirement Factory: Templates That Scale (webinar). How to decommission portfolios, not one-offs, with reusable patterns.\nOne-off retirements never reach the portfolio. This session shows how to industrialize application retirement with reusable templates, automation and a run team.\nRelated products: Application Retirement"
+  },
+  {
+   "id": "resource:application-retirement-factory-templates-that-scale#0",
+   "kind": "article",
+   "title": "Application Retirement Factory: Templates That Scale: What you'll learn",
+   "url": "/resources/application-retirement-factory-templates-that-scale",
+   "text": "From \"Application Retirement Factory: Templates That Scale\", section \"What you'll learn\":\n- Why most retirement programs retire three applications and stop\n- The five templates every factory needs: discovery, extract and validate, retention mapping, business views, decommission sign-off\n- Wave planning: how to retire 8-12 applications per quarter\n- Handling attachments, relationships and reports so users never notice\n- Measuring savings, risk reduction and compliance posture"
+  },
+  {
+   "id": "resource:application-retirement-factory-templates-that-scale#1",
+   "kind": "article",
+   "title": "Application Retirement Factory: Templates That Scale: From projects to a factory",
+   "url": "/resources/application-retirement-factory-templates-that-scale",
+   "text": "From \"Application Retirement Factory: Templates That Scale\", section \"From projects to a factory\":\nA project asks: how do we retire this system? A factory asks: what does every retirement have in common, and how do we make the differences configuration rather than code? The Solix Application Retirement Factory encodes twenty years of answers into templates on the Common Data Platform.\n- 90% faster than manual decommissioning\n- 8-12 applications per 90-day wave\n- 0 compliance gaps in preserved data"
+  },
+  {
+   "id": "resource:application-retirement-factory-templates-that-scale#2",
+   "kind": "article",
+   "title": "Application Retirement Factory: Templates That Scale: Live demonstration",
+   "url": "/resources/application-retirement-factory-templates-that-scale",
+   "text": "From \"Application Retirement Factory: Templates That Scale\", section \"Live demonstration\":\nWe retire a legacy Oracle EBS instance end to end: discovery and inventory, extract with reconciliation certificate, retention mapping by record class, business view publication, and decommission sign-off with chain of custody. Total elapsed time in the demo: 38 minutes.\nApplication portfolio managers, infrastructure and cloud leaders, compliance officers and anyone carrying a maintenance budget for systems whose only job is remembering."
+  },
+  {
+   "id": "resource:enterprise-edition-datasheet",
+   "kind": "resource",
+   "title": "Solix Enterprise Edition Datasheet",
+   "url": "/resources/enterprise-edition-datasheet",
+   "text": "Solix Enterprise Edition Datasheet (datasheet). Specs, deployment models and architecture diagram for the platform, in one two-page reference.\nThe two-page reference for Solix Enterprise Edition: what it is, how it deploys, and the architecture underneath it.\nRelated products: Solix Enterprise Edition"
+  },
+  {
+   "id": "resource:enterprise-edition-datasheet#0",
+   "kind": "article",
+   "title": "Solix Enterprise Edition Datasheet: What Enterprise Edition is",
+   "url": "/resources/enterprise-edition-datasheet",
+   "text": "From \"Solix Enterprise Edition Datasheet\", section \"What Enterprise Edition is\":\nEnterprise Edition is the packaged, ready-to-deploy form of the Solix platform. It connects live systems, archived history and lake data through one governed foundation, then adds a builder workspace so business teams can compose agents, copilots and dashboards without stepping outside the trust perimeter IT defines.\n- 150+ application connectors\n- 3 deployment models\n- PB proven production scale"
+  },
+  {
+   "id": "resource:enterprise-edition-datasheet#1",
+   "kind": "article",
+   "title": "Solix Enterprise Edition Datasheet: Deployment models",
+   "url": "/resources/enterprise-edition-datasheet",
+   "text": "From \"Solix Enterprise Edition Datasheet\", section \"Deployment models\":\n- SOLIXCloud - fully managed, Solix operates the platform\n- Your cloud - deployed in your AWS, Azure or Google Cloud account\n- On-premises or hybrid - for the most tightly controlled environments"
+  },
+  {
+   "id": "resource:enterprise-edition-datasheet#2",
+   "kind": "article",
+   "title": "Solix Enterprise Edition Datasheet: What's included",
+   "url": "/resources/enterprise-edition-datasheet",
+   "text": "From \"Solix Enterprise Edition Datasheet\", section \"What's included\":\n- Common Data Platform: ingestion, catalog and the governed Preservation Zone\n- Enterprise AI: governed retrieval, agent studio and model connections\n- Enterprise Data Governance: one policy layer for access, retention and quality\n- Builder workspace: low-code agents, copilots and dashboards"
+  },
+  {
+   "id": "resource:enterprise-edition-datasheet#3",
+   "kind": "article",
+   "title": "Solix Enterprise Edition Datasheet: Architecture at a glance",
+   "url": "/resources/enterprise-edition-datasheet",
+   "text": "From \"Solix Enterprise Edition Datasheet\", section \"Architecture at a glance\":\nEvery layer inherits the governance of the one beneath it. Connectors land data in the Common Data Platform; the platform classifies, catalogs and preserves it; Enterprise AI and the builder workspace consume it as governed data products. Nothing a business builder does can bypass a policy IT already set."
+  },
+  {
+   "id": "resource:enterprise-edition-datasheet#4",
+   "kind": "article",
+   "title": "Solix Enterprise Edition Datasheet: Getting started",
+   "url": "/resources/enterprise-edition-datasheet",
+   "text": "From \"Solix Enterprise Edition Datasheet\", section \"Getting started\":\n- Scope: A short workshop identifies your first high-value use case.\n- Connect: Onboard the systems that use case depends on.\n- Ship: Go live on a governed first use case, typically in weeks."
+  },
+  {
+   "id": "resource:buyers-guide-to-enterprise-ai-governance",
+   "kind": "resource",
+   "title": "The Buyer's Guide to Enterprise AI Governance",
+   "url": "/resources/buyers-guide-to-enterprise-ai-governance",
+   "text": "The Buyer's Guide to Enterprise AI Governance (ebook, gated download). Twelve questions to ask any AI vendor before your data touches their model.\nTwelve questions worth asking any AI vendor before your enterprise data touches their model, drawn from customer procurement conversations we've sat through.\nRelated products: AI Governance, Enterprise AI"
+  },
+  {
+   "id": "resource:buyers-guide-to-enterprise-ai-governance#0",
+   "kind": "article",
+   "title": "The Buyer's Guide to Enterprise AI Governance: Why this guide exists",
+   "url": "/resources/buyers-guide-to-enterprise-ai-governance",
+   "text": "From \"The Buyer's Guide to Enterprise AI Governance\", section \"Why this guide exists\":\nMost enterprise AI procurement processes ask about model quality and pricing, and stop there. The questions that actually determine whether a program survives its first security review are about data: where it goes, who can see it, and what happens when something goes wrong. This guide collects the twelve questions we see customers wish they'd asked earlier."
+  },
+  {
+   "id": "resource:buyers-guide-to-enterprise-ai-governance#1",
+   "kind": "article",
+   "title": "The Buyer's Guide to Enterprise AI Governance: Access and retrieval",
+   "url": "/resources/buyers-guide-to-enterprise-ai-governance",
+   "text": "From \"The Buyer's Guide to Enterprise AI Governance\", section \"Access and retrieval\":\n- Does retrieval respect the asker's existing access permissions, or a separate, broader index?\n- Can you prove, per query, which access policy applied?\n- What happens to a query against data the asker isn't authorized to see?"
+  },
+  {
+   "id": "resource:buyers-guide-to-enterprise-ai-governance#2",
+   "kind": "article",
+   "title": "The Buyer's Guide to Enterprise AI Governance: Data handling",
+   "url": "/resources/buyers-guide-to-enterprise-ai-governance",
+   "text": "From \"The Buyer's Guide to Enterprise AI Governance\", section \"Data handling\":\n- Is data copied into a separate vector store, and if so, who governs it?\n- How is personal and sensitive data masked before it reaches the model?\n- What is the retention policy for prompts and responses?\nThe single most common shadow-AI failure we see: a well-meaning team exports a \"read-only\" data extract into a third-party tool for embedding, and that extract quietly becomes a permanent, ungoverned copy."
+  },
+  {
+   "id": "resource:buyers-guide-to-enterprise-ai-governance#3",
+   "kind": "article",
+   "title": "The Buyer's Guide to Enterprise AI Governance: Governance and audit",
+   "url": "/resources/buyers-guide-to-enterprise-ai-governance",
+   "text": "From \"The Buyer's Guide to Enterprise AI Governance\", section \"Governance and audit\":\n- Can every AI answer be traced back to its source records?\n- Is there a model inventory: which models touch which data, everywhere?\n- How would you answer a regulator asking what an AI system did with a specific customer's data?"
+  },
+  {
+   "id": "resource:buyers-guide-to-enterprise-ai-governance#4",
+   "kind": "article",
+   "title": "The Buyer's Guide to Enterprise AI Governance: Operations",
+   "url": "/resources/buyers-guide-to-enterprise-ai-governance",
+   "text": "From \"The Buyer's Guide to Enterprise AI Governance\", section \"Operations\":\n- What is the cost and quota model per team or use case?\n- How do you detect and respond to model drift or quality regression?\n- What is the actual time from a scoped use case to a production copilot?\n\"We stopped evaluating AI vendors on model benchmarks and started evaluating them on their answer to 'where does our data go.' It changed the shortlist completely.\" - CISO, regulated financial services firm"
+  },
+  {
+   "id": "resource:twenty-years-of-enterprise-data-five-lessons",
+   "kind": "resource",
+   "title": "Twenty Years of Enterprise Data: Five Lessons",
+   "url": "/resources/twenty-years-of-enterprise-data-five-lessons",
+   "text": "Twenty Years of Enterprise Data: Five Lessons (leadership). Our founder on what changed, what didn't, and what he'd tell a CDO starting today.\nSolix founder Sai Gundavelli on what changed in two decades of enterprise data management, what didn't, and what he'd tell a CDO starting today."
+  },
+  {
+   "id": "resource:twenty-years-of-enterprise-data-five-lessons#0",
+   "kind": "article",
+   "title": "Twenty Years of Enterprise Data: Five Lessons: 1. The data doesn't get younger",
+   "url": "/resources/twenty-years-of-enterprise-data-five-lessons",
+   "text": "From \"Twenty Years of Enterprise Data: Five Lessons\", section \"1. The data doesn't get younger\":\nEvery enterprise I've worked with has data from a system nobody remembers approving. The instinct is to treat it as a cleanup problem. It isn't. It's a stewardship problem, and it never ends, because the newest system today is next decade's legacy system."
+  },
+  {
+   "id": "resource:twenty-years-of-enterprise-data-five-lessons#1",
+   "kind": "article",
+   "title": "Twenty Years of Enterprise Data: Five Lessons: 2. Governance that slows people down gets routed around",
+   "url": "/resources/twenty-years-of-enterprise-data-five-lessons",
+   "text": "From \"Twenty Years of Enterprise Data: Five Lessons\", section \"2. Governance that slows people down gets routed around\":\nThe archives and catalogs that actually get used are the ones that are faster than the alternative, not just more compliant than it. If the governed path is slower than a shadow spreadsheet, people will build the spreadsheet. Every product decision we make starts from that constraint."
+  },
+  {
+   "id": "resource:twenty-years-of-enterprise-data-five-lessons#2",
+   "kind": "article",
+   "title": "Twenty Years of Enterprise Data: Five Lessons: 3. AI didn't change the fundamentals, it raised the stakes",
+   "url": "/resources/twenty-years-of-enterprise-data-five-lessons",
+   "text": "From \"Twenty Years of Enterprise Data: Five Lessons\", section \"3. AI didn't change the fundamentals, it raised the stakes\":\nBad data governance used to cost you a failed audit. Now it can cost you a model that confidently tells a customer something false, sourced from data it should never have touched. The fundamentals - know what you have, control who sees it, prove what happened - matter more, not less.\n- 20+ years in enterprise data\n- 1000s of systems retired for customers\n- 0 shortcuts we'd take again"
+  },
+  {
+   "id": "resource:twenty-years-of-enterprise-data-five-lessons#3",
+   "kind": "article",
+   "title": "Twenty Years of Enterprise Data: Five Lessons: 4. Retirement is a bigger lever than anyone budgets for",
+   "url": "/resources/twenty-years-of-enterprise-data-five-lessons",
+   "text": "From \"Twenty Years of Enterprise Data: Five Lessons\", section \"4. Retirement is a bigger lever than anyone budgets for\":\nNobody puts \"decommission the old system\" at the top of a transformation roadmap. It should be closer to the top. The applications quietly costing the most, in license fees, specialist staff and audit risk, are usually the ones everyone has stopped thinking about."
+  },
+  {
+   "id": "resource:twenty-years-of-enterprise-data-five-lessons#4",
+   "kind": "article",
+   "title": "Twenty Years of Enterprise Data: Five Lessons: 5. The best programs treat data as a product, not a byproduct",
+   "url": "/resources/twenty-years-of-enterprise-data-five-lessons",
+   "text": "From \"Twenty Years of Enterprise Data: Five Lessons\", section \"5. The best programs treat data as a product, not a byproduct\":\nThe organizations getting the most from their data long ago stopped asking IT to \"just give us access\" and started asking for governed, documented, trustworthy data products, the same way they'd ask for any other internal product. That shift in posture matters more than any single tool.\nStart with an honest inventory of what you actually have, across every era. You cannot govern, secure or activate what you haven't found."
+  },
+  {
+   "id": "press:enterprise-edition-launch",
+   "kind": "press",
+   "title": "Solix Launches Enterprise Edition to Put AI in the Hands of the Business",
+   "url": "/newsroom/enterprise-edition-launch",
+   "text": "Press release (2026-06-02): Solix Launches Enterprise Edition to Put AI in the Hands of the Business\nNew edition unifies the Common Data Platform, Preservation Zone and Enterprise AI builder workspace so business teams can create governed agents on data from every system and every era.\nSANTA CLARA, Calif. — June 2, 2026 — Solix Technologies, Inc., a leader in enterprise data management and AI, today announced Solix Enterprise Edition, a unified platform that lets business teams build AI agents, copilots and analytics on governed data from every system and every era, inside the trust perimeter IT defines.\nEnterprise Edition brings together the Solix Common Data Platform, the governed Preservation Zone and the Enterprise AI builder workspace. Live ERP, CRM and SaaS data sit alongside retired applications, mainframe extracts and decades of archived records, all published through one catalog with policy enforced at query time.\nThe organizations that win with AI will be the ones whose business teams can build without waiting, and whose IT teams never lose control. Enterprise Edition makes both true at once.\nKey capabilities\nEarly adopters in financial services and manufacturing report a tenfold reduction in time to first production AI use case, with zero copies of sensitive data outside policy.\nSolix Enterprise Edition is available today worldwide directly from Solix and through certified partners."
+  },
+  {
+   "id": "press:empower-2026",
+   "kind": "press",
+   "title": "SOLIXEmpower 2026 Comes to UC San Diego, October 28-30",
+   "url": "/newsroom/empower-2026",
+   "text": "Press release (2026-05-14): SOLIXEmpower 2026 Comes to UC San Diego, October 28-30\nThe Agentic Enterprise: three days of Enterprise AI keynotes, panels, hands-on workshops and a hackathon at the Qualcomm Institute.\nSANTA CLARA, Calif. — Solix Technologies today opened registration for SOLIXEmpower 2026, taking place October 28-30 at the Qualcomm Institute on the UC San Diego campus in collaboration with the Halıcıoğlu School of Data Science and Computing.\nUnder the theme \"The Agentic Enterprise: Reimagining Enterprise Applications with Enterprise AI\", the program brings together leaders from industry and academia on Enterprise AI, enterprise data governance, the Application Knowledge Graph and cloud data management, with hands-on workshops on Data Sense and Data Ask.\nOur goal with Solix EMPOWER is to provide valuable insight on the latest technologies, while giving attendees an opportunity to network with fellow industry leaders and experts.\nThe Full Event Pass is $299 for all three days. Seats are limited; register on the SOLIXEmpower website."
+  },
+  {
+   "id": "press:utility-merger-case",
+   "kind": "press",
+   "title": "Combined Utility Retires 60 Applications and Preserves 12 PB on Solix CDP",
+   "url": "/newsroom/utility-merger-case",
+   "text": "Press release (2026-04-08): Combined Utility Retires 60 Applications and Preserves 12 PB on Solix CDP\nPost-merger program eliminates $18M in annual run cost while meeting multi-decade regulatory retention.\nSANTA CLARA, Calif. — April 8, 2026 — Solix Technologies today announced that a major North American utility has completed the retirement of 60 legacy applications following a merger, preserving 12 petabytes of asset, meter and safety records on the Solix Common Data Platform.\nUsing the Solix Application Retirement Factory, the utility retired 8 to 12 applications per 90-day wave, publishing business views so employees kept working from familiar reports while regulators gained a single, auditable preservation zone.\nWe stopped paying to keep the lights on in systems whose only job was remembering. Now the memory is a platform capability.\nThe preserved estate now feeds grid reliability and predictive maintenance models on Solix Enterprise AI."
+  },
+  {
+   "id": "press:privacy-templates",
+   "kind": "press",
+   "title": "Solix Consumer Data Privacy Adds 12 New Regulatory Templates",
+   "url": "/newsroom/privacy-templates",
+   "text": "Press release (2026-03-11): Solix Consumer Data Privacy Adds 12 New Regulatory Templates\nCoverage expands to 30+ jurisdictions with automated DSAR routing and evidence packs for state-level US privacy laws.\nSANTA CLARA, Calif. — March 11, 2026 — Solix Technologies today released 12 new regulatory templates for Solix Consumer Data Privacy, extending automated coverage to more than 30 jurisdictions including newly effective US state privacy laws.\nEach template translates statutory requirements into executable policy: request intake and identity verification, jurisdiction-aware routing, discovery across live and archived data, fulfilment or deletion with legal exceptions, and regulator-ready evidence packs.\nPrivacy teams should not have to reinvent the workflow every time a legislature acts. Templates turn regulation into configuration."
+  },
+  {
+   "id": "press:aws-competency",
+   "kind": "press",
+   "title": "Solix Achieves Expanded Cloud Partner Competencies for Data & Analytics",
+   "url": "/newsroom/aws-competency",
+   "text": "Press release (2025-11-19): Solix Achieves Expanded Cloud Partner Competencies for Data & Analytics\nRecognition for archive-first migration patterns and governed data lake deployments on hyperscaler platforms.\nSANTA CLARA, Calif. — November 19, 2025 — Solix Technologies today announced expanded data and analytics partner competencies across its hyperscaler cloud partners, recognizing validated reference architectures for archive-first migration and governed data lakes on the Solix Common Data Platform.\nThe designations follow technical reviews of SOLIXCloud deployments and customer references in financial services, manufacturing and energy.\nOur customers run on the clouds they already trust. These competencies confirm that Solix runs there the way those platforms expect."
+  },
+  {
+   "id": "press:enterprise-ai-ga",
+   "kind": "press",
+   "title": "Solix Enterprise AI Reaches General Availability",
+   "url": "/newsroom/enterprise-ai-ga",
+   "text": "Press release (2025-09-24): Solix Enterprise AI Reaches General Availability\nGoverned retrieval, agent studio and evaluation services ship on the Common Data Platform with bring-your-own-model support.\nSANTA CLARA, Calif. — September 24, 2025 — Solix Technologies today announced the general availability of Solix Enterprise AI, bringing governed retrieval, an agent studio and evaluation services to the Solix Common Data Platform.\nEnterprise AI lets organizations build copilots and agents on curated data products rather than exported copies. Retrieval respects access policy, masking and retention on every query, and every answer traces back to its source records.\nMost AI programs stall at governance. We started there."
+  },
+  {
+   "id": "press:hyderabad-expansion",
+   "kind": "press",
+   "title": "Solix Expands Hyderabad Engineering Center",
+   "url": "/newsroom/hyderabad-expansion",
+   "text": "Press release (2025-06-05): Solix Expands Hyderabad Engineering Center\nNew facility doubles platform engineering capacity to support petabyte-scale customer programs.\nHYDERABAD, India — June 5, 2025 — Solix Technologies today opened an expanded engineering center in HITEC City, Hyderabad, doubling capacity for platform engineering, SAP archiving consulting and 24x7 customer support.\nThe center is home to core teams behind the Common Data Platform, SOLIXCloud operations and the Application Retirement Factory.\nHyderabad has been central to Solix engineering for more than a decade. This expansion reflects the scale our customers are now asking us to run."
+  },
+  {
+   "id": "press:contact",
+   "kind": "company",
+   "title": "Press and media contact",
+   "url": "/newsroom",
+   "text": "Solix Technologies, Inc. is an enterprise data management and AI company headquartered in Santa Clara, California. Founded in 2002, Solix helps regulated, data-intensive organizations activate data from every system and every era through the Solix Common Data Platform, Enterprise Archiving, Application Retirement, Enterprise Data Lake, eDiscovery, Consumer Data Privacy and Enterprise AI. Solix Enterprise Edition puts AI in the hands of the business, inside the trust perimeter IT defines. Learn more at solix.com.\nMedia contact: Solix Media Relations, press@solix.com, 1.888.GO.SOLIX\n- Coverage: Enterprise Data Review \"Archive-first is quietly becoming the default S/4HANA playbook\"\n- Coverage: CIO Frontier \"The trust perimeter: a saner model for business-led AI\"\n- Coverage: Data Governance Weekly \"Why retired applications are the most valuable AI data you're ignoring\"\n- Coverage: Utility Technology Today \"Inside a 60-application retirement after a merger\"\n- Coverage: Privacy Ops Journal \"DSARs in two hours: automation across live and archived data\""
+  },
+  {
+   "id": "company:overview",
+   "kind": "company",
+   "title": "About Solix",
+   "url": "/company",
+   "text": "Solix Technologies company history and values.\n- 2002: Founded in Silicon Valley. Solix begins with a simple idea: enterprise data should be managed for its whole life, not just its first year.\n- 2008: Enterprise Data Management Suite. Archiving, test data management and application retirement ship as a unified suite for ERP-heavy enterprises.\n- 2014: Big Data Suite. Hadoop-native archiving and data lake capabilities bring petabyte scale to regulated industries.\n- 2017: Common Data Platform. One platform for structured and unstructured data with a governed Preservation Zone.\n- 2020: SOLIXCloud. Fully managed archiving, retirement and privacy as a service on public cloud.\n- 2024: Enterprise AI. Governed retrieval and agent building on trusted data products.\n- 2026: Enterprise Edition. Put AI in the hands of your business: every system, every era, inside the trust perimeter.\nValues:\n- Preserve the record: Data of every era is a first-class asset. We never trade integrity for convenience.\n- Trust is the product: Governance is not a feature we bolt on. It is the reason customers choose us.\n- Engineer for scale: Petabytes and decades are our normal operating conditions.\n- Activate, don't accumulate: Data that is not usable by the business is a cost. We make it a capability.\nLeadership:\n- Sai Gundavelli, Founder & Chief Executive Officer. Founded Solix in 2002 with the conviction that enterprise data deserves lifecycle-long stewardship.\n- Chief Technology Officer, Platform & Engineering. Leads the Common Data Platform, SOLIXCloud and Enterprise AI engineering organizations.\n- Chief Customer Officer, Customer Success & Services. Owns outcomes for hundreds of enterprise programs across regulated industries.\n- Chief Revenue Officer, Sales & Partnerships. Drives global go-to-market with hyperscaler, SI and technology partners."
+  },
+  {
+   "id": "company:offices",
+   "kind": "company",
+   "title": "Offices and contact",
+   "url": "/contact",
+   "text": "Solix offices:\n- Santa Clara, CA (Headquarters): 4701 Patrick Henry Drive, Bldg 20, Santa Clara, CA 95054, USA\n- Hyderabad, India (Engineering Center): HITEC City, Hyderabad, Telangana\n- London, UK (EMEA): City of London\n- Singapore (APAC): Marina Bay\nPhone: 1.888.GO.SOLIX (1-888-467-6549). Sales and demos: /contact?type=demo. General enquiries: /contact."
+  },
+  {
+   "id": "careers:open-roles",
+   "kind": "careers",
+   "title": "Open roles at Solix",
+   "url": "/careers",
+   "text": "Open positions at Solix (apply on the careers page):\n- Senior Platform Engineer (Engineering, Santa Clara, CA / Hybrid, Full-time): Own ingestion and storage services on the Common Data Platform. Kubernetes, Go/Java, Iceberg, object storage at petabyte scale.\n- AI Solutions Architect (Field Engineering, Remote, US, Full-time): Design governed RAG and agent architectures for Fortune 500 customers on Enterprise AI.\n- Product Manager, Consumer Data Privacy (Product, Santa Clara, CA, Full-time): Shape DSAR automation, consent and retention capabilities against a fast-moving regulatory landscape.\n- SAP Archiving Consultant (Professional Services, Hyderabad, India, Full-time): Lead archive-first S/4HANA programs and application retirement engagements for global manufacturers.\n- Enterprise Account Executive (Sales, New York, NY, Full-time): Own financial services accounts in the Northeast. Complex, multi-stakeholder enterprise sales.\n- Senior Product Designer (Design, Remote, US, Full-time): Design the builder workspace and console experiences for Enterprise Edition.\nPerks: Competitive salary and equity, Health, dental and vision, 401(k) with company match, Flexible hybrid work, Learning budget and certifications, Parental leave, Annual Empower summit, Volunteer days"
+  },
+  {
+   "id": "partners:cloud-partners-hyperscalers",
+   "kind": "partners",
+   "title": "Cloud Partners / Hyperscalers",
+   "url": "/partners",
+   "text": "Partner program: Cloud Partners / Hyperscalers. Deploy SOLIXCloud and the Common Data Platform natively on the hyperscalers your enterprise already trusts.\nPartners: Amazon Web Services, Microsoft Azure, Google Cloud, Oracle Cloud"
+  },
+  {
+   "id": "partners:big-data-partners",
+   "kind": "partners",
+   "title": "Big Data Partners",
+   "url": "/partners",
+   "text": "Partner program: Big Data Partners. Certified integrations with the data platforms your analysts and models already run on.\nPartners: Snowflake, Databricks"
+  },
+  {
+   "id": "partners:oem-partners",
+   "kind": "partners",
+   "title": "OEM Partners",
+   "url": "/partners",
+   "text": "Partner program: OEM Partners. Embedded and certified integrations with the enterprise platforms that run your business.\nPartners: SAP, Oracle, Salesforce, Workday, ServiceNow"
+  },
+  {
+   "id": "partners:global-technology-partners",
+   "kind": "partners",
+   "title": "Global Technology Partners",
+   "url": "/partners",
+   "text": "Partner program: Global Technology Partners. Model providers and global systems integrators who deliver Solix programs from assessment to run.\nPartners: OpenAI, Accenture, Deloitte, Capgemini"
+  },
+  {
+   "id": "partners:distribution-partners",
+   "kind": "partners",
+   "title": "Distribution Partners",
+   "url": "/partners",
+   "text": "Partner program: Distribution Partners. Regional integrators, resellers and managed service providers who bring Solix to mid-market customers.\nPartners: Infosys, TCS, Wipro, Regional VARs, Managed service providers"
+  },
+  {
+   "id": "partners:benefits",
+   "kind": "partners",
+   "title": "Partner program benefits",
+   "url": "/partners",
+   "text": "Benefits of becoming a Solix partner:\n- Deal registration & margins: Protected opportunities with tiered incentives.\n- Technical enablement: Certification paths, sandboxes and architecture support.\n- Co-marketing: Joint campaigns, events and customer stories.\n- Dedicated partner team: Named managers from onboarding to renewal."
+  },
+  {
+   "id": "platform:solixcloud",
+   "kind": "platform",
+   "title": "SOLIXCloud",
+   "url": "/platform#solixcloud",
+   "text": "SOLIXCloud. Fully managed archiving, retirement, privacy and Enterprise AI, run by Solix on the cloud you already trust.\n- Deployed and operated by Solix, patched and monitored 24/7\n- Runs natively on AWS, Microsoft Azure, Google Cloud or Oracle Cloud\n- Same governance and controls as an on-premises deployment\n- Elastic scale from a single archive to petabyte-scale programs"
+  },
+  {
+   "id": "platform:it-leaders",
+   "kind": "platform",
+   "title": "For IT Leaders",
+   "url": "/platform#it-leaders",
+   "text": "For IT Leaders. A platform built so IT can say yes to the business without losing control of access, retention or audit.\n- Policy defined once, enforced everywhere the platform touches\n- Full audit trail for every access, query and model call\n- Cost and adoption telemetry in a single console\n- Deploy in your cloud, on-premises or hybrid, same control plane"
+  },
+  {
+   "id": "platform:why-solix",
+   "kind": "platform",
+   "title": "Why Solix",
+   "url": "/platform#why-solix",
+   "text": "Why Solix. Two decades of enterprise data stewardship, built by a team that has never treated an old record as disposable.\n- Founded in 2002, profitable and independent\n- Petabyte-scale production deployments in regulated industries\n- One platform for every era of data, not a portfolio of acquisitions\n- Named support team from onboarding through renewal"
+  },
+  {
+   "id": "platform:product-lifecycle",
+   "kind": "platform",
+   "title": "Product Lifecycle",
+   "url": "/platform#product-lifecycle",
+   "text": "Product Lifecycle. How a capability moves from idea to general availability, and what that means for what you can rely on today.\n- Design partners shape features before broad release\n- Beta capabilities are clearly labeled and opt-in\n- GA features carry the same support SLA as the rest of the platform\n- Deprecations are announced with a defined migration runway"
+  },
+  {
+   "id": "platform:roadmap",
+   "kind": "platform",
+   "title": "Roadmap",
+   "url": "/platform#roadmap",
+   "text": "Roadmap. What's shipping next, and the direction the platform is heading over the next few releases.\n- Deeper Agentic tooling for multi-step, governed automation\n- Expanded pre-built Application Knowledge Graphs by industry\n- Broader model support in AI Governance and AI Warehouse\n- Talk to your account team for the detailed, dated roadmap"
+  },
+  {
+   "id": "services:why-solix-services",
+   "kind": "services",
+   "title": "Why Solix Services",
+   "url": "/services-support#why-solix-services",
+   "text": "Why Solix Services. The same team that builds the platform stands behind every program we deliver, from first workshop to steady-state run.\n- Engineers and architects who work the platform, not a reseller layer\n- Fixed-scope assessments before any open-ended engagement\n- Outcomes measured in dollars, systems and hours, not hours billed"
+  },
+  {
+   "id": "services:application-retirement-services",
+   "kind": "services",
+   "title": "Application Retirement Services",
+   "url": "/services-support#application-retirement-services",
+   "text": "Application Retirement Services. A factory model for decommissioning portfolios of legacy applications, not one-off projects that never quite finish.\n- Reusable templates by application type (ERP, CRM, custom, mainframe)\n- Chain-of-custody validation and reconciliation on every retirement\n- Parallel-track delivery to retire a portfolio, not just one app"
+  },
+  {
+   "id": "services:implementation-services",
+   "kind": "services",
+   "title": "Implementation Services",
+   "url": "/services-support#implementation-services",
+   "text": "Implementation Services. Design, build and go-live support for Enterprise Edition and every product on the Common Data Platform.\n- Solution design workshops scoped to your first use case\n- Hands-on build alongside your team, not a handoff document\n- Go-live support and a defined path to internal ownership"
+  },
+  {
+   "id": "services:akg-construction-services",
+   "kind": "services",
+   "title": "AKG Construction Services",
+   "url": "/services-support#akg-construction-services",
+   "text": "AKG Construction Services. Build a custom Application Knowledge Graph for the systems the pre-built graphs don't cover.\n- Entity and relationship modeling for custom and legacy applications\n- Business logic captured from subject-matter experts, not just schemas\n- Delivered in a format that plugs directly into Enterprise AI"
+  },
+  {
+   "id": "services:ai-foundry-build-services",
+   "kind": "services",
+   "title": "AI Foundry Build Services",
+   "url": "/services-support#ai-foundry-build-services",
+   "text": "AI Foundry Build Services. Stand up your first governed agents and copilots with our AI engineering team alongside yours.\n- Use-case scoping through to a production-ready agent\n- Guardrails, evaluation sets and cost controls built in from day one\n- Knowledge transfer so your team owns the build going forward"
+  },
+  {
+   "id": "services:managed-services",
+   "kind": "services",
+   "title": "Managed Services",
+   "url": "/services-support#managed-services",
+   "text": "Managed Services. We operate the platform day to day so your team can focus on the outcomes it produces, not the plumbing.\n- 24/7 monitoring, patching and performance tuning\n- Defined SLAs for availability, response and resolution\n- Quarterly reviews on cost, adoption and roadmap alignment"
+  },
+  {
+   "id": "services:methodology-delivery",
+   "kind": "services",
+   "title": "Methodology & Delivery",
+   "url": "/services-support#methodology-delivery",
+   "text": "Methodology & Delivery. A repeatable method refined over hundreds of enterprise programs, with a defined output at every step.\n- Assess: profile the estate and build the business case\n- Prove: pilot on one high-value use case with measured outcomes\n- Scale: apply templates across the portfolio with a run team in place"
+  },
+  {
+   "id": "services:support-portal",
+   "kind": "services",
+   "title": "Support Portal",
+   "url": "/services-support#support-portal",
+   "text": "Support Portal. Cases, documentation and release notes for customers and partners with an active Solix relationship.\n- Existing customers and partners: your onboarding team provided portal access\n- Need access or have lost it? Our team can help\n- Not yet a customer? Talk to sales about what's included at your tier"
+  },
+  {
+   "id": "testimonials",
+   "kind": "proof",
+   "title": "What customers say",
+   "url": "/",
+   "text": "Anonymized customer testimonials:\n- \"We retired forty legacy applications in eighteen months and every record is still one search away. Solix turned a compliance liability into a governed asset our AI teams can finally use.\" - Chief Data Officer, Top-20 US Bank\n- \"Our S/4HANA migration was half the size it would have been. Archive-first with Solix paid for itself before we even cut over.\" - VP, Enterprise Applications, Global Manufacturer\n- \"DSAR fulfilment went from a two-week scramble across thirty systems to a two-hour automated workflow. Legal and IT finally share one source of truth.\" - Head of Privacy, Multinational Retailer\n- 150+ Enterprise application connectors\n- 80% Infrastructure cost reduction, typical\n- 20+ Years engineering data at scale\n- 12 PB Preserved for a single customer"
+  }
+ ]
+}
