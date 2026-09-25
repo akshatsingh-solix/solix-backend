@@ -29,6 +29,12 @@ services:
         value: nvidia/nemotron-3.5-lightning:free
       - key: SEMRUSH_API_KEY
         sync: false
+      # Optional: news story clusters (free key, required from cloud servers)
+      # and expert-coverage deep dives ($5 free Parallel credits a month).
+      - key: NEWSMCP_API_KEY
+        sync: false
+      - key: PARALLEL_API_KEY
+        sync: false
       # Optional: a GitHub token (repo scope, or fine-grained with Actions: write
       # on the Website repo) lets publishing trigger an instant static rebuild.
       - key: GITHUB_DEPLOY_TOKEN

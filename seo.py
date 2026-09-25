@@ -18,6 +18,7 @@ import asyncio
 import csv
 import importlib.util
 import io
+import json
 import logging
 import os
 import re
@@ -26,7 +27,7 @@ import xml.etree.ElementTree as ET
 from collections import Counter
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote_plus, urlparse
 
 import httpx
@@ -141,6 +142,12 @@ async def load_config() -> dict:
             if v not in (None, "", [], {}):
                 cfg[k] = v
     return cfg
+
+
+def tracked_brands(cfg: dict) -> Dict[str, str]:
+    """You plus every competitor in any country, as {domain: brand name}."""
+    comps = {d for ds in (cfg.get("competitors") or {}).values() for d in ds}
+    return {cfg["domain"]: cfg.get("brand") or brand_of(cfg["domain"], cfg), **{d: brand_of(d, cfg) for d in sorted(comps)}}
 
 
 def brand_of(domain: str, cfg: dict) -> str:
@@ -414,6 +421,8 @@ async def status():
         "ai_provider": (ai_provider() or {}).get("name"),
         "ai_models": (ai_provider() or {}).get("models", []),
         "ai_web": (ai_provider() or {}).get("web", False),
+        "newsmcp": bool(os.environ.get("NEWSMCP_API_KEY")),
+        "parallel": bool(os.environ.get("PARALLEL_API_KEY")),
         "synced": synced,
         "ai_last_run": (ai or {}).get("ran_at"),
     }
@@ -545,6 +554,32 @@ async def _reddit(client, q):
     return out
 
 
+NEWSMCP_URL = "https://api.newsmcp.com/v0/news"
+# Analysis, opinion and interviews are where analysts and SMEs speak.
+NEWSMCP_KIND = {"analysis": "analysts", "opinion": "analysts", "interview": "analysts", "explainer": "analysts", "press_release": "vendor"}
+
+
+async def _newsmcp(client, q, lock: Optional[asyncio.Lock] = None):
+    """Story events (articles clustered, with independent-newsroom counts) from NewsMCP.
+    Needs NEWSMCP_API_KEY on a server: keyless calls are blocked from cloud IPs."""
+    key = os.environ.get("NEWSMCP_API_KEY")
+    if not key:
+        return []
+    phrase = f'"{q}"' if " " in q.strip() else q
+    async with lock or asyncio.Lock():  # the free plan allows one request in flight
+        r = await client.get(NEWSMCP_URL, params={"q": phrase, "from": "14 days ago", "limit": 20, "fields": "one_liner,entities,sources,content_type"}, headers={"x-api-key": key}, timeout=30)
+    r.raise_for_status()
+    out = []
+    for e in r.json().get("events", []):
+        out.append({
+            "title": e.get("headline") or "", "url": (e.get("sources") or [None])[0], "at": e.get("first_seen", "")[:19] + "+00:00" if e.get("first_seen") else now_iso(),
+            "source": f"{e.get('newsrooms') or 1} newsrooms", "kind": NEWSMCP_KIND.get(e.get("content_type"), "news"),
+            "engagement": 5 * (e.get("newsrooms") or 1), "summary": e.get("one_liner") or "",
+            "entities": [x.get("name") for x in (e.get("entities") or []) if x.get("name")][:8], "sources": (e.get("sources") or [])[:5],
+        })
+    return [i for i in out if i["url"]]
+
+
 def _terms(titles: List[str]) -> Counter:
     c = Counter()
     for t in titles:
@@ -554,10 +589,10 @@ def _terms(titles: List[str]) -> Counter:
     return c
 
 
-async def gather_topic(client, q: str) -> dict:
-    results = await asyncio.gather(_news(client, q), _hn(client, q), _reddit(client, q), return_exceptions=True)
+async def gather_topic(client, q: str, brands: Optional[Dict[str, str]] = None, news_lock: Optional[asyncio.Lock] = None) -> dict:
+    results = await asyncio.gather(_news(client, q), _hn(client, q), _reddit(client, q), _newsmcp(client, q, news_lock), return_exceptions=True)
     items, failed = [], []
-    for name, res in zip(("news", "hn", "reddit"), results):
+    for name, res in zip(("news", "hn", "reddit", "newsmcp"), results):
         if isinstance(res, Exception):
             failed.append(name)
         else:
@@ -574,9 +609,17 @@ async def gather_topic(client, q: str) -> dict:
     qwords = set(q.lower().split())
     rising_terms = [t for t, n in rising.most_common(20) if n >= 2 and not set(t.split()) <= qwords][:8]
     top = sorted(items, key=lambda i: (i["engagement"], i["at"]), reverse=True)[:12]
+    # Which tracked brands (you and competitors) appear in the conversation.
+    in_news: Counter = Counter()
+    for domain, name in (brands or {}).items():
+        rx = re.compile(r"\b" + re.escape(name.lower()) + r"\b")
+        in_news[domain] = sum(1 for i in items if rx.search(" ".join([i["title"], i.get("summary", ""), *i.get("entities", [])]).lower()))
+    entities = Counter(e for i in items for e in i.get("entities", []))
     return {
         "topic": q, "mentions_7d": len(recent), "mentions_30d": len(items), "momentum": momentum, "engagement": engagement,
         "voices": dict(by_kind), "rising_terms": rising_terms, "top": top, "failed_sources": failed,
+        "brands_in_news": [{"domain": d, "brand": (brands or {})[d], "mentions": n} for d, n in in_news.most_common() if n],
+        "entities": [{"name": n, "count": c} for n, c in entities.most_common(10)],
         "score": round(len(items) + 4 * len(recent) * min(momentum, 5) + engagement ** 0.5, 1),
     }
 
@@ -588,12 +631,13 @@ async def topics(refresh: bool = False):
         if doc and doc["at"] > (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat():
             return doc["data"]
     cfg = await load_config()
+    brands = tracked_brands(cfg)
     async with httpx.AsyncClient(headers=UA, follow_redirects=True) as client:
-        sem = asyncio.Semaphore(3)
+        sem, news_lock = asyncio.Semaphore(3), asyncio.Lock()
 
         async def one(q):
             async with sem:
-                return await gather_topic(client, q)
+                return await gather_topic(client, q, brands, news_lock)
 
         rows = await asyncio.gather(*(one(q) for q in cfg["topics"]))
     data = {"fetched_at": now_iso(), "topics": sorted(rows, key=lambda r: -r["score"])}
@@ -740,8 +784,7 @@ async def run_ai_visibility():
     if not provider:
         raise HTTPException(status_code=409, detail="AI answer tracking is not connected. Add OPENROUTER_API_KEY (free models available) or ANTHROPIC_API_KEY to the backend environment.")
     cfg = await load_config()
-    geo_comps = {d for ds in (cfg.get("competitors") or {}).values() for d in ds}
-    brands = {cfg["domain"]: cfg.get("brand") or brand_of(cfg["domain"], cfg), **{d: brand_of(d, cfg) for d in geo_comps}}
+    brands = tracked_brands(cfg)
     jobs = [(p, m) for m in provider["models"] for p in cfg["ai_prompts"]]
     # Free OpenRouter models also cap requests per minute, so go gently.
     sem = asyncio.Semaphore(2 if provider["name"] == "openrouter" else 3)
@@ -777,3 +820,215 @@ async def ai_visibility():
     latest = runs[0]
     latest["history"] = [{"ran_at": r["ran_at"], "share": next((s["share"] for s in r["share_of_voice"] if s["domain"] == r["brand_domain"]), 0)} for r in reversed(runs)]
     return latest
+
+
+# --- Topic deep dive -------------------------------------------------------------
+# For one hot topic: find expert and analyst coverage (Parallel Search), read
+# the full articles (Parallel Extract handles JavaScript-heavy publisher pages;
+# without a key, a plain fetch), then have the AI model distil what experts are
+# saying, the numbers being quoted, open debates, buyer questions, competitor
+# moves and content angles, each tied to a numbered source. Cached for a day.
+
+PARALLEL_URL = "https://api.parallel.ai/v1"
+DEEP_TTL = timedelta(hours=24)
+DEEP_SYSTEM = (
+    "You are a B2B content strategist and industry analyst for {brand}, an enterprise data management company "
+    "(archiving, application retirement, data governance and privacy, enterprise AI). You read recent coverage of one "
+    "topic and report what the market is saying. Use ONLY the numbered sources you are given and cite them by number. "
+    "Never invent people, statistics or quotes. Reply with one JSON object and nothing else."
+)
+DEEP_SCHEMA = """{
+  "summary": "2-3 sentences: what the conversation is about right now and why it matters to enterprise data leaders",
+  "sentiment": "positive | mixed | negative",
+  "expert_views": [{"who": "person, role or outlet as named in the source", "view": "their point in one sentence", "source": 1}],
+  "key_stats": [{"stat": "a specific number or finding quoted in the source", "source": 2}],
+  "debates": ["a point experts disagree on or an open question"],
+  "buyer_questions": ["a question an enterprise buyer is asking about this topic"],
+  "competitor_moves": [{"brand": "one of the tracked competitors", "move": "what they announced or argued", "source": 3}],
+  "content_angles": [{"title": "working title", "angle": "why {brand} can say something distinctive", "format": "blog | guide | checklist | webinar | report | comparison"}]
+}"""
+
+
+async def parallel_search(client: httpx.AsyncClient, topic: str, objective: str) -> List[dict]:
+    r = await client.post(f"{PARALLEL_URL}/search", headers={"x-api-key": os.environ["PARALLEL_API_KEY"]}, timeout=60, json={
+        "objective": objective,
+        "search_queries": [topic, f"{topic} analysis", f"{topic} expert opinion enterprise"],
+        "mode": "fast",
+        "max_chars_total": 12000,
+    })
+    r.raise_for_status()
+    return [{"url": x.get("url"), "title": x.get("title") or "", "date": x.get("publish_date"), "text": "\n".join(x.get("excerpts") or []), "via": "parallel"}
+            for x in r.json().get("results", []) if x.get("url")]
+
+
+async def parallel_extract(client: httpx.AsyncClient, urls: List[str], objective: str) -> Dict[str, dict]:
+    r = await client.post(f"{PARALLEL_URL}/extract", headers={"x-api-key": os.environ["PARALLEL_API_KEY"]}, timeout=120, json={
+        "urls": urls[:20], "objective": objective, "max_chars_total": 40000,
+    })
+    r.raise_for_status()
+    return {x["url"]: {"title": x.get("title") or "", "text": x.get("full_content") or "\n".join(x.get("excerpts") or [])} for x in r.json().get("results", []) if x.get("url")}
+
+
+def _html_text(html: str) -> str:
+    try:
+        import trafilatura  # optional: cleaner article extraction when installed
+        text = trafilatura.extract(html) or ""
+        if text:
+            return text
+    except ImportError:
+        pass
+    html = re.sub(r"(?is)<(script|style|nav|header|footer|aside|form)[^>]*>.*?</\1>", " ", html)
+    return re.sub(r"\s+", " ", re.sub(r"(?s)<[^>]+>", " ", html)).strip()
+
+
+async def basic_extract(client: httpx.AsyncClient, url: str) -> Optional[dict]:
+    try:
+        r = await client.get(url, timeout=20, follow_redirects=True)
+        if r.status_code != 200 or "html" not in r.headers.get("content-type", ""):
+            return None
+        m = re.search(r"(?is)<title[^>]*>(.*?)</title>", r.text)
+        return {"title": (m.group(1).strip() if m else ""), "text": _html_text(r.text)[:8000]}
+    except httpx.HTTPError:
+        return None
+
+
+def parse_json_object(text: str) -> Optional[dict]:
+    """Free models sometimes wrap JSON in prose or code fences; take the outermost object."""
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        data = json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+async def complete(client: httpx.AsyncClient, system: str, user: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """One completion from the configured AI provider: (text, model, error). Falls through OpenRouter models."""
+    provider = ai_provider()
+    if not provider:
+        return None, None, "No AI key set: showing sources without a summary."
+    if provider["name"] == "anthropic":
+        import anthropic
+        try:
+            resp = await anthropic.AsyncAnthropic().messages.create(model=AI_MODEL, max_tokens=4000, system=system, messages=[{"role": "user", "content": user}])
+        except anthropic.APIError as e:
+            return None, AI_MODEL, f"AI request failed: {getattr(e, 'message', e)}"
+        return "".join(b.text for b in resp.content if b.type == "text"), AI_MODEL, None
+    headers = {"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}", "HTTP-Referer": os.environ.get("SITE_URL", "https://www.solix.com"), "X-Title": "Solix SEO dashboard"}
+    error = None
+    for model in provider["models"]:
+        try:
+            r = await client.post(OPENROUTER_URL, headers=headers, timeout=180, json={"model": model, "max_tokens": 3000, "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]})
+        except httpx.HTTPError:
+            error = "Could not reach OpenRouter."
+            continue
+        if r.status_code == 429:
+            error = "OpenRouter's free daily limit is used up; try again tomorrow."
+            continue
+        if r.status_code >= 400:
+            error = f"OpenRouter error {r.status_code}."
+            continue
+        text = (((r.json().get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+        if text:
+            return text, model, None
+        error = "The model returned an empty answer."
+    return None, None, error
+
+
+class DeepDiveBody(BaseModel):
+    topic: str = Field(min_length=2, max_length=200)
+    refresh: bool = False
+
+
+@router.post("/topics/deep-dive", dependencies=[Depends(require_editor)])
+async def deep_dive(body: DeepDiveBody):
+    topic = body.topic.strip()
+    key = topic.lower()
+    if not body.refresh:
+        doc = await db.seo_cache.find_one({"kind": "deep", "key": key}, {"_id": 0})
+        if doc and doc["at"] > (datetime.now(timezone.utc) - DEEP_TTL).isoformat():
+            return doc["data"]
+    cfg = await load_config()
+    brands = tracked_brands(cfg)
+    brand = cfg.get("brand") or "Solix"
+    objective = f"What are industry analysts, experts and practitioners saying about {topic} for enterprise data and IT leaders in the last 30 days? Prefer analysis, research and expert commentary over press releases."
+    notes: List[str] = []
+
+    async with httpx.AsyncClient(headers=UA, follow_redirects=True) as client:
+        radar = await gather_topic(client, topic, brands)
+        found: List[dict] = []
+        if os.environ.get("PARALLEL_API_KEY"):
+            try:
+                found = await parallel_search(client, topic, objective)
+            except (httpx.HTTPError, ValueError) as e:
+                notes.append(f"Parallel search failed ({e.__class__.__name__}); using the news radar only.")
+        else:
+            notes.append("Add PARALLEL_API_KEY for expert and analyst sources and full-text extraction of JavaScript-heavy pages.")
+        # Expert-leaning sources first, then the rest of the radar (Reddit threads are opinions, not articles).
+        radar_items = sorted([i for i in radar["top"] if "reddit.com" not in (i.get("url") or "")], key=lambda i: i["kind"] != "analysts")
+        candidates, seen = [], set()
+        for it in found + [{"url": i["url"], "title": i["title"], "date": i["at"][:10], "text": i.get("summary", ""), "via": i["source"]} for i in radar_items]:
+            u = it["url"]
+            if u and u not in seen and "news.google.com" not in u:
+                seen.add(u)
+                candidates.append(it)
+        candidates = candidates[:8]
+
+        full: Dict[str, dict] = {}
+        if candidates and os.environ.get("PARALLEL_API_KEY"):
+            try:
+                full = await parallel_extract(client, [c["url"] for c in candidates], objective)
+            except (httpx.HTTPError, ValueError):
+                notes.append("Parallel extract failed; read pages directly instead.")
+        missing = [c for c in candidates if c["url"] not in full]
+        if missing:
+            sem = asyncio.Semaphore(4)
+
+            async def fetch(c):
+                async with sem:
+                    return c["url"], await basic_extract(client, c["url"])
+
+            for url, got in await asyncio.gather(*(fetch(c) for c in missing)):
+                if got and len(got["text"]) > 400:
+                    full[url] = got
+
+        sources = []
+        for c in candidates:
+            got = full.get(c["url"], {})
+            text = (got.get("text") or c.get("text") or "").strip()
+            if len(text) < 200:
+                continue
+            sources.append({"n": len(sources) + 1, "url": c["url"], "title": got.get("title") or c["title"], "date": c.get("date"), "via": c.get("via"), "text": text[:6000], "chars": len(text)})
+
+        insight, model, err = None, None, None
+        if sources:
+            comp_names = ", ".join(n for d, n in brands.items() if d != cfg["domain"])
+            user = (f"Topic: {topic}\nTracked competitors: {comp_names}\n\nSources:\n\n"
+                    + "\n\n".join(f"[{s['n']}] {s['title']} ({s['url']}, {s.get('date') or 'undated'})\n{s['text']}" for s in sources)
+                    + "\n\nReturn JSON in exactly this shape (arrays may be empty; 3-6 items where the sources support it):\n" + DEEP_SCHEMA.replace("{brand}", brand))
+            text, model, err = await complete(client, DEEP_SYSTEM.replace("{brand}", brand), user)
+            insight = parse_json_object(text) if text else None
+            if text and insight is None:
+                err = "The model's answer wasn't valid JSON; try again or add another model to OPENROUTER_MODELS."
+        else:
+            err = "No readable sources found for this topic in the last few weeks."
+        if err:
+            notes.append(err)
+
+    by_n = {s["n"]: s["url"] for s in sources}
+    if insight:
+        for k in ("expert_views", "key_stats", "competitor_moves"):
+            items = insight.get(k)
+            insight[k] = [dict(x, url=by_n.get(x.get("source"))) for x in items if isinstance(x, dict)] if isinstance(items, list) else []
+        for k in ("debates", "buyer_questions", "content_angles"):
+            if not isinstance(insight.get(k), list):
+                insight[k] = []
+    data = {
+        "topic": topic, "generated_at": now_iso(), "model": model, "insight": insight, "notes": notes,
+        "sources": [{k: s[k] for k in ("n", "url", "title", "date", "via", "chars")} | {"excerpt": s["text"][:400]} for s in sources],
+        "radar": {k: radar[k] for k in ("mentions_7d", "mentions_30d", "momentum", "voices", "rising_terms", "brands_in_news", "entities")},
+    }
+    await db.seo_cache.replace_one({"kind": "deep", "key": key}, {"kind": "deep", "key": key, "at": now_iso(), "data": data}, upsert=True)
+    return data

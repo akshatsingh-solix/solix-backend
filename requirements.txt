@@ -40,3 +40,5 @@ openai>=1.50.0
 beautifulsoup4>=4.12.3
 markdownify>=0.13.1
 defusedxml>=0.7.1
+# SEO topic deep dives: article text extraction when PARALLEL_API_KEY is not set
+trafilatura>=2.0
