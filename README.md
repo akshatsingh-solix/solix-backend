@@ -43,6 +43,12 @@ fully with just MongoDB configured.
 
 Sol answers visitors in the site's chat widget on free-tier models.
 
+- **Open conversation.** Sol answers general questions (concepts, regulations,
+  architecture, competitors, small talk) from the model's own knowledge and
+  reasoning, and uses site content as the authority for Solix-specific facts
+  (products, outcomes, pricing, customers), which it never invents.
+  Comparison questions ("how is it better", "vs X") always bring in the
+  differentiators. `SOL_TEMPERATURE` (default 0.6) sets how conversational it is.
 - **Grounded answers.** `sol_knowledge.json` holds every product, solution,
   industry, article, press release, job, partner programme and service page
   of the site (~150 sections, each with its URL), generated in the Website
@@ -60,7 +66,7 @@ Sol answers visitors in the site's chat widget on free-tier models.
   limited, down or returns an empty reply is skipped and rested for a minute.
   If all fail, the widget falls back to its scripted concierge.
 - **Limits.** Each request stays under `SOL_INPUT_TOKEN_BUDGET` (default
-  4500) input tokens and `SOL_MAX_OUTPUT_TOKENS` (default 700), so it always
+  5000) input tokens and `SOL_MAX_OUTPUT_TOKENS` (default 900), so it always
   fits Groq's free 8K tokens-per-minute cap. Visitors are rate-limited per
   session (20 per 5 min) and per IP (60 per hour).
 - **Admin → Sol chats** (admin and sales roles): every conversation, its

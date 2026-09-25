@@ -391,3 +391,44 @@ def test_cms_item_replaces_builtin_article_at_same_address():
     at_url = [c for c in sol_search.index().chunks if c["url"] == builtin["url"]]
     assert [c["id"] for c in at_url] == [f"cms:{slug}"]
     sol_search._index = None
+
+
+# ---------- open conversation ----------
+def test_comparison_questions_bring_the_differentiators(chat_app, monkeypatch):
+    from fastapi.testclient import TestClient
+    chat, app, _ = chat_app
+    seen = []
+
+    async def capture(messages, tools=None, **kw):
+        seen.append((messages[0]["content"], kw))
+        yield {"type": "text", "text": "ok"}
+
+    monkeypatch.setattr(chat, "stream_completion", capture)
+    with TestClient(app) as client:
+        client.post("/api/chat/stream", json={"session_id": "sess-cmp1", "message": "how is it better than others?"})
+        client.post("/api/chat/stream", json={"session_id": "sess-open", "message": "tell me a joke"})
+    comparison, small_talk = seen[0][0], seen[1][0]
+    assert "(page: /platform#why-solix)" in comparison and "not a portfolio of acquisitions" in comparison
+    # Nothing on the site matches small talk: Sol is told to use its own knowledge, not to deflect.
+    assert "answer from your own knowledge" in small_talk and "(page: /" not in small_talk.split("Site knowledge for this turn:")[1]
+    assert seen[0][1]["temperature"] == chat.TEMPERATURE
+
+
+def test_temperature_reaches_the_provider():
+    llm._cooldown.clear()
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, text=sse_body(text_chunk("hi")))
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    collect(llm.stream_completion([], temperature=0.7, providers=[provider("a")], client=client))
+    assert bodies[0]["temperature"] == 0.7
+
+
+def test_prompt_allows_general_knowledge_but_guards_solix_facts():
+    import knowledge
+    p = knowledge.CONCIERGE_SYSTEM_PROMPT
+    assert "Use it freely for anything general" in p
+    assert "Solix-specific facts" in p and "Never invent Solix numbers" in p
