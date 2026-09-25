@@ -180,14 +180,24 @@ async def list_chats(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1
     ]
     res = (await db.chat_messages.aggregate(pipeline).to_list(1))[0]
     items = res["items"]
-    leads = {d["source_page"][5:]: d["type"] async for d in db.submissions.find(
-        {"source": "chat", "source_page": {"$in": [f"chat:{i['_id']}" for i in items]}}, {"_id": 0, "source_page": 1, "type": 1})}
+    # A conversation's lead is its strongest outcome: demo > expert question > contact details shared.
+    rank = {"demo": 3, "contact": 2, "chat": 1}
+    leads, contacts = {}, {}
+    async for d in db.submissions.find({"source": "chat", "source_page": {"$in": [f"chat:{i['_id']}" for i in items]}},
+                                       {"_id": 0, "source_page": 1, "type": 1, "name": 1, "email": 1, "phone": 1, "company": 1, "job_title": 1}):
+        sid = d["source_page"][5:]
+        if rank.get(d["type"], 0) > rank.get(leads.get(sid), 0):
+            leads[sid] = d["type"]
+        c = contacts.setdefault(sid, {})
+        for k in ("name", "email", "phone", "company", "job_title"):
+            if d.get(k) and not c.get(k):
+                c[k] = d[k]
     return {
         "total": res["total"][0]["n"] if res["total"] else 0,
         "items": [{
             "session_id": i["_id"], "started_at": i["started_at"], "last_at": i["last_at"], "messages": i["messages"],
             "first_question": (i["first_question"] or "")[:200], "pages": [p for p in i["pages"] if p][:5],
-            "models": [m for m in i["models"] if m], "lead": leads.get(i["_id"]),
+            "models": [m for m in i["models"] if m], "lead": leads.get(i["_id"]), "contact": contacts.get(i["_id"]) or None,
         } for i in items],
     }
 

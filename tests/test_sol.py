@@ -174,14 +174,21 @@ def chat_app(monkeypatch):
     """The full API on an in-memory Mongo, with one fake provider configured."""
     from mongomock_motor import AsyncMongoMockClient
     import database
-    import accounts, admin, auth, cache, chat, content, delivery, emailer, events, intent, leads_admin, migrate, server, site_settings  # noqa: E401
+    import accounts, admin, auth, cache, chat, chat_leads, content, delivery, emailer, events, intent, leads_admin, migrate, server, site_settings  # noqa: E401
 
     fake_db = AsyncMongoMockClient()["solix_test"]
     monkeypatch.setattr(database, "db", fake_db)
-    for m in (accounts, admin, auth, chat, content, delivery, emailer, events, intent, leads_admin, migrate, server, site_settings):
+    for m in (accounts, admin, auth, chat, chat_leads, content, delivery, emailer, events, intent, leads_admin, migrate, server, site_settings):
         monkeypatch.setattr(m, "db", fake_db, raising=False)
     cache.clear()
-    monkeypatch.setattr(chat, "notify_lead", lambda doc: asyncio.sleep(0))
+    alerts = []
+
+    async def fake_alert(doc):
+        alerts.append((doc["type"], doc.get("email")))
+
+    monkeypatch.setattr(chat, "notify_lead", fake_alert)
+    monkeypatch.setattr(chat_leads, "notify_lead", fake_alert)
+    chat.ALERTS = alerts
     monkeypatch.setattr(chat, "configured_providers", lambda: [provider("a")])
     chat._hits.clear()
     # Each test starts from the bundled knowledge and re-reads the CMS.
@@ -221,7 +228,7 @@ def test_chat_books_demo_through_tool_and_streams_answer(chat_app, monkeypatch):
     assert seen_messages[1][-1]["role"] == "tool" and json.loads(seen_messages[1][-1]["content"])["ok"] is True
 
     async def check():
-        sub = await fake_db.submissions.find_one({"source": "chat"})
+        sub = await fake_db.submissions.find_one({"source": "chat", "type": "demo"})
         msgs = await fake_db.chat_messages.find({"session_id": "sess-123"}).to_list(10)
         return sub, msgs
     sub, msgs = run_sync(check())
@@ -432,3 +439,135 @@ def test_prompt_allows_general_knowledge_but_guards_solix_facts():
     p = knowledge.CONCIERGE_SYSTEM_PROMPT
     assert "Use it freely for anything general" in p
     assert "Solix-specific facts" in p and "Never invent Solix numbers" in p
+
+
+# ---------- lead capture ----------
+def test_extract_contact_finds_details_without_false_positives():
+    from chat_leads import company_from_email, extract_contact as e
+    assert e("my email is Priya.Shah@Acme-Corp.com") == {"email": "priya.shah@acme-corp.com"}
+    assert e("I am Akshat Singh from Solix Labs, reach me at +1 (408) 555-0199") == {"phone": "+1 (408) 555-0199", "name": "Akshat Singh", "company": "Solix Labs"}
+    assert e("my name is akshat singh and I work at Northwind Health") == {"name": "Akshat Singh", "company": "Northwind Health"}
+    assert e("I'm a data architect at Umbrella Insurance") == {"job_title": "data architect", "company": "Umbrella Insurance"}
+    assert e("my number is 9876543210") == {"phone": "9876543210"}
+    for text in ("I'm interested in archiving SAP ECC from 2012-2024", "we have 150000 records and 40 TB", "I am looking for pricing",
+                 "We migrated from SAP to Oracle in 2019", "what is GDPR article 17?", "hi"):
+        assert e(text) == {}, text
+    assert company_from_email("a@acme-corp.com") == "Acme Corp" and company_from_email("x@mail.hsbc.co.uk") == "Hsbc"
+    assert company_from_email("x@gmail.com") is None
+
+
+def _post(client, sid, message, **extra):
+    return parse_sse(client.post("/api/chat/stream", json={"session_id": sid, "message": message, **extra}).text)
+
+
+def test_email_alone_becomes_a_lead_immediately_even_if_the_model_fails(chat_app, monkeypatch):
+    from fastapi.testclient import TestClient
+    chat, app, fake_db = chat_app
+
+    async def failing(messages, tools=None, **kw):
+        raise llm.ProviderError("all down")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(chat, "stream_completion", failing)
+    with TestClient(app) as client:
+        events = _post(client, "sess-lead1", "you can reach me at dana@northwind-health.com", page="/industries/healthcare", visitor_id="vid-12345678")
+    assert events[0] == {"event": "lead_captured", "fields": ["company", "email"]}
+    sub = run_sync(fake_db.submissions.find_one({"type": "chat", "source_page": "chat:sess-lead1"}, {"_id": 0}))
+    assert sub["email"] == "dana@northwind-health.com" and sub["company"] == "Northwind Health" and sub["page"] == "/industries/healthcare"
+    lead = run_sync(fake_db.leads.find_one({"email": "dana@northwind-health.com"}, {"_id": 0}))
+    assert lead and lead["company"] == "Northwind Health" and "chat" in lead["tags"] and "vid-12345678" in lead["visitor_ids"]
+    assert chat.ALERTS == [("chat", "dana@northwind-health.com")]
+
+
+def test_details_are_captured_even_with_no_ai_configured(chat_app, monkeypatch):
+    from fastapi.testclient import TestClient
+    chat, app, fake_db = chat_app
+    monkeypatch.setattr(chat, "configured_providers", lambda: [])
+    with TestClient(app) as client:
+        r = client.post("/api/chat/stream", json={"session_id": "sess-noai", "message": "I'm Omar, call me on +44 20 7946 0958"})
+    assert r.status_code == 503
+    sub = run_sync(fake_db.submissions.find_one({"source_page": "chat:sess-noai"}, {"_id": 0}))
+    assert sub["name"] == "Omar" and sub["phone"] == "+44 20 7946 0958"
+
+
+def test_details_build_up_across_messages_into_one_lead(chat_app, monkeypatch):
+    from fastapi.testclient import TestClient
+    chat, app, fake_db = chat_app
+    prompts = []
+
+    async def quiet(messages, tools=None, **kw):
+        prompts.append(messages[0]["content"])
+        yield {"type": "text", "text": "ok"}
+
+    monkeypatch.setattr(chat, "stream_completion", quiet)
+    with TestClient(app) as client:
+        first = _post(client, "sess-build", "Hi, I'm Priya Shah")
+        _post(client, "sess-build", "what does archiving cost?")
+        third = _post(client, "sess-build", "sure, priya@gmail.com")
+        _post(client, "sess-build", "priya@gmail.com again")
+    assert first[0] == {"event": "lead_captured", "fields": ["name"]}
+    assert third[0] == {"event": "lead_captured", "fields": ["email"]}
+    # No lead until there is an email; then one lead with the name from earlier, and one alert.
+    assert run_sync(fake_db.submissions.count_documents({"source_page": "chat:sess-build"})) == 1
+    lead = run_sync(fake_db.leads.find_one({"email": "priya@gmail.com"}, {"_id": 0}))
+    assert lead["name"] == "Priya Shah" and lead.get("company") is None
+    assert chat.ALERTS == [("chat", "priya@gmail.com")]
+    # Sol is told what it already knows, so it doesn't ask again.
+    assert "No contact details saved yet" not in prompts[1] and "name: Priya Shah" in prompts[1]
+
+
+def test_model_tool_saves_details_the_patterns_missed(chat_app, monkeypatch):
+    from fastapi.testclient import TestClient
+    chat, app, fake_db = chat_app
+    calls = []
+
+    async def model(messages, tools=None, **kw):
+        calls.append(messages)
+        if len(calls) == 1:
+            yield {"type": "tool_calls", "calls": [{"id": "t1", "name": "save_visitor_details", "arguments": {
+                "name": "Priya", "job_title": "CDO", "company": "First National Bank", "notes": "Evaluating archive for mainframe"}}]}
+        else:
+            yield {"type": "text", "text": "Great to meet you, Priya."}
+
+    monkeypatch.setattr(chat, "stream_completion", model)
+    with TestClient(app) as client:
+        events = _post(client, "sess-tool", "Priya here, CDO at First National Bank")
+    assert {"event": "lead_captured", "fields": ["company", "job_title", "name"]} in events
+    assert json.loads(calls[1][-1]["content"]) == {"ok": True, "saved": ["company", "job_title", "name"]}
+    sub = run_sync(fake_db.submissions.find_one({"source_page": "chat:sess-tool"}, {"_id": 0}))
+    assert sub["company"] == "First National Bank" and sub["message"] == "Evaluating archive for mainframe"
+
+
+def test_demo_needs_only_an_email_and_reuses_earlier_details(chat_app):
+    chat, _, fake_db = chat_app
+    run_sync(chat.chat_leads.capture("sess-demo", {"name": "Lee Park", "company": "Initech"}, trusted=False))
+    out = run_sync(chat.create_demo_request("sess-demo", {"email": "lee@initech.com"}))
+    assert out["ok"] is True
+    demo = run_sync(fake_db.submissions.find_one({"type": "demo", "source_page": "chat:sess-demo"}, {"_id": 0}))
+    assert demo["name"] == "Lee Park" and demo["company"] == "Initech"
+    # One alert for the demo, not a second one for the chat contact.
+    assert chat.ALERTS == [("demo", "lee@initech.com")]
+    assert run_sync(chat.create_demo_request("sess-demo2", {"name": "No Email"}))["ok"] is False
+
+
+def test_admin_chat_list_shows_captured_contact(chat_app):
+    chat, _, fake_db = chat_app
+    import admin
+
+    async def go():
+        await fake_db.chat_messages.insert_one({"session_id": "sess-adm", "role": "user", "content": "hi", "created_at": "2026-09-01T10:00:00"})
+        await chat.chat_leads.capture("sess-adm", {"email": "kim@corp.com", "name": "Kim"}, trusted=True)
+        return await admin.list_chats(page=1, page_size=25, q=None)
+
+    item = run_sync(go())["items"][0]
+    assert item["lead"] == "chat" and item["contact"]["email"] == "kim@corp.com" and item["contact"]["name"] == "Kim"
+
+
+def test_offline_widget_capture_endpoint(chat_app):
+    from fastapi.testclient import TestClient
+    chat, app, fake_db = chat_app
+    with TestClient(app) as client:
+        assert client.post("/api/chat/capture", json={"session_id": "sess-off", "message": "what is archiving?"}).json() == {"fields": []}
+        r = client.post("/api/chat/capture", json={"session_id": "sess-off", "message": "mail me at ravi@contoso.com", "page": "/contact"})
+    assert r.json() == {"fields": ["company", "email"]}
+    assert run_sync(fake_db.leads.find_one({"email": "ravi@contoso.com"}, {"_id": 0}))["company"] == "Contoso"
