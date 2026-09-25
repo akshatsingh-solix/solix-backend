@@ -275,6 +275,16 @@ async def chat_status():
     return {"ai": bool(configured_providers()), "providers": [p.name for p in configured_providers()], "knowledge_chunks": len(sol_search.index().chunks)}
 
 
+@router.post("/capture")
+async def chat_capture(req: ChatRequest, request: Request):
+    """Contact capture only, for the widget's offline concierge (no model involved)."""
+    if _rate_limited("session", req.session_id) or _rate_limited("ip", _client_ip(request)):
+        raise HTTPException(status_code=429, detail="Too many messages. Please wait a moment.")
+    found = chat_leads.extract_contact(req.message)
+    saved = await chat_leads.capture(req.session_id, found, trusted=False, page=req.page, language=req.language, visitor_id=req.visitor_id) if found else {}
+    return {"fields": sorted(saved)}
+
+
 @router.get("/{session_id}", response_model=List[ChatMessage])
 async def get_chat_history(session_id: str):
     docs = await db.chat_messages.find({"session_id": session_id}, {"_id": 0}).sort("created_at", 1).to_list(200)

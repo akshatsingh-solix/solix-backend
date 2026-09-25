@@ -561,3 +561,13 @@ def test_admin_chat_list_shows_captured_contact(chat_app):
 
     item = run_sync(go())["items"][0]
     assert item["lead"] == "chat" and item["contact"]["email"] == "kim@corp.com" and item["contact"]["name"] == "Kim"
+
+
+def test_offline_widget_capture_endpoint(chat_app):
+    from fastapi.testclient import TestClient
+    chat, app, fake_db = chat_app
+    with TestClient(app) as client:
+        assert client.post("/api/chat/capture", json={"session_id": "sess-off", "message": "what is archiving?"}).json() == {"fields": []}
+        r = client.post("/api/chat/capture", json={"session_id": "sess-off", "message": "mail me at ravi@contoso.com", "page": "/contact"})
+    assert r.json() == {"fields": ["company", "email"]}
+    assert run_sync(fake_db.leads.find_one({"email": "ravi@contoso.com"}, {"_id": 0}))["company"] == "Contoso"
