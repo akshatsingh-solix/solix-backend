@@ -139,3 +139,88 @@ def test_role_check_blocks_viewers():
         run_sync(check(user={"role": "viewer"}))
     assert e.value.status_code == 403
     assert run_sync(check(user={"role": "admin"}))["role"] == "admin"
+
+
+def _mock_client(handler, monkeypatch):
+    real = httpx.AsyncClient
+
+    def factory(*a, **kw):
+        kw.pop("transport", None)
+        return real(*a, transport=httpx.MockTransport(handler), **kw)
+    monkeypatch.setattr(seo.httpx, "AsyncClient", factory)
+
+
+def test_newsmcp_events_become_topic_items(monkeypatch):
+    monkeypatch.setenv("NEWSMCP_API_KEY", "nk")
+    seen = {}
+
+    def handler(req):
+        seen["key"], seen["q"] = req.headers.get("x-api-key"), req.url.params.get("q")
+        return httpx.Response(200, json={"events": [{"headline": "Informatica adds AI governance", "first_seen": "2026-09-20T10:00:00", "newsrooms": 6,
+                                                     "content_type": "analysis", "one_liner": "Analysts weigh in.", "entities": [{"name": "Informatica"}],
+                                                     "sources": ["https://example.com/a"]}]})
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            return await seo._newsmcp(c, "AI governance")
+    items = run_sync(go())
+    assert seen == {"key": "nk", "q": '"AI governance"'}
+    assert items[0]["kind"] == "analysts" and items[0]["url"] == "https://example.com/a" and items[0]["entities"] == ["Informatica"]
+
+
+def test_parse_json_object_tolerates_prose():
+    assert seo.parse_json_object('Sure!\n```json\n{"summary": "x", "debates": []}\n```') == {"summary": "x", "debates": []}
+    assert seo.parse_json_object("no json here") is None
+
+
+def test_deep_dive_end_to_end(monkeypatch):
+    from mongomock_motor import AsyncMongoMockClient
+    import json as _json
+
+    monkeypatch.setattr(seo, "db", AsyncMongoMockClient()["t"])
+    monkeypatch.setenv("PARALLEL_API_KEY", "pk")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "ok")
+    monkeypatch.delenv("NEWSMCP_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_MODELS", raising=False)
+    article = "Analysts at Example Research say 62% of enterprises will retire legacy apps by 2027. " * 10
+    calls = []
+
+    def handler(req):
+        host, path = req.url.host, req.url.path
+        calls.append(f"{host}{path}")
+        if host == "api.parallel.ai" and path.endswith("/search"):
+            return httpx.Response(200, json={"results": [{"url": "https://analyst.example/report", "title": "Retirement outlook", "publish_date": "2026-09-20", "excerpts": ["short"]}]})
+        if host == "api.parallel.ai" and path.endswith("/extract"):
+            assert _json.loads(req.content)["urls"] == ["https://analyst.example/report"]
+            return httpx.Response(200, json={"results": [{"url": "https://analyst.example/report", "title": "Retirement outlook", "full_content": article}], "errors": []})
+        if host == "openrouter.ai":
+            body = _json.loads(req.content)
+            assert "[1] Retirement outlook" in body["messages"][1]["content"]
+            return httpx.Response(200, json={"choices": [{"message": {"content": _json.dumps({
+                "summary": "Retirement is accelerating.", "sentiment": "positive",
+                "expert_views": [{"who": "Example Research", "view": "Most will retire apps by 2027", "source": 1}],
+                "key_stats": [{"stat": "62% by 2027", "source": 1}], "debates": [], "buyer_questions": ["How long does retirement take?"],
+                "competitor_moves": [], "content_angles": [{"title": "Retire before 2027", "angle": "x", "format": "guide"}]})}}]})
+        return httpx.Response(503)  # news feeds unavailable in this test
+
+    _mock_client(handler, monkeypatch)
+    data = run_sync(seo.deep_dive(seo.DeepDiveBody(topic="application retirement")))
+    assert data["model"] == "nvidia/nemotron-3.5-lightning:free"
+    assert data["sources"][0]["n"] == 1 and data["sources"][0]["chars"] == len(article.strip())
+    assert data["insight"]["key_stats"][0]["url"] == "https://analyst.example/report"
+    assert data["insight"]["buyer_questions"] == ["How long does retirement take?"]
+    # Second call is served from the 24-hour cache.
+    before = len(calls)
+    assert run_sync(seo.deep_dive(seo.DeepDiveBody(topic="Application Retirement")))["generated_at"] == data["generated_at"]
+    assert len(calls) == before
+
+
+def test_deep_dive_without_keys_explains(monkeypatch):
+    from mongomock_motor import AsyncMongoMockClient
+
+    monkeypatch.setattr(seo, "db", AsyncMongoMockClient()["t"])
+    for k in ("PARALLEL_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "NEWSMCP_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    _mock_client(lambda req: httpx.Response(503), monkeypatch)
+    data = run_sync(seo.deep_dive(seo.DeepDiveBody(topic="data sovereignty")))
+    assert data["insight"] is None and any("PARALLEL_API_KEY" in n for n in data["notes"])
