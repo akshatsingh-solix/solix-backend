@@ -81,17 +81,19 @@ async def collect(run: dict) -> set:
             signals += await guarded("tenders", rc.ted_tenders(client, settings))
     counts["credits_used"] = budget["credits"]
     touched = set()
+    resolver = await rs.Resolver.load()  # every posting saved in bulk: a round trip each adds up against Atlas
+    ops = []
     for sig in signals:
         if not sig.get("company"):
             continue
-        company = await rs.get_or_create_company(sig["company"], domain=sig.get("domain"), source=sig.get("source") or "radar")
+        company = resolver.resolve(sig["company"], sig.get("domain"), sig.get("source") or "radar")
         if sig.get("public_sector") and not company.get("industry"):
-            await _db().companies.update_one({"id": company["id"]}, {"$set": {"industry": "Public sector"}})
-        if await rs.upsert_signal(company, sig, run["id"]):
-            counts["signals_new"] = counts.get("signals_new", 0) + 1
-        else:
-            counts["signals_seen"] = counts.get("signals_seen", 0) + 1
+            resolver.set(company, {"industry": "Public sector"})
+        ops.append(rs._signal_op(company, sig, run["id"]))
         touched.add(company["id"])
+    await resolver.flush()
+    counts["signals_new"] = await rs.save_signals(ops)
+    counts["signals_seen"] = len(ops) - counts["signals_new"]
     counts["companies_touched"] = len(touched)
     return touched
 

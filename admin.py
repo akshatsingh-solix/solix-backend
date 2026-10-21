@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
 
+import cache
 from database import db, now_iso
 from auth import get_current_admin, require_roles
 from emailer import ALERT_TYPES, get_alert_recipient
@@ -135,6 +136,7 @@ async def put_team(body: Team):
             seen.add(email)
             members.append({"name": m.name.strip(), "email": email})
     await db.settings.update_one({"key": "team"}, {"$set": {"members": members, "updated_at": now_iso()}}, upsert=True)
+    cache.bump("radar_ctx")  # the Radar routes accounts to these names
     return {"members": members}
 
 

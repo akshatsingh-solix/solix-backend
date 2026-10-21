@@ -430,3 +430,66 @@ def test_overlapping_runs_send_each_step_and_message_once(client):
     pending = run(_mock_db.ops_outbox.count_documents({"status": "pending", "next_attempt_at": {"$lte": "2999"}}))
     a, b = run(together(ops.process_outbox(500), ops.process_outbox(500)))
     assert pending and sum(a.values()) + sum(b.values()) == pending  # every queued message handled exactly once
+
+
+def test_collector_saves_in_bulk_links_and_is_idempotent(client, monkeypatch):
+    # Atlas costs a round trip per call, so a run saves its postings in bulk, never one by one.
+    import radar_run
+    import radar_service as rs
+    run(rs.save_radar_settings({"collectors": {"ats": True, "crustdata": False, "dns": False, "news": False, "filings": False, "tenders": True},
+                                "targets": [{"company": "Initrode Corp", "domain": "initrode.example", "ats": "greenhouse", "board": "initrode"}]}))
+    run(_mock_db.leads.insert_one({"id": "lead-initrode", "email": "cio@initrode.example", "stage": "mql", "score": 40, "product_scores": {}, "owner": None}))
+
+    async def postings(client_, target):
+        return [{"company": "Initrode Corp", "domain": "initrode.example", "type": "competitor_job", "source": "greenhouse", "source_ref": f"gh-{i}",
+                 "title": "ECM Engineer", "role_title": "ECM Engineer", "role_strength": "Strong", "competitor_key": "opentext-documentum",
+                 "competitor_product": "OpenText Documentum", "country": "United States", "posted_at": "2026-10-15"} for i in range(3)]
+
+    async def tenders(client_, settings):
+        return [{"company": "Ministry of Records", "type": "tender", "source": "ted", "source_ref": "ted-1", "title": "Records archive", "public_sector": True, "country": "France"}]
+    monkeypatch.setitem(radar_run.rc.ATS, "greenhouse", postings)
+    monkeypatch.setattr(radar_run.rc, "ted_tenders", tenders)
+    coll = type(_mock_db.company_signals)
+    original = coll.update_one
+
+    async def one_by_one(self, *a, **k):
+        if self.name == "company_signals":
+            raise AssertionError("signals saved one at a time")
+        return await original(self, *a, **k)
+    monkeypatch.setattr(coll, "update_one", one_by_one)
+
+    first = {"id": "run-1", "counts": {}, "notes": []}
+    touched = run(radar_run.collect(first))
+    assert first["counts"]["signals_new"] == 4 and first["counts"]["signals_seen"] == 0 and len(touched) == 2
+    initrode = run(_mock_db.companies.find_one({"key": rm_key("Initrode Corp")}, {"_id": 0}))
+    assert "initrode.example" in initrode["domains"] and "lead-initrode" in initrode["lead_ids"]
+    assert run(_mock_db.leads.find_one({"id": "lead-initrode"}))["company_id"] == initrode["id"]
+    assert run(_mock_db.companies.find_one({"key": rm_key("Ministry of Records")}))["industry"] == "Public sector"
+    again = {"id": "run-2", "counts": {}, "notes": []}
+    run(radar_run.collect(again))
+    assert again["counts"]["signals_new"] == 0 and again["counts"]["signals_seen"] == 4
+    assert run(_mock_db.companies.count_documents({"key": rm_key("Initrode Corp")})) == 1
+
+
+def rm_key(name):
+    import radar_model
+    return radar_model.company_key(name)
+
+
+def test_bulk_paths_make_no_per_account_round_trips(client, monkeypatch):
+    # Recompute, "mark all as seen" and re-import touch every account: one call each would take minutes on Atlas.
+    coll = type(_mock_db.companies)
+    originals = {m: getattr(coll, m) for m in ("find_one", "update_one")}
+
+    def guard(method):
+        async def call(self, *a, **k):
+            if self.name in ("companies", "radar_seen", "company_signals"):
+                raise AssertionError(f"{self.name}.{method} called per account")
+            return await originals[method](self, *a, **k)
+        return call
+    for m in originals:
+        monkeypatch.setattr(coll, m, guard(m))
+    assert client.post("/api/admin/radar/recompute").json()["recomputed"] >= 3
+    assert client.post("/api/admin/radar/seen", json={"all": True}).status_code == 200
+    r = client.post("/api/admin/radar/import", files={"file": ("radar.json", json.dumps(RADAR), "application/json")})
+    assert r.status_code == 200 and r.json()["signals_new"] == 0
