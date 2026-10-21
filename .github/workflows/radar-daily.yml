@@ -55,4 +55,9 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           SITE_URL: ${{ vars.SITE_URL }}
-        run: python radar_run.py "${{ github.event.inputs.steps || 'daily' }}"
+        run: |
+          if [ -z "$MONGO_URL" ]; then
+            echo "::warning::The MONGO_URL and DB_NAME repository secrets aren't set yet, so there's nothing to run. See docs/GO-LIVE.md step 3."
+            exit 0
+          fi
+          python radar_run.py "${{ github.event.inputs.steps || 'daily' }}"

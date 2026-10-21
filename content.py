@@ -110,7 +110,7 @@ def file_url(f: dict, token: Optional[str] = None) -> str:
     return f"{base}?t={token}" if token else base
 
 
-async def _public_view(doc: dict, full: bool) -> dict:
+async def _public_view(doc: dict, full: bool, files: Optional[dict] = None) -> dict:
     out = {k: doc.get(k) for k in (
         "id", "slug", "type", "title", "summary", "tag", "products", "industries", "author", "author_role",
         "cover_image", "gated", "event_date", "video_url", "seo_title", "seo_description", "read_minutes",
@@ -120,7 +120,7 @@ async def _public_view(doc: dict, full: bool) -> dict:
     if full:
         out["body"] = doc.get("body") or ""
     if doc.get("file_id"):
-        f = await db.files.find_one({"id": doc["file_id"]}, {"_id": 0, "data": 0})
+        f = files.get(doc["file_id"]) if files is not None else await db.files.find_one({"id": doc["file_id"]}, {"_id": 0, "data": 0})
         if f:
             out["file"] = {"name": f["name"], "size": f["size"], "content_type": f["content_type"], "gated": bool(doc.get("gated"))}
             if not doc.get("gated"):
@@ -142,7 +142,10 @@ async def published(full: bool) -> list:
     async def produce():
         now = now_iso()
         docs = await db.content.find({"status": {"$in": ["published", "scheduled"]}, "publish_at": {"$lte": now}}, {"_id": 0} if full else LIST_FIELDS).sort("publish_at", -1).to_list(1000)
-        return [await _public_view(d, full) for d in docs]
+        # One query for every attached file, not one per item: each round trip to Atlas adds up.
+        ids = [d["file_id"] for d in docs if d.get("file_id")]
+        files = {f["id"]: f async for f in db.files.find({"id": {"$in": ids}}, {"_id": 0, "data": 0})} if ids else {}
+        return [await _public_view(d, full, files) for d in docs]
     # Short TTL so scheduled items go live on time without a cron.
     return await cache.memo("content", f"published:{full}", 30, produce)
 

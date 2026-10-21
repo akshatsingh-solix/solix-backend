@@ -261,6 +261,27 @@ def test_files_gating_and_type_checks(client):
     assert client.get(pdf["public_url"]).status_code == 200
 
 
+def test_public_content_loads_attached_files_in_one_query(client, monkeypatch):
+    # One files query per item made a cold /api/content take ~30s against Atlas.
+    h = staff(client)
+    for i in range(3):
+        pdf = client.post("/api/admin/files", files={"file": (f"Sheet {i}.pdf", PDF, "application/pdf")}, headers=h).json()
+        item = client.post("/api/admin/content", json={"title": f"Sheet {i}", "type": "datasheet", "file_id": pdf["id"]}, headers=h).json()
+        client.post(f"/api/admin/content/{item['id']}/publish", json={}, headers=h)
+
+    coll = type(content.db.files)  # each `db.files` is a new object, so guard the class
+    original = coll.find_one
+
+    async def per_item(self, *a, **k):
+        if self.name == "files":
+            raise AssertionError("files looked up one by one")
+        return await original(self, *a, **k)
+    monkeypatch.setattr(coll, "find_one", per_item)
+    cache.bump("content")
+    items = client.get("/api/content").json()["items"]
+    assert len([i for i in items if (i.get("file") or {}).get("name", "").startswith("sheet")]) == 3
+
+
 def test_track_guards(client):
     assert track(client, "short", [{"type": "page_view", "path": "/"}]).status_code == 204
     assert client.post("/api/track", content=b"not json").status_code == 400

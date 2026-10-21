@@ -166,6 +166,7 @@ async def on_startup():
         db.event_registrations.create_index([("event", 1), ("code", 1)], unique=True),
         db.event_registrations.create_index([("event", 1), ("email", 1)]),
         db.event_registrations.create_index([("event", 1), ("created_at", -1)]),
+        db.event_registrations.create_index("email"),  # a lead's events across all events
         db.content.create_index("source_url", sparse=True),
         db.content.create_index("origin"),
         db.content.create_index([("status", 1), ("updated_at", -1)]),
@@ -201,9 +202,11 @@ async def on_startup():
         db.enrollments.create_index("contact_id"),
         db.sends.create_index([("sent_at", -1)]),
         db.sends.create_index("contact_id"),
+        db.sends.create_index([("email", 1), ("sent_at", 1)]),  # outbound credit on every form, lead pages
         db.sends.create_index([("sequence_id", 1), ("variant", 1)]),
         db.reply_log.create_index([("received_at", -1)]),
         db.reply_log.create_index("contact_id"),
+        db.reply_log.create_index("email", sparse=True),
         db.suppression.create_index("email_hash", unique=True),
         db.suppression.create_index("domain", sparse=True),
         db.ops_runs.create_index([("job", 1), ("started_at", -1)]),
