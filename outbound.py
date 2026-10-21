@@ -263,6 +263,11 @@ async def enroll(contact: dict, sequence: dict, by: str, *, force_variant: Optio
     g = await compliance.gate(contact, company, settings)
     if not g["ok"]:
         raise HTTPException(status_code=422, detail={"message": "This contact can't be enrolled yet.", "reasons": g["reasons"], "warnings": g["warnings"]})
+    seq_region = sequence.get("region") or "global"
+    if seq_region not in ("global", g["region"]):
+        # Copy, opt-out wording and the LIA it relies on are per region.
+        raise HTTPException(status_code=422, detail={"message": "Wrong sequence for this region.", "warnings": g["warnings"],
+                                                     "reasons": [f"'{sequence['name']}' is written for {seq_region.upper()} recipients; this contact is in {g['region'].upper()}"]})
     if len(sequence.get("steps") or []) > int(settings.get("max_touches") or 4):
         raise HTTPException(status_code=422, detail=f"Sequences may have at most {settings.get('max_touches')} touches.")
     op = await write_opener(contact, company)
@@ -451,12 +456,19 @@ async def tick() -> dict:
 _KW = [
     ("unsubscribe", re.compile(r"\b(unsubscribe|remove me|take me off|stop (emailing|contacting)|opt[ -]?out|do not (email|contact))\b", re.I)),
     ("ooo", re.compile(r"\b(out of (the )?office|on (annual )?leave|on vacation|limited access to email|away until|return(ing)? on)\b", re.I)),
-    ("meeting", re.compile(r"\b(booked|calendar invite|let'?s meet|schedule (a|the) (call|meeting)|how about (mon|tue|wed|thu|fri)|works for me at)\b", re.I)),
+    # Without a model these rules are the whole classifier, so a clear "no" or "later" is checked before
+    # anything that proposes time, and a proposed time beats a general show of interest.
+    ("not_interested", re.compile(r"\b(not interested|no thanks|no thank you|not a priority|we('re| are) (all )?set|already (have|use) a solution|"
+                                  r"please don'?t (follow up|email|contact|reach out))\b", re.I)),
+    ("objection", re.compile(r"\b(not (right )?now|maybe later|circle back|(next|early|later this) (year|quarter)|after (q[1-4]|the new year))\b", re.I)),
+    ("meeting", re.compile(r"\b(booked|calendar invite|send (me |over )?(an? )?(invite|calendar)|let'?s meet|(schedule|set up|book|arrange|grab) (a |the |some )?(call|meeting|time|chat)|"
+                           r"find (a |some )?(time|\d+ ?min(ute)?s?)|can we (talk|chat|meet|speak|connect)|how about (mon|tue|wed|thu|fri)\w*|works for me|"
+                           r"(free|available) (on|next|this|tomorrow))\b", re.I)),
     ("forward", re.compile(r"\b(forward(ed|ing)? (this|your (email|note)) to|cc'?(ing|ed) (my colleague|\w+)|looping in)\b", re.I)),
     ("referral", re.compile(r"\b(the right person (is|would be)|you should (speak|talk) (to|with)|reach out to|contact (my colleague|\w+ \w+) (at|who))\b", re.I)),
-    ("not_interested", re.compile(r"\b(not interested|no thanks|no thank you|not a priority|we('re| are) (all )?set|already (have|use) a solution|please don'?t)\b", re.I)),
-    ("interested", re.compile(r"\b(interested|tell me more|send (me )?(more|details|info)|sounds (good|interesting)|happy to (chat|talk)|let'?s (talk|chat)|open to)\b", re.I)),
-    ("objection", re.compile(r"\b(not (right )?now|budget|next (year|quarter)|maybe later|too busy|circle back|timing)\b", re.I)),
+    ("interested", re.compile(r"\b(interested|tell me more|send (me )?(more|details|info)|sounds (good|interesting)|happy to (chat|talk)|let'?s (talk|chat)|open to|timely|"
+                              r"keen to|would (like|love) to (learn|know|hear|see)|worth a (chat|conversation|call|look)|curious)\b", re.I)),
+    ("objection", re.compile(r"\b(budget|too busy|timing)\b", re.I)),
 ]
 CLASSIFY_SYSTEM = ("Classify this reply to a B2B sales email. Labels: interested (wants to learn more), meeting (agrees a time or books), objection (engaged but not now / concern), "
                    "referral (points to another person), forward (has forwarded or cc'd a colleague), ooo (auto-reply / away), not_interested (clear no), unsubscribe (asks to stop), neutral. "
@@ -748,14 +760,21 @@ class ContactPatch(BaseModel):
     lawful_basis: Optional[str] = Field(default=None, max_length=40)
     notes: Optional[str] = Field(default=None, max_length=2000)
     company_id: Optional[str] = None
+    mark_verified: Optional[bool] = None
 
 
 @router.patch("/contacts/{contact_id}", dependencies=[can_work])
-async def patch_contact(contact_id: str, body: ContactPatch):
+async def patch_contact(contact_id: str, body: ContactPatch, user: dict = Depends(get_current_admin)):
     c = await _db().contacts.find_one({"id": contact_id}, {"_id": 0})
     if not c:
         raise HTTPException(status_code=404, detail="Contact not found")
     sets = body.model_dump(exclude_none=True)
+    if sets.pop("mark_verified", None):
+        if not c.get("email"):
+            raise HTTPException(status_code=422, detail="Add an email address first")
+        if c.get("email_status") == "invalid":
+            raise HTTPException(status_code=409, detail="This address bounced or failed verification; it can't be marked verified")
+        sets.update({"email_status": "valid", "verify_detail": f"Marked verified by {user['email']}", "verified_at": now_iso()})
     if "email" in sets:
         sets["email"] = sets["email"].strip().lower() or None
         sets["email_status"] = "unchecked" if sets["email"] else "missing"

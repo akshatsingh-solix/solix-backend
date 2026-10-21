@@ -228,12 +228,65 @@ def test_gate_blocks_until_lia_signed_and_germany_blocked(client, monkeypatch):
     assert not g["ok"] and any("Germany" in r for r in g["reasons"])
 
 
+def test_region_falls_back_to_signals_when_no_hq():
+    # Radar accounts usually have no HQ on file: their routed territory and signal countries stand in.
+    us = {"territory": "USA", "countries": ["United States"], "hq": {}}
+    assert compliance.recipient_location({}, us) == ({"United States"}, "us", False)
+    uk = {"territory": "Europe & UK", "countries": ["United Kingdom"]}
+    assert compliance.recipient_location({}, uk)[1] == "uk"
+    assert compliance.recipient_location({}, {"territory": "Europe & UK", "countries": ["United Kingdom", "France"]})[1] == "eu"
+    assert compliance.recipient_location({"country": "Canada"}, uk) == ({"Canada"}, "us", True)
+    mixed = {"name": "Initech", "territory": "USA", "countries": ["United States", "Germany"], "signal_count": 2, "score": 80}
+    g = run(compliance.gate({"email": "a@initech.example", "email_status": "valid", "name": "A", "title": "CIO", "lawful_basis": "legitimate_interest"}, mixed))
+    assert any("set the contact's country" in r for r in g["reasons"])
+    g = run(compliance.gate({"email": "a@initech.example", "email_status": "valid", "name": "A", "title": "CIO", "lawful_basis": "legitimate_interest", "country": "United States"}, mixed))
+    assert not any("Germany" in r for r in g["reasons"])
+
+
+def test_mark_verified_clears_the_verification_gate(client, monkeypatch):
+    async def _risky(email):
+        return {"status": "mx_only", "detail": "no SMTP check"}
+    monkeypatch.setattr(outbound, "verify_email", _risky)
+    acme = _company(client, "Acme Mutual")
+    c = client.post("/api/admin/outbound/contacts", json={"name": "Riley Park", "email": "riley@acmemutual.example", "title": "Records Manager", "company_id": acme["id"], "country": "United States"}).json()
+    g = client.get(f"/api/admin/compliance/gate/{c['id']}").json()
+    assert any("not verified" in r for r in g["reasons"])
+    client.put("/api/admin/compliance/settings", json={"require_verified_email": False})
+    g = client.get(f"/api/admin/compliance/gate/{c['id']}").json()
+    assert not any("not verified" in r for r in g["reasons"]) and any("not verified" in w for w in g["warnings"])
+    client.put("/api/admin/compliance/settings", json={"require_verified_email": True})
+    r = client.patch(f"/api/admin/outbound/contacts/{c['id']}", json={"mark_verified": True})
+    assert r.status_code == 200 and r.json()["email_status"] == "valid" and "admin@example.com" in r.json()["verify_detail"]
+    assert not any("not verified" in r for r in client.get(f"/api/admin/compliance/gate/{c['id']}").json()["reasons"])
+    run(_mock_db.contacts.update_one({"id": c["id"]}, {"$set": {"email_status": "invalid"}}))
+    assert client.patch(f"/api/admin/outbound/contacts/{c['id']}", json={"mark_verified": True}).status_code == 409
+    run(_mock_db.contacts.delete_one({"id": c["id"]}))
+
+
+@pytest.mark.parametrize("text,label", [
+    ("Thanks, this is timely. Can we find 30 minutes next week to talk about retiring the old case system?", "meeting"),
+    ("How about Tuesday at 10am?", "meeting"),
+    ("Sounds interesting, tell me more next week.", "interested"),
+    ("Please don't hesitate to send details.", "interested"),
+    ("Not right now, maybe next quarter.", "objection"),
+    ("No thanks, we're all set.", "not_interested"),
+    ("Please remove me from your list.", "unsubscribe"),
+    ("Got it.", "neutral"),
+])
+def test_rule_classifier_without_a_model(text, label):
+    assert run(outbound.classify(text))["label"] == label
+
+
 def test_enroll_approve_send_reply_flow(client, monkeypatch):
     monkeypatch.setattr(outbound, "_in_window", lambda s, n: True)
     contact = run(_mock_db.contacts.find_one({"email": "jordan@acmemutual.example"}, {"_id": 0}))
     seqs = client.get("/api/admin/outbound/sequences").json()
     assert len(seqs) == 2
-    r = client.post("/api/admin/outbound/enrollments", json={"contact_ids": [contact["id"]], "sequence_id": seqs[0]["id"]}).json()
+    eu = next(s for s in seqs if s["region"] == "eu")
+    us = next(s for s in seqs if s["region"] == "us")
+    wrong = client.post("/api/admin/outbound/enrollments", json={"contact_ids": [contact["id"]], "sequence_id": eu["id"]}).json()
+    assert not wrong["created"] and "written for EU" in wrong["blocked"][0]["reasons"][0]
+    r = client.post("/api/admin/outbound/enrollments", json={"contact_ids": [contact["id"]], "sequence_id": us["id"]}).json()
     assert r["created"] and not r["blocked"]
     enr = r["created"][0]
     assert enr["status"] == "pending_approval" and "Documentum" not in json.dumps(enr["steps"])

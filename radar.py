@@ -218,7 +218,9 @@ async def get_account(company_id: str, user: dict = Depends(get_current_admin)):
     research = await _db().radar_research.find({"company_id": company_id}, {"_id": 0}).sort("created_at", -1).to_list(10)
     leads = await _db().leads.find({"$or": [{"company_id": company_id}, {"id": {"$in": c.get("lead_ids") or []}}]}, {"_id": 0, "id": 1, "email": 1, "name": 1, "job_title": 1, "stage": 1, "score": 1, "primary_line": 1, "last_activity_at": 1}).to_list(100)
     contacts = await _db().contacts.find({"company_id": company_id}, {"_id": 0}).sort("created_at", 1).to_list(200)
-    enrollments = await _db().enrollments.find({"company_id": company_id}, {"_id": 0, "steps": 0}).sort("created_at", -1).to_list(100)
+    enrollments = await _db().enrollments.find({"company_id": company_id}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    for e in enrollments:  # the rendered copy stays out of the drawer payload; only its length is shown
+        e["steps_total"] = len(e.pop("steps", None) or [])
     seen = await rs.seen_map(user["id"])
     return {"account": _card(c, rs.freshness(c, seen)), "signals": signals, "research": research, "leads": leads, "contacts": contacts, "enrollments": enrollments}
 

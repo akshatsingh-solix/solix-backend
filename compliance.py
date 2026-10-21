@@ -22,7 +22,7 @@ import hmac
 import os
 import re
 import uuid
-from typing import List, Optional
+from typing import List, Optional, Set, Tuple
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query
 from fastapi.responses import HTMLResponse
@@ -67,6 +67,25 @@ def region_of(country: Optional[str]) -> str:
     if c in ("United States", "Canada", "Puerto Rico"):
         return "us"
     return "global"
+
+
+def recipient_location(contact: dict, company: Optional[dict]) -> Tuple[Set[str], str, bool]:
+    """(countries, region, explicit). Contact country, then account HQ; without either, the account's signal
+    countries and routed territory stand in, so a Radar account with no HQ on file still lands in the right region."""
+    company = company or {}
+    explicit = contact.get("country") or (company.get("hq") or {}).get("country")
+    if explicit:
+        return {rm.country_norm(explicit)}, region_of(explicit), True
+    countries = {rm.country_norm(c) for c in company.get("countries") or [] if c}
+    territory = company.get("territory")
+    if territory in ("USA", "Canada"):
+        region = "us"
+    elif territory == "Europe & UK":
+        in_europe = {c for c in countries if region_of(c) in ("eu", "uk")}
+        region = "uk" if in_europe and all(region_of(c) == "uk" for c in in_europe) else "eu"
+    else:
+        region = "global"
+    return countries, region, False
 
 
 async def outbound_settings() -> dict:
@@ -127,18 +146,25 @@ async def gate(contact: dict, company: Optional[dict], settings: Optional[dict] 
             reasons.append(f"On the suppression list ({sup.replace('_', ' ')})")
         if rm.domain_of(email) in scoring.FREE_EMAIL_DOMAINS:
             reasons.append("Personal email address: business addresses only")
-    if settings.get("require_verified_email") and contact.get("email_status") not in ("valid",):
-        reasons.append(f"Email not verified ({contact.get('email_status') or 'unchecked'})")
+    status = contact.get("email_status") or "unchecked"
+    if status == "invalid":
+        reasons.append("Email address is invalid or has bounced")
+    elif status != "valid" and settings.get("require_verified_email"):
+        reasons.append(f"Email not verified ({status.replace('_', ' ')}): verify it, mark it verified, or allow unverified addresses in Compliance")
+    elif status != "valid":
+        warnings.append(f"Mailbox not verified ({status.replace('_', ' ')})")
     if not contact.get("name"):
         reasons.append("No contact name")
     if not contact.get("title"):
         reasons.append("No job title")
     if not contact.get("lawful_basis"):
         reasons.append("No lawful basis recorded")
-    countries = {rm.country_norm(x) for x in [contact.get("country"), *(((company or {}).get("hq") or {}).get("country"),)] if x}
+    countries, region, explicit = recipient_location(contact, company)
     blocked = {rm.country_norm(c) for c in settings.get("blocked_countries") or []}
     if countries & blocked:
-        reasons.append(f"Outbound blocked in {', '.join(sorted(countries & blocked))} (prior consent required)")
+        where = ", ".join(sorted(countries & blocked))
+        reasons.append(f"Outbound blocked in {where} (prior consent required)" if explicit else
+                       f"Account has signals in {where}: set the contact's country to confirm where they are")
     if not company:
         reasons.append("Not linked to an account")
     else:
@@ -152,7 +178,6 @@ async def gate(contact: dict, company: Optional[dict], settings: Optional[dict] 
             reasons.append(f"Account status is {rm.STATUS_LABELS.get(company['status'], company['status'])}")
         if not company.get("research_id"):
             warnings.append("No deep dive on this account yet")
-    region = region_of(contact.get("country") or ((company or {}).get("hq") or {}).get("country"))
     if not await lia_signed(region):
         reasons.append(f"No signed Legitimate Interest Assessment for region '{region}'")
     if contact.get("id"):
