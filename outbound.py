@@ -30,6 +30,7 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+import cache
 import compliance
 import database
 import ops
@@ -539,6 +540,7 @@ async def promote_to_lead(company: Optional[dict], person: dict, *, reason: str,
         await _db().companies.update_one({"id": company["id"]}, {"$addToSet": {"lead_ids": lead["id"]}})
         await rs.add_history(company["id"], by, "lead", f"{email} → {stage.upper()} ({reason})")
         await rs.recompute(company["id"])
+    cache.bump("reports")
     await ops.digiprise("lead.upserted", {"lead_id": lead["id"], "email": email, "name": lead.get("name"), "company": lead.get("company"), "stage": lead.get("stage"),
                                           "owner": lead.get("owner"), "reason": reason, "account_id": (company or {}).get("id"), "account_score": (company or {}).get("score")},
                         key=f"dp-lead:{lead['id']}:{lead.get('stage')}")
@@ -573,6 +575,7 @@ async def _credit_outbound(lead: dict) -> None:
     await _db().leads.update_one({"id": lead["id"]}, {"$set": sets})
     if "first_touch" in sets:
         await intent.rollup_lead(lead["id"])
+    cache.bump("reports")
 
 
 async def on_inbound(lead: dict, stype: str) -> int:

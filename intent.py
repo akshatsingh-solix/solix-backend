@@ -18,6 +18,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request, Response
 
+import cache
 import scoring
 from database import db, now_iso
 
@@ -289,6 +290,7 @@ async def record_submission(sub: dict, *, visitor_id: Optional[str] = None, topi
             await outbound.on_inbound(result, stype)
         except Exception:
             logger.exception("outbound hand-off failed for lead %s", lead["id"])
+    cache.bump("reports")  # the dashboard shows new leads now, not after its cache expires
     if result and sub.get("id"):
         await db.submissions.update_one({"id": sub["id"]}, {"$set": {
             "lead_id": lead["id"], "lead_stage": result.get("stage"), "primary_line": result.get("primary_line"),
