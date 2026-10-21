@@ -18,9 +18,9 @@ from mongomock_motor import AsyncMongoMockClient  # noqa: E402
 
 import database  # noqa: E402
 
-import accounts, admin, auth, cache, chat, content, emailer, intent, leads_admin, press, server  # noqa: E402,E401
+import accounts, admin, auth, cache, chat, chat_leads, content, emailer, intent, leads_admin, press, server  # noqa: E402,E401
 
-MODULES = (accounts, admin, auth, chat, content, emailer, intent, leads_admin, press, server)
+MODULES = (accounts, admin, auth, chat, chat_leads, content, emailer, intent, leads_admin, press, server)
 PDF = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF"
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 

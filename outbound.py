@@ -1046,7 +1046,7 @@ async def list_replies(label: Optional[str] = None, page: int = Query(1, ge=1), 
     q = {"label": label} if label else {}
     total = await _db().reply_log.count_documents(q)
     items = await _db().reply_log.find(q, {"_id": 0}).sort("received_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
-    names = {c["id"]: c async for c in _db().contacts.find({"id": {"$in": [i["contact_id"] for i in items]}}, {"_id": 0, "id": 1, "name": 1, "company": 1, "title": 1})}
+    names = {c["id"]: c async for c in _db().contacts.find({"id": {"$in": [i["contact_id"] for i in items]}}, {"_id": 0, "id": 1, "name": 1, "company": 1, "title": 1, "lead_id": 1})}
     for i in items:
         i["contact"] = names.get(i["contact_id"])
     return {"items": items, "total": total}

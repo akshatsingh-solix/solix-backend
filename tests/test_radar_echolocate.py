@@ -341,6 +341,9 @@ def test_enroll_approve_send_reply_flow(client, monkeypatch):
     inf = client.get("/api/admin/reports/overview").json()["influence"]
     assert inf["outbound_sourced"]["leads"] == 1 and inf["radar_accounts"]["leads"] >= 2 and inf["sends"] == 1 and inf["positive_replies"] == 1
     assert [r["status"] for r in inf["account_funnel"]] == ["signal", "contacted", "replied", "meeting_booked", "opportunity", "won"]
+    linked = client.get("/api/admin/leads", params={"linked": "radar"}).json()["items"]
+    assert lead["id"] in {i["id"] for i in linked} and all(i.get("company_id") for i in linked)
+    assert [i["id"] for i in client.get("/api/admin/leads", params={"linked": "outbound"}).json()["items"]] == [lead["id"]]
     assert _company(client, "Acme Mutual")["status"] == "replied"
     k = client.get("/api/admin/outbound/kpis").json()
     assert k["sends"] == 1 and k["positive"] == 1 and k["dod"]["qualified_reply_this_week"]

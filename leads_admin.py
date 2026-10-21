@@ -27,7 +27,7 @@ admin_only = Depends(require_roles("admin"))
 
 LINE_LABELS = {k: v["label"] for k, v in scoring.PRODUCT_LINES.items()}
 CHANNELS = ("paid", "organic_search", "social", "email", "referral", "chat", "outbound", "direct")
-LEAD_LIST_FIELDS = {"_id": 0, "direct_scores": 0, "stage_history": 0, "visitor_ids": 0, "industries": 0}
+LEAD_LIST_FIELDS = {"_id": 0, "direct_scores": 0, "stage_history": 0, "history": 0, "visitor_ids": 0, "industries": 0}
 
 
 # --- Filters ------------------------------------------------------------------
@@ -46,6 +46,7 @@ class LeadFilters(BaseModel):
     date_from: Optional[str] = None
     date_to: Optional[str] = None
     active_days: Optional[int] = None
+    linked: Optional[Literal["radar", "outbound", "dnc"]] = None
 
 
 def filters_dep(
@@ -53,6 +54,7 @@ def filters_dep(
     owner: Optional[str] = None, channel: Optional[str] = None, country: Optional[str] = None, industry: Optional[str] = None,
     min_score: Optional[float] = None, date_field: Literal["created_at", "last_activity_at", "mql_at"] = "created_at",
     date_from: Optional[str] = None, date_to: Optional[str] = None, active_days: Optional[int] = Query(None, ge=1, le=365),
+    linked: Optional[Literal["radar", "outbound", "dnc"]] = None,
 ) -> LeadFilters:
     return LeadFilters(**{k: v for k, v in locals().items()})
 
@@ -85,6 +87,12 @@ def lead_query(f: LeadFilters) -> dict:
         clauses.append({"owner": {"$in": [None, ""]}} if f.owner == "unassigned" else {"owner": f.owner})
     if f.channel and f.channel != "all":
         clauses.append({"channel": f.channel})
+    if f.linked == "radar":  # on a Radar account
+        clauses.append({"company_id": {"$nin": [None, ""]}})
+    elif f.linked == "outbound":  # sourced or touched by outbound
+        clauses.append({"tags": "outbound"})
+    elif f.linked == "dnc":
+        clauses.append({"do_not_contact": {"$nin": [None, ""]}})
     if f.country and f.country != "all":
         clauses.append({"country": f.country})
     if f.industry and f.industry != "all":
