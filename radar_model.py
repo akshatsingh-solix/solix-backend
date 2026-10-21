@@ -430,7 +430,8 @@ def rollup(signals: List[dict], *, half_life_days: float = 30, weights: Optional
         for slug, v in (website.get("product_scores") or {}).items():
             slugs[slug] = slugs.get(slug, 0) + v * 0.5
     if research and research.get("status") in ("approved", "draft") and research.get("score") is not None:
-        score += max(0, float(research["score"]) - 4) * 5
+        # An approved 6+ deep dive alone lifts an account over the outreach floor of 30.
+        score += max(0, float(research["score"]) - 3) * 6
     lines = scoring.line_scores(slugs)
     primary_line = max(lines, key=lines.get) if lines else None
     primary_product = max((p for p in slugs if scoring.PRODUCT_TO_LINE.get(p) == primary_line), key=lambda p: slugs[p], default=None) if primary_line else None
