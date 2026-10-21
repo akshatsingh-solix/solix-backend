@@ -12,9 +12,13 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Iterable, List, Optional
 
+from pymongo import UpdateMany, UpdateOne
+
+import cache
 import database
 import ops
 import radar_model as rm
@@ -55,6 +59,7 @@ async def radar_settings() -> dict:
 async def save_radar_settings(values: dict) -> dict:
     clean = {k: v for k, v in values.items() if k in DEFAULT_RADAR}
     await _db().settings.update_one({"key": "radar"}, {"$set": {**clean, "updated_at": now_iso()}}, upsert=True)
+    cache.bump("radar_ctx")
     return await radar_settings()
 
 
@@ -67,6 +72,7 @@ async def territories() -> dict:
 async def save_territories(values: dict) -> dict:
     clean = {k: values[k] for k in rm.DEFAULT_TERRITORIES if k in values}
     await _db().settings.update_one({"key": "territories"}, {"$set": {**clean, "updated_at": now_iso()}}, upsert=True)
+    cache.bump("radar_ctx")
     return await territories()
 
 
@@ -116,8 +122,16 @@ async def get_or_create_company(name: str, *, domain: Optional[str] = None, hq: 
             if "domains" in changes.get("$addToSet", {}):
                 await link_by_domain(company, [dom])
         return company
+    company = new_company_doc(name, key, dom, hq, source)
+    await _db().companies.insert_one(dict(company))
+    if dom:
+        await link_by_domain(company)
+    return company
+
+
+def new_company_doc(name: str, key: str, dom: Optional[str], hq: Optional[dict], source: str) -> dict:
     now = now_iso()
-    company = {
+    return {
         "id": str(uuid.uuid4()), "name": name or dom or "Unknown", "key": key or (dom or str(uuid.uuid4())), "domains": [dom] if dom else [], "aliases": [], "alias_keys": [],
         "hq": {k: v for k, v in (hq or {}).items() if v}, "revenue_band": None, "employees": None, "industry": None, "is_customer": False, "excluded_reason": None,
         "owner": None, "owner_name": None, "owner_basis": None, "territory": None, "route_basis": None, "status": "new", "notes": "", "history": [],
@@ -125,10 +139,94 @@ async def get_or_create_company(name: str, *, domain: Optional[str] = None, hq: 
         "countries": [], "states": [], "lead_ids": [], "research_id": None, "research_score": None, "research_verdict": None, "research_status": None,
         "source": source, "created_at": now, "updated_at": now,
     }
-    await _db().companies.insert_one(dict(company))
-    if dom:
-        await link_by_domain(company)
-    return company
+
+
+class Resolver:
+    """Accounts loaded once and matched in memory exactly as get_or_create_company does (domain, then name
+    or alias); new accounts and changes are written in bulk by `flush`. For imports and collector runs."""
+
+    def __init__(self, known: list):
+        self.existing = {c["id"] for c in known}
+        self.by_domain: dict = {}
+        self.by_key: dict = {}
+        for c in known:
+            for d in c.get("domains") or []:
+                self.by_domain.setdefault(d, c)
+            self.by_key.setdefault(c["key"], c)
+            for a in c.get("alias_keys") or []:
+                self.by_key.setdefault(a, c)
+        self.created: list = []
+        self.adds: dict = defaultdict(lambda: defaultdict(list))
+        self.sets: dict = defaultdict(dict)
+        self.linking: list = []
+
+    @classmethod
+    async def load(cls) -> "Resolver":
+        return cls(await _db().companies.find({}, {"_id": 0}).to_list(None))
+
+    def resolve(self, name: str, domain: Optional[str] = None, source: str = "radar") -> dict:
+        name = (name or "").strip()
+        key = rm.company_key(name)
+        dom = rm.domain_of(domain) if domain else None
+        c = self.by_domain.get(dom) if dom else None
+        if not c and key:
+            c = self.by_key.get(key)
+        if not c:
+            c = new_company_doc(name, key, dom, None, source)
+            self.created.append(c)
+            self.by_key.setdefault(c["key"], c)
+            if dom:
+                self.by_domain[dom] = c
+                self.linking.append((c, [dom]))
+            return c
+        if dom and dom not in (c.get("domains") or []):
+            c.setdefault("domains", []).append(dom)
+            self.by_domain[dom] = c
+            self.linking.append((c, [dom]))
+            if c["id"] in self.existing:
+                self.adds[c["id"]]["domains"].append(dom)
+        if name and name != c["name"] and key != c["key"]:
+            for field, value in (("aliases", name), ("alias_keys", key)):
+                if value not in (c.get(field) or []):
+                    c.setdefault(field, []).append(value)
+                    if c["id"] in self.existing:
+                        self.adds[c["id"]][field].append(value)
+            self.by_key.setdefault(key, c)
+        return c
+
+    def set(self, company: dict, change: dict) -> None:
+        """Like an update_one $set: later changes win, and later lookups see them."""
+        company.update(change)
+        if change and company["id"] in self.existing:
+            self.sets[company["id"]].update(change)
+
+    async def flush(self) -> None:
+        db = _db()
+        if self.created:
+            await db.companies.insert_many([dict(c) for c in self.created])
+        changes = []
+        for cid in set(self.adds) | set(self.sets):
+            update = {}
+            if self.sets.get(cid):
+                update["$set"] = self.sets[cid]
+            if self.adds.get(cid):
+                update["$addToSet"] = {f: {"$each": v} for f, v in self.adds[cid].items()}
+            changes.append(UpdateOne({"id": cid}, update))
+        if changes:
+            await db.companies.bulk_write(changes, ordered=False)
+        if self.linking:
+            await link_by_domain_many(self.linking)
+
+
+async def save_signals(ops: list) -> int:
+    """Bulk upsert of `_signal_op`s, in order; returns how many were new."""
+    if not ops:
+        return 0
+    return (await _db().company_signals.bulk_write(ops, ordered=True)).upserted_count
+
+
+def _history_op(company_id: str, by: str, action: str, detail: str = "") -> UpdateOne:
+    return UpdateOne({"id": company_id}, {"$push": {"history": {"$each": [{"at": now_iso(), "by": by, "action": action, "detail": detail[:500]}], "$slice": -100}}})
 
 
 async def add_history(company_id: str, by: str, action: str, detail: str = "") -> None:
@@ -142,52 +240,59 @@ SIGNAL_FIELDS = ("type", "source", "source_ref", "evidence_url", "evidence_text"
                  "buyer", "value", "public_sector", "meta")
 
 
-async def upsert_signal(company: dict, sig: dict, run_id: Optional[str] = None) -> bool:
-    """Insert a signal once; later sightings only refresh `last_seen_at`. Returns True when new."""
+def _signal_upsert(company: dict, sig: dict, run_id: Optional[str] = None) -> tuple:
+    """(filter, update) that inserts a signal once and only refreshes `last_seen_at` on later sightings."""
     key = sig.get("dedupe_key") or rm.dedupe_key(sig.get("type"), sig.get("source"), sig.get("source_ref") or sig.get("evidence_url") or f"{company['key']}|{sig.get('title')}|{sig.get('posted_at')}")
     now = now_iso()
     fields = {k: sig.get(k) for k in SIGNAL_FIELDS if sig.get(k) is not None}
     if fields.get("country"):
         fields["country"] = rm.country_norm(fields["country"])
-    res = await _db().company_signals.update_one(
-        {"dedupe_key": key},
-        {"$set": {**fields, "company_id": company["id"], "last_seen_at": now},
-         "$setOnInsert": {"id": str(uuid.uuid4()), "dedupe_key": key, "first_seen_at": sig.get("first_seen_at") or now, "created_at": now, "run_id": run_id}},
-        upsert=True,
-    )
+    return ({"dedupe_key": key},
+            {"$set": {**fields, "company_id": company["id"], "last_seen_at": now},
+             "$setOnInsert": {"id": str(uuid.uuid4()), "dedupe_key": key, "first_seen_at": sig.get("first_seen_at") or now, "created_at": now, "run_id": run_id}})
+
+
+def _signal_op(company: dict, sig: dict, run_id: Optional[str] = None) -> UpdateOne:
+    return UpdateOne(*_signal_upsert(company, sig, run_id), upsert=True)
+
+
+async def upsert_signal(company: dict, sig: dict, run_id: Optional[str] = None) -> bool:
+    """Insert a signal once; later sightings only refresh `last_seen_at`. Returns True when new."""
+    res = await _db().company_signals.update_one(*_signal_upsert(company, sig, run_id), upsert=True)
     return res.upserted_id is not None
 
 
 # --- Recompute --------------------------------------------------------------------------
+# Production pays a round trip to Atlas (~0.3s) per database call, so a recompute loads what
+# all its accounts need in a handful of queries and writes them back in one bulk call. One
+# account or all of them go through the same path.
 
-async def _website_intent(company: dict) -> tuple[Optional[dict], list]:
-    if not company.get("lead_ids") and not company.get("domains"):
-        return None, []
-    q = {"$or": [{"company_id": company["id"]}] + ([{"id": {"$in": company["lead_ids"]}}] if company.get("lead_ids") else [])}
-    leads = await _db().leads.find(q, {"_id": 0, "id": 1, "score": 1, "product_scores": 1, "stage": 1, "email": 1, "owner": 1}).to_list(200)
+RESEARCH_FIELDS = {"_id": 0, "id": 1, "company_id": 1, "status": 1, "score": 1, "verdict": 1, "created_at": 1}
+LEAD_FIELDS = {"_id": 0, "id": 1, "score": 1, "product_scores": 1, "stage": 1, "email": 1, "owner": 1, "company_id": 1}
+BATCH = 200
+
+
+async def _context(terr: Optional[dict] = None, members: Optional[list] = None, settings: Optional[dict] = None, half_life: Optional[float] = None) -> tuple:
+    """Territories, team, Radar settings and the score half-life, shared by every recompute and cached briefly."""
+    async def produce():
+        half = (await _db().settings.find_one({"key": "scoring"}, {"_id": 0}) or {}).get("half_life_days", scoring.DEFAULT_SETTINGS["half_life_days"])
+        return {"terr": await territories(), "members": await team_members(), "settings": await radar_settings(), "half": half}
+    ctx = await cache.memo("radar_ctx", "ctx", 30, produce)
+    return terr or ctx["terr"], ctx["members"] if members is None else members, settings or ctx["settings"], ctx["half"] if half_life is None else half_life
+
+
+def _website_intent(leads: list) -> Optional[dict]:
     if not leads:
-        return None, []
+        return None
     scores: dict = {}
     for l in leads:
         for k, v in (l.get("product_scores") or {}).items():
             scores[k] = scores.get(k, 0) + v
-    return {"score": max((l.get("score") or 0) for l in leads), "product_scores": scores}, leads
+    return {"score": max((l.get("score") or 0) for l in leads), "product_scores": scores}
 
 
-async def recompute(company_id: str, *, terr: Optional[dict] = None, members: Optional[list] = None, settings: Optional[dict] = None, half_life: Optional[float] = None) -> Optional[dict]:
-    db = _db()
-    company = await db.companies.find_one({"id": company_id}, {"_id": 0})
-    if not company:
-        return None
-    terr = terr or await territories()
-    members = members if members is not None else await team_members()
-    settings = settings or await radar_settings()
-    if half_life is None:
-        half_life = (await db.settings.find_one({"key": "scoring"}, {"_id": 0}) or {}).get("half_life_days", scoring.DEFAULT_SETTINGS["half_life_days"])
-    signals = await db.company_signals.find({"company_id": company_id}, {"_id": 0, "raw": 0}).to_list(1000)
-    research = await db.radar_research.find_one({"company_id": company_id, "status": {"$in": ["approved", "draft"]}}, {"_id": 0}, sort=[("created_at", -1)])
-    website, leads = await _website_intent(company)
-    roll = rm.rollup(signals, half_life_days=half_life, weights=settings.get("weights") or None, website=website, research=research)
+def _compute(company: dict, signals: list, research: Optional[dict], pending: bool, leads: list, terr: dict, members: list, settings: dict, half_life: float) -> dict:
+    roll = rm.rollup(signals, half_life_days=half_life, weights=settings.get("weights") or None, website=_website_intent(leads), research=research)
     update = {**roll, "countries": sorted({s["country"] for s in signals if s.get("country")}), "states": sorted({s["state"] for s in signals if s.get("state")}),
               "lead_ids": sorted({l["id"] for l in leads} | set(company.get("lead_ids") or [])), "recomputed_at": now_iso(), "updated_at": now_iso()}
     if research:
@@ -214,7 +319,7 @@ async def recompute(company_id: str, *, terr: Optional[dict] = None, members: Op
             status = "excluded"
         elif research and research.get("status") == "approved" and rm.verdict_class(research) == "ready":
             status = "ready"
-        elif await db.radar_research.find_one({"company_id": company_id, "status": {"$in": ["queued", "running", "draft"]}}, {"_id": 1}):
+        elif pending:
             status = "researching"
         else:
             status = "new"
@@ -225,33 +330,84 @@ async def recompute(company_id: str, *, terr: Optional[dict] = None, members: Op
             status = target
     update["status"] = status
     update["stamp"] = rm.freshness_stamp({**company, **update})
-    await db.companies.update_one({"id": company_id}, {"$set": update})
-    await _sync_lead_owners({**company, **update}, leads)
-    return {**company, **update}
+    return update
 
 
-async def _sync_lead_owners(company: dict, leads: list) -> None:
+async def _recompute_batch(ids: List[str], ctx: tuple) -> List[dict]:
+    db = _db()
+    terr, members, settings, half_life = ctx
+    companies = await db.companies.find({"id": {"$in": ids}}, {"_id": 0}).to_list(None)
+    if not companies:
+        return []
+    ids = [c["id"] for c in companies]
+    signals: dict = defaultdict(list)
+    async for sig in db.company_signals.find({"company_id": {"$in": ids}}, {"_id": 0, "raw": 0}):
+        signals[sig["company_id"]].append(sig)
+    latest: dict = {}
+    pending: set = set()
+    async for r in db.radar_research.find({"company_id": {"$in": ids}, "status": {"$in": ["approved", "draft", "queued", "running"]}}, RESEARCH_FIELDS):
+        if r["status"] in ("queued", "running", "draft"):
+            pending.add(r["company_id"])
+        cur = latest.get(r["company_id"])
+        if r["status"] in ("approved", "draft") and (cur is None or str(r.get("created_at") or "") > str(cur.get("created_at") or "")):
+            latest[r["company_id"]] = r
+    # Website leads: those pointing at the account or listed on it (only for accounts that can have any).
+    with_leads = {c["id"]: c for c in companies if c.get("lead_ids") or c.get("domains")}
+    listed: dict = defaultdict(set)
+    for cid, c in with_leads.items():
+        for lid in c.get("lead_ids") or []:
+            listed[lid].add(cid)
+    leads: dict = defaultdict(list)
+    if with_leads:
+        q = {"$or": [{"company_id": {"$in": list(with_leads)}}] + ([{"id": {"$in": list(listed)}}] if listed else [])}
+        async for lead in db.leads.find(q, LEAD_FIELDS):
+            for cid in ({lead.get("company_id")} & set(with_leads)) | listed.get(lead["id"], set()):
+                if len(leads[cid]) < 200:
+                    leads[cid].append(lead)
+    out, writes = [], []
+    for c in companies:
+        update = _compute(c, signals[c["id"]], latest.get(c["id"]), c["id"] in pending, leads[c["id"]], terr, members, settings, half_life)
+        writes.append(UpdateOne({"id": c["id"]}, {"$set": update}))
+        out.append({**c, **update})
+    await db.companies.bulk_write(writes, ordered=False)
+    await _sync_lead_owners(out, leads)
+    return out
+
+
+async def _sync_lead_owners(companies: List[dict], leads: dict) -> None:
     """The account owner works its unowned website leads; a lead someone else owns is flagged, never moved."""
-    owner = company.get("owner")
-    if not owner or not leads:
-        return
-    unowned = [l["id"] for l in leads if not l.get("owner")]
-    if unowned:
-        entry = {"at": now_iso(), "by": "radar", "action": "owner", "detail": f"Owner → {owner} (owner of {company['name']} in the Radar)"}
-        await _db().leads.update_many({"id": {"$in": unowned}, "owner": {"$in": [None, ""]}}, {"$set": {"owner": owner}, "$push": {"history": {"$each": [entry], "$slice": -50}}})
-    for l in leads:
-        if l.get("owner") and l["owner"] != owner and l.get("stage") not in ("lost", "disqualified"):
-            await ops.notify("conflicts", f"{l.get('email')} is owned by {l['owner']}, but its account {company['name']} belongs to {owner}. Agree who works it.",
-                             event="owner_conflict", key=f"conflict:{l['id']}:{l['owner']}:{owner}")
+    writes, conflicts = [], {}
+    for company in companies:
+        owner, mine = company.get("owner"), leads.get(company["id"]) or []
+        if not owner or not mine:
+            continue
+        unowned = [l["id"] for l in mine if not l.get("owner")]
+        if unowned:
+            entry = {"at": now_iso(), "by": "radar", "action": "owner", "detail": f"Owner → {owner} (owner of {company['name']} in the Radar)"}
+            writes.append(UpdateMany({"id": {"$in": unowned}, "owner": {"$in": [None, ""]}}, {"$set": {"owner": owner}, "$push": {"history": {"$each": [entry], "$slice": -50}}}))
+        for l in mine:
+            if l.get("owner") and l["owner"] != owner and l.get("stage") not in ("lost", "disqualified"):
+                conflicts[f"conflict:{l['id']}:{l['owner']}:{owner}"] = f"{l.get('email')} is owned by {l['owner']}, but its account {company['name']} belongs to {owner}. Agree who works it."
+    if writes:
+        await _db().leads.bulk_write(writes, ordered=False)
+    if conflicts:  # each conflict is posted once
+        known = {d["key"] async for d in _db().ops_outbox.find({"key": {"$in": list(conflicts)}}, {"_id": 0, "key": 1})}
+        for key, text in conflicts.items():
+            if key not in known:
+                await ops.notify("conflicts", text, event="owner_conflict", key=key)
+
+
+async def recompute(company_id: str, *, terr: Optional[dict] = None, members: Optional[list] = None, settings: Optional[dict] = None, half_life: Optional[float] = None) -> Optional[dict]:
+    out = await _recompute_batch([company_id], await _context(terr, members, settings, half_life))
+    return out[0] if out else None
 
 
 async def recompute_many(ids: Iterable[str]) -> int:
-    terr, members, settings = await territories(), await team_members(), await radar_settings()
-    half = (await _db().settings.find_one({"key": "scoring"}, {"_id": 0}) or {}).get("half_life_days", scoring.DEFAULT_SETTINGS["half_life_days"])
+    ctx = await _context()
+    ids = sorted(set(ids))
     n = 0
-    for cid in set(ids):
-        if await recompute(cid, terr=terr, members=members, settings=settings, half_life=half):
-            n += 1
+    for i in range(0, len(ids), BATCH):
+        n += len(await _recompute_batch(ids[i:i + BATCH], ctx))
     return n
 
 
@@ -330,20 +486,42 @@ async def link_lead(lead: dict) -> Optional[str]:
 
 async def link_by_domain(company: dict, domains: Optional[List[str]] = None) -> int:
     """Attach website leads and outbound contacts that arrived before this account (or this domain) was known."""
-    n = 0
-    for dom in domains or company.get("domains") or []:
-        if not dom or dom in scoring.FREE_EMAIL_DOMAINS:
-            continue
-        rx = {"$regex": f"@{re.escape(dom)}$", "$options": "i"}
-        ids = [l["id"] async for l in _db().leads.find({"email": rx, "company_id": None}, {"_id": 0, "id": 1})]
-        if ids:
-            await _db().leads.update_many({"id": {"$in": ids}}, {"$set": {"company_id": company["id"]}})
-            await _db().companies.update_one({"id": company["id"]}, {"$addToSet": {"lead_ids": {"$each": ids}}})
-            n += len(ids)
-        await _db().contacts.update_many({"email": rx, "company_id": None}, {"$set": {"company_id": company["id"], "company": company.get("name")}})
-    if n:
-        await add_history(company["id"], "system", "lead", f"{n} earlier website lead(s) linked by email domain")
-    return n
+    return await link_by_domain_many([(company, domains or company.get("domains") or [])])
+
+
+async def link_by_domain_many(pairs: List[tuple]) -> int:
+    """The same for many accounts at once: one query for the leads, one for the contacts, bulk writes."""
+    owner_of: dict = {}
+    for company, domains in pairs:
+        for dom in domains:
+            if dom and dom not in scoring.FREE_EMAIL_DOMAINS:
+                owner_of.setdefault(dom.lower(), company)
+    if not owner_of:
+        return 0
+    by_company: dict = defaultdict(list)
+    contact_ops = []
+    doms = sorted(owner_of)
+    for i in range(0, len(doms), 300):  # MongoDB caps a pattern's length
+        rx = {"$regex": "@(" + "|".join(re.escape(d) for d in doms[i:i + 300]) + ")$", "$options": "i"}
+        async for lead in _db().leads.find({"email": rx, "company_id": None}, {"_id": 0, "id": 1, "email": 1}):
+            company = owner_of.get(rm.domain_of(lead["email"]) or "")
+            if company:
+                by_company[company["id"]].append(lead["id"])
+        async for c in _db().contacts.find({"email": rx, "company_id": None}, {"_id": 0, "id": 1, "email": 1}):
+            company = owner_of.get(rm.domain_of(c["email"]) or "")
+            if company:
+                contact_ops.append(UpdateOne({"id": c["id"]}, {"$set": {"company_id": company["id"], "company": company.get("name")}}))
+    lead_ops, company_ops = [], []
+    for cid, ids in by_company.items():
+        lead_ops.append(UpdateMany({"id": {"$in": ids}}, {"$set": {"company_id": cid}}))
+        company_ops.append(UpdateOne({"id": cid}, {"$addToSet": {"lead_ids": {"$each": ids}}}))
+        company_ops.append(_history_op(cid, "system", "lead", f"{len(ids)} earlier website lead(s) linked by email domain"))
+    if lead_ops:
+        await _db().leads.bulk_write(lead_ops, ordered=False)
+        await _db().companies.bulk_write(company_ops, ordered=True)
+    if contact_ops:
+        await _db().contacts.bulk_write(contact_ops, ordered=False)
+    return sum(len(v) for v in by_company.values())
 
 
 async def on_lead_changed(lead: dict) -> None:
@@ -365,11 +543,12 @@ def freshness(company: dict, seen: dict) -> str:
 
 async def mark_seen(user_id: str, company_ids: Optional[List[str]] = None) -> int:
     q = {"id": {"$in": company_ids}} if company_ids else {}
-    n = 0
-    async for c in _db().companies.find(q, {"_id": 0, "id": 1, "stamp": 1}):
-        await _db().radar_seen.update_one({"user_id": user_id, "company_id": c["id"]}, {"$set": {"stamp": c.get("stamp"), "seen_at": now_iso()}}, upsert=True)
-        n += 1
-    return n
+    rows = await _db().companies.find(q, {"_id": 0, "id": 1, "stamp": 1}).to_list(None)
+    if rows:
+        now = now_iso()
+        await _db().radar_seen.bulk_write([UpdateOne({"user_id": user_id, "company_id": c["id"]}, {"$set": {"stamp": c.get("stamp"), "seen_at": now}}, upsert=True)
+                                           for c in rows], ordered=False)
+    return len(rows)
 
 
 # --- Import from the original Leads Radar ------------------------------------------------------
@@ -396,77 +575,82 @@ def _competitor_key_for(product: str) -> Optional[str]:
 
 
 async def import_radar(data: dict, by: str) -> dict:
-    """Load a Leads Radar export: postings, problems, LinkedIn, DNS, deep dives and the human columns."""
-    terr, members = await territories(), await team_members()
+    """Load a Leads Radar export: postings, problems, LinkedIn, DNS, deep dives and the human columns.
+    Rows are resolved in memory and written in bulk, so an import costs a few dozen round trips, not thousands."""
+    db = _db()
+    terr, members, _, _ = await _context()
     counts = {"companies": 0, "signals_new": 0, "signals_seen": 0, "research": 0, "contacts": 0, "owners": 0, "statuses": 0}
     touched: set = set()
-    before = await _db().companies.count_documents({})
 
-    async def human(company: dict, row: dict):
+    resolver = await Resolver.load()
+
+    def resolve(name: str, domain: Optional[str] = None) -> dict:
+        return resolver.resolve(name, domain, "leads_radar")
+
+    def human(company: dict, row: dict) -> None:
         owner = (row.get("Owner") or "").strip()
         status = rm.legacy_status(row.get("Status"))
-        sets = {}
+        change = {}
         if owner and not company.get("owner_basis") == "manual":
             email = owner.lower() if "@" in owner else rep_email(owner, terr, members)
-            sets.update({"owner": email or None, "owner_name": owner, "owner_basis": "manual"})
+            change.update({"owner": email or None, "owner_name": owner, "owner_basis": "manual"})
             counts["owners"] += 1
         if status != "new" and company.get("status") in rm.SYSTEM_STATUSES:
-            sets["status"] = status
+            change["status"] = status
             counts["statuses"] += 1
         if row.get("Notes"):
-            sets["notes"] = str(row["Notes"])[:5000]
-        if sets:
-            await _db().companies.update_one({"id": company["id"]}, {"$set": sets})
+            change["notes"] = str(row["Notes"])[:5000]
+        resolver.set(company, change)
 
+    signal_ops: list = []
     for kind in ("jobs", "problems"):
         for row in data.get(kind) or []:
             if not row.get("Company"):
                 continue
-            company = await get_or_create_company(row["Company"], source="leads_radar")
+            company = resolve(row["Company"])
             product = str(row.get("Competitor Product") or "")
             is_problem = kind == "problems" or product.startswith("Problem:")
-            sig = {
+            signal_ops.append(_signal_op(company, {
                 "type": "problem_job" if is_problem else "competitor_job", "source": "leads_radar", "source_ref": row.get("Posting URL") or None,
                 "evidence_url": row.get("Posting URL"), "evidence_text": row.get("Matching Sentence"), "title": row.get("Job Title"), "role_title": row.get("Job Title"),
                 "role_strength": row.get("Lead Strength") if row.get("Lead Strength") in rm.STRENGTHS else rm.role_strength(row.get("Job Title") or ""),
                 "competitor_key": None if is_problem else _competitor_key_for(product), "competitor_product": None if is_problem else product,
                 "problem_term": product.replace("Problem: ", "") if is_problem else None, "location": row.get("Location"), "state": row.get("State"),
                 "country": row.get("Country"), "posted_at": row.get("Date"), "first_seen_at": row.get("First Seen") or row.get("Date Found") or row.get("Date"),
-            }
-            new = await upsert_signal(company, sig)
-            counts["signals_new" if new else "signals_seen"] += 1
-            await human(company, row)
+            }))
+            human(company, row)
             touched.add(company["id"])
     for row in data.get("linkedin") or []:
         if not row.get("Company"):
             continue
-        company = await get_or_create_company(row["Company"], source="leads_radar")
-        new = await upsert_signal(company, {"type": "linkedin", "source": "leads_radar", "source_ref": row.get("Evidence URL") or row.get("Post URL") or f"{row.get('Person')}|{row.get('Date')}",
-                                            "evidence_url": row.get("Evidence URL") or row.get("Post URL"), "person": row.get("Person"), "person_title": row.get("Title"), "role_title": row.get("Title"),
-                                            "role_strength": rm.role_strength(row.get("Title") or ""), "action": row.get("Action"), "competitor_key": _competitor_key_for(row.get("Competitor") or ""),
-                                            "competitor_product": row.get("Competitor"), "country": row.get("Country"), "posted_at": row.get("Date")})
-        counts["signals_new" if new else "signals_seen"] += 1
-        await human(company, row)
+        company = resolve(row["Company"])
+        signal_ops.append(_signal_op(company, {"type": "linkedin", "source": "leads_radar", "source_ref": row.get("Evidence URL") or row.get("Post URL") or f"{row.get('Person')}|{row.get('Date')}",
+                                               "evidence_url": row.get("Evidence URL") or row.get("Post URL"), "person": row.get("Person"), "person_title": row.get("Title"), "role_title": row.get("Title"),
+                                               "role_strength": rm.role_strength(row.get("Title") or ""), "action": row.get("Action"), "competitor_key": _competitor_key_for(row.get("Competitor") or ""),
+                                               "competitor_product": row.get("Competitor"), "country": row.get("Country"), "posted_at": row.get("Date")}))
+        human(company, row)
         touched.add(company["id"])
     for row in data.get("dns") or []:
         if not row.get("Company"):
             continue
-        company = await get_or_create_company(row["Company"], domain=row.get("Domain"), source="leads_radar")
-        new = await upsert_signal(company, {"type": "dns", "source": "leads_radar", "source_ref": f"{row.get('Domain')}|{row.get('Record Type')}|{row.get('Record Value')}",
-                                            "evidence_url": row.get("Evidence URL"), "domain": row.get("Domain"), "record_type": row.get("Record Type"), "record_value": row.get("Record Value"),
-                                            "competitor_key": _competitor_key_for(row.get("Competitor Fingerprint") or ""), "competitor_product": row.get("Competitor Fingerprint"), "posted_at": row.get("Date")})
-        counts["signals_new" if new else "signals_seen"] += 1
-        await human(company, row)
+        company = resolve(row["Company"], row.get("Domain"))
+        signal_ops.append(_signal_op(company, {"type": "dns", "source": "leads_radar", "source_ref": f"{row.get('Domain')}|{row.get('Record Type')}|{row.get('Record Value')}",
+                                               "evidence_url": row.get("Evidence URL"), "domain": row.get("Domain"), "record_type": row.get("Record Type"), "record_value": row.get("Record Value"),
+                                               "competitor_key": _competitor_key_for(row.get("Competitor Fingerprint") or ""), "competitor_product": row.get("Competitor Fingerprint"), "posted_at": row.get("Date")}))
+        human(company, row)
         touched.add(company["id"])
     for row in data.get("accounts") or []:
         if row.get("Company"):
-            touched.add((await get_or_create_company(row["Company"], source="leads_radar"))["id"])
+            touched.add(resolve(row["Company"])["id"])
+
+    seen_research = {(r["company_id"], r.get("created_at")) async for r in db.radar_research.find({"source": "leads_radar"}, {"_id": 0, "company_id": 1, "created_at": 1})}
+    seen_people = {(c.get("company_id"), c.get("name")) async for c in db.contacts.find({}, {"_id": 0, "company_id": 1, "name": 1})}
+    research_docs, contact_docs = [], []
     for r in data.get("research") or []:
         if not r.get("Company"):
             continue
-        company = await get_or_create_company(r["Company"], source="leads_radar")
-        exists = await _db().radar_research.find_one({"company_id": company["id"], "source": "leads_radar", "created_at": r.get("Date")}, {"_id": 1})
-        if not exists:
+        company = resolve(r["Company"])
+        if (company["id"], r.get("Date")) not in seen_research:
             ft = r.get("First Touch") or {}
             doc = {
                 "id": str(uuid.uuid4()), "company_id": company["id"], "company": company["name"], "version": 1, "source": "leads_radar", "status": "approved",
@@ -476,19 +660,31 @@ async def import_radar(data: dict, by: str) -> dict:
                 "first_touch": {"subject": ft.get("Subject"), "body": ft.get("Body")}, "gaps": r.get("Gaps"), "provider": "leads_radar", "model": "claude-code",
                 "reviewed_by": f"imported by {by}", "reviewed_at": now_iso(), "created_at": r.get("Date") or now_iso(), "checks": [],
             }
-            await _db().radar_research.insert_one(dict(doc))
-            counts["research"] += 1
+            research_docs.append(doc)
+            seen_research.add((company["id"], r.get("Date")))
             for c in doc["contacts"]:
-                if c.get("name") and not await _db().contacts.find_one({"company_id": company["id"], "name": c["name"]}, {"_id": 1}):
+                if c.get("name") and (company["id"], c["name"]) not in seen_people:
                     from outbound import new_contact_doc
-                    await _db().contacts.insert_one(new_contact_doc({"company_id": company["id"], "name": c["name"], "title": c.get("title"), "linkedin_url": c.get("linkedin_url"),
-                                                                       "source": "research", "source_url": (doc["evidence"][0]["url"] if doc["evidence"] else None)}, company))
-                    counts["contacts"] += 1
+                    contact_docs.append(new_contact_doc({"company_id": company["id"], "name": c["name"], "title": c.get("title"), "linkedin_url": c.get("linkedin_url"),
+                                                         "source": "research", "source_url": (doc["evidence"][0]["url"] if doc["evidence"] else None)}, company))
+                    seen_people.add((company["id"], c["name"]))
         touched.add(company["id"])
+
+    # Writes: accounts (new, changed, linked), signals, deep dives and their people, then the recompute.
+    await resolver.flush()
+    if signal_ops:
+        counts["signals_new"] = await save_signals(signal_ops)
+        counts["signals_seen"] = len(signal_ops) - counts["signals_new"]
+    if research_docs:
+        await db.radar_research.insert_many([dict(d) for d in research_docs])
+        counts["research"] = len(research_docs)
+    if contact_docs:
+        await db.contacts.insert_many([dict(d) for d in contact_docs])
+        counts["contacts"] = len(contact_docs)
     await recompute_many(touched)
-    for cid in touched:
-        await add_history(cid, by, "import", "Imported from Leads Radar")
-    counts["companies"] = await _db().companies.count_documents({}) - before
+    if touched:
+        await db.companies.bulk_write([_history_op(cid, by, "import", "Imported from Leads Radar") for cid in touched], ordered=False)
+    counts["companies"] = len(resolver.created)
     counts["touched"] = len(touched)
     return counts
 

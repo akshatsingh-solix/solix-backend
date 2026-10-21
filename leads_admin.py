@@ -574,6 +574,7 @@ async def put_scoring(body: ScoringIn):
     await db.settings.update_one({"key": "scoring"}, {"$set": {**body.model_dump(), "updated_at": now_iso()}}, upsert=True)
     n = await rescore_all()
     cache.bump("reports")
+    cache.bump("radar_ctx")  # Radar scores decay with the same half-life
     return {**await get_scoring(), "rescored": n}
 
 
@@ -609,6 +610,7 @@ async def create_user(body: UserIn):
     password = _temp_password()
     doc = {"id": str(uuid.uuid4()), "email": email, "name": body.name.strip(), "role": body.role, "password_hash": hash_password(password), "created_at": now_iso(), "disabled": False}
     await db.users.insert_one(dict(doc))
+    cache.bump("radar_ctx")  # sales and admin logins are Radar team members
     cache.bump("users")
     return {"user": {k: v for k, v in doc.items() if k not in ("password_hash", "_id")}, "temporary_password": password}
 
@@ -628,6 +630,7 @@ async def update_user(user_id: str, body: UserPatch, me: dict = Depends(get_curr
         out["temporary_password"] = password
     if changes:
         await db.users.update_one({"id": user_id}, {"$set": changes})
+        cache.bump("radar_ctx")
         cache.bump("users")
     out["user"] = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
     return out
