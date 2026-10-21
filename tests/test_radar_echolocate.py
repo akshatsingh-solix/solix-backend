@@ -411,3 +411,22 @@ def test_bounce_rate_pauses_sending_and_watchdog_reports(client):
     h = client.get("/api/admin/ops/health").json()
     assert any(c["code"] == "outbound_paused" and not c["ok"] for c in h["checks"])
     assert run(_mock_db.ops_outbox.count_documents({"target": "slack"})) >= 1
+
+
+def test_overlapping_runs_send_each_step_and_message_once(client):
+    import ops
+    run(_mock_db.contacts.insert_one({"id": "race-c", "email": "race@initech.example", "name": "Race Test"}))
+    enr = {"id": "race-e", "contact_id": "race-c", "company_id": None, "sequence_id": "x", "variant": "A", "step_index": 0, "status": "active", "provider": "dry_run",
+           "steps": [{"subject": "s1", "body": "b1", "day": 0}, {"subject": "s2", "body": "b2", "day": 3}], "history": []}
+    run(_mock_db.enrollments.insert_one(dict(enr)))
+    s = run(compliance.outbound_settings())
+    async def together(*coros):
+        return await asyncio.gather(*coros)
+    results = run(together(outbound.send_step(dict(enr), s), outbound.send_step(dict(enr), s)))
+    assert sorted(results) == ["simulated", "skipped"]
+    assert run(_mock_db.sends.count_documents({"enrollment_id": "race-e"})) == 1
+    e = run(_mock_db.enrollments.find_one({"id": "race-e"}))
+    assert e["step_index"] == 1 and e.get("claim_until") is None  # released for the next step
+    pending = run(_mock_db.ops_outbox.count_documents({"status": "pending", "next_attempt_at": {"$lte": "2999"}}))
+    a, b = run(together(ops.process_outbox(500), ops.process_outbox(500)))
+    assert pending and sum(a.values()) + sum(b.values()) == pending  # every queued message handled exactly once

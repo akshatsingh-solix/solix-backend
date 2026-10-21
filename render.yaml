@@ -51,8 +51,10 @@ services:
       - key: GITHUB_DEPLOY_TOKEN
         sync: false
       # Public addresses put into emails (download links, "read the full article").
+      # This service's own address (solix-backend.onrender.com belongs to no service):
+      # download and unsubscribe links in emails, and the Instantly webhook, use it.
       - key: PUBLIC_API_URL
-        value: https://solix-backend.onrender.com
+        value: https://solix-backend-mf5w.onrender.com
       - key: SITE_URL
         value: https://akshatsingh-solix.github.io/Website
       # Email transport for lead alerts and gated asset emails: set the SMTP_*
@@ -83,4 +85,7 @@ services:
       - key: DIGIPRISE_TOKEN
         sync: false
       - key: OPS_TOKEN
+        generateValue: true
+      # Signs unsubscribe links; its own value so rotating JWT_SECRET never breaks them.
+      - key: UNSUBSCRIBE_SECRET
         generateValue: true
