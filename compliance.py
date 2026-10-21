@@ -114,6 +114,9 @@ async def suppress(email: str, reason: str, *, source: str, by: str, keep_email:
         reason = "manual"
     doc = {"email_hash": email_hash(email), "email": email if keep_email else None, "reason": reason, "source": source, "added_by": by, "added_at": now_iso()}
     await _db().suppression.update_one({"email_hash": doc["email_hash"]}, {"$set": doc}, upsert=True)
+    if email:  # sales sees it on the lead too
+        note = {"at": now_iso(), "by": by, "action": "suppressed", "detail": f"Do not contact: {reason.replace('_', ' ')} ({source})"}
+        await _db().leads.update_many({"email": email}, {"$set": {"do_not_contact": reason}, "$push": {"history": {"$each": [note], "$slice": -50}}})
     ids = [c["id"] async for c in _db().contacts.find({"email": email}, {"_id": 0, "id": 1})] if email else []
     if ids:
         await _db().contacts.update_many({"id": {"$in": ids}}, {"$set": {"suppressed": reason, "updated_at": now_iso()}})
@@ -146,6 +149,12 @@ async def gate(contact: dict, company: Optional[dict], settings: Optional[dict] 
             reasons.append(f"On the suppression list ({sup.replace('_', ' ')})")
         if rm.domain_of(email) in scoring.FREE_EMAIL_DOMAINS:
             reasons.append("Personal email address: business addresses only")
+        lead = await _db().leads.find_one({"email": email}, {"_id": 0, "stage": 1, "owner": 1})
+        owned = f", owner {lead['owner']}" if (lead or {}).get("owner") else ""
+        if (lead or {}).get("stage") in ("sql", "opportunity", "won"):
+            reasons.append(f"Already in the sales pipeline ({lead['stage'].upper()}{owned})")
+        elif (lead or {}).get("stage") in ("mql", "sal") and owned:
+            warnings.append(f"Inbound {lead['stage'].upper()}{owned}: check with them before sequencing")
     status = contact.get("email_status") or "unchecked"
     if status == "invalid":
         reasons.append("Email address is invalid or has bounced")
@@ -250,7 +259,8 @@ async def erase(email: str, by: str) -> dict:
     db = _db()
     email = email.strip().lower()
     counts = {}
-    contact_ids = [c["id"] async for c in db.contacts.find({"email": email}, {"_id": 0, "id": 1})]
+    contacts = [c async for c in db.contacts.find({"email": email}, {"_id": 0, "id": 1, "name": 1, "company_id": 1})]
+    contact_ids = [c["id"] for c in contacts]
     lead_ids = [l["id"] async for l in db.leads.find({"email": email}, {"_id": 0, "id": 1})]
     visitor_ids = [v["id"] async for v in db.visitors.find({"$or": [{"email": email}, {"lead_id": {"$in": lead_ids}}]}, {"_id": 0, "id": 1})]
     chat_sessions = [s["source_page"][5:] async for s in db.submissions.find({"email": email, "source": "chat", "source_page": {"$regex": "^chat:"}}, {"_id": 0, "source_page": 1})]
@@ -273,6 +283,18 @@ async def erase(email: str, by: str) -> dict:
         res = await op
         counts[name] = res.deleted_count
     await db.companies.update_many({"lead_ids": {"$in": lead_ids}}, {"$pull": {"lead_ids": {"$in": lead_ids}}})
+    # Account history and queued Slack/Digiprise/email jobs mention the person too.
+    rx = {"$regex": re.escape(email), "$options": "i"}
+    res = await db.companies.update_many({"history.detail": rx}, {"$pull": {"history": {"detail": rx}}})
+    scrubbed = res.modified_count
+    for c in contacts:
+        if c.get("name") and c.get("company_id"):
+            res = await db.companies.update_one({"id": c["company_id"]}, {"$pull": {"history": {"detail": {"$regex": re.escape(c["name"])}}}})
+            scrubbed += res.modified_count
+    counts["account_history"] = scrubbed
+    res = await db.ops_outbox.delete_many({"$or": [{"payload.email": email}, {"payload.reply_to": email}, {"payload.text": rx}, {"payload.excerpt": rx}],
+                                           "target": {"$nin": ["instantly_delete", "instantly_block"]}})
+    counts["queued_messages"] = res.deleted_count
     await suppress(email, "gdpr_erasure", source="erasure", by=by, keep_email=False)
     await db.suppression.update_one({"email_hash": email_hash(email)}, {"$set": {"email": None}})
     if os.environ.get("INSTANTLY_API_KEY"):
@@ -365,6 +387,10 @@ async def remove_suppression(hash_: str, user: dict = Depends(get_current_admin)
     if doc["reason"] in ("gdpr_erasure", "unsubscribed", "complaint"):
         raise HTTPException(status_code=409, detail="Unsubscribes, complaints and erasures can't be lifted from the admin.")
     await _db().suppression.delete_one({"email_hash": hash_})
+    if doc.get("email"):
+        note = {"at": now_iso(), "by": user["email"], "action": "unsuppressed", "detail": "Removed from the do-not-contact list"}
+        await _db().leads.update_many({"email": doc["email"]}, {"$unset": {"do_not_contact": ""}, "$push": {"history": {"$each": [note], "$slice": -50}}})
+        await _db().contacts.update_many({"email": doc["email"]}, {"$set": {"suppressed": None}})
     await ops.notify("watchdog", f"{user['email']} removed a {doc['reason']} suppression.", event="unsuppress")
     return {"removed": True}
 

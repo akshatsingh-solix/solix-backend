@@ -188,6 +188,8 @@ def fit_score(lead: dict) -> tuple[int, dict]:
 def channel_for(touch: Optional[dict]) -> str:
     """Marketing channel from first-touch UTM / referrer."""
     touch = touch or {}
+    if touch.get("outbound") or touch.get("landing") in ("outbound", "radar"):  # sourced by the Radar / EchoLocate
+        return "outbound"
     medium = (touch.get("utm_medium") or "").lower()
     source = (touch.get("utm_source") or "").lower()
     ref = (touch.get("referrer") or "").lower()

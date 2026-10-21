@@ -30,6 +30,7 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+import cache
 import compliance
 import database
 import ops
@@ -508,7 +509,7 @@ async def promote_to_lead(company: Optional[dict], person: dict, *, reason: str,
     if not lead:
         lead = {"id": str(uuid.uuid4()), "email": email, "created_at": now, "stage": "lead", "visitor_ids": [], "direct_scores": {}, "direct_scored_at": now,
                 "submission_types": [], "submissions_count": 0, "owner": (company or {}).get("owner"), "notes": "", "tags": [source],
-                "stage_history": [{"stage": "lead", "at": now, "by": by, "reason": reason}], "first_touch": {"landing": source, "at": now}, "source": source}
+                "stage_history": [{"stage": "lead", "at": now, "by": by, "reason": reason}], "first_touch": {"outbound": True, "source": source, "at": now}, "source": source}
         await _db().leads.insert_one(dict(lead))
     sets = {k: v for k, v in {"name": person.get("name"), "job_title": person.get("job_title") or person.get("title"), "company": (company or {}).get("name"),
                               "country": ((company or {}).get("hq") or {}).get("country")}.items() if v and not lead.get(k)}
@@ -534,14 +535,69 @@ async def promote_to_lead(company: Optional[dict], person: dict, *, reason: str,
             upd["sql_at"] = now
         await _db().leads.update_one({"id": lead["id"]}, {"$set": upd})
         lead.update(upd)
+    await _db().contacts.update_many({"email": email}, {"$set": {"lead_id": lead["id"]}})
     if company:
         await _db().companies.update_one({"id": company["id"]}, {"$addToSet": {"lead_ids": lead["id"]}})
         await rs.add_history(company["id"], by, "lead", f"{email} → {stage.upper()} ({reason})")
         await rs.recompute(company["id"])
+    cache.bump("reports")
     await ops.digiprise("lead.upserted", {"lead_id": lead["id"], "email": email, "name": lead.get("name"), "company": lead.get("company"), "stage": lead.get("stage"),
                                           "owner": lead.get("owner"), "reason": reason, "account_id": (company or {}).get("id"), "account_score": (company or {}).get("score")},
                         key=f"dp-lead:{lead['id']}:{lead.get('stage')}")
     return lead
+
+
+INBOUND_ACTIONS = {"demo": "requested a demo", "trial": "started a trial", "contact": "contacted sales", "event": "registered for an event",
+                   "download": "downloaded gated content", "chat": "talked to Sol", "partner": "applied to partner"}
+
+
+async def attach_lead(contact: dict) -> dict:
+    """Point a contact at the website lead with the same email, so both pages show one person."""
+    lead = await _db().leads.find_one({"email": contact.get("email")}, {"_id": 0, "id": 1}) if contact.get("email") else None
+    if (lead or {}).get("id") != contact.get("lead_id"):
+        await _db().contacts.update_one({"id": contact["id"]}, {"$set": {"lead_id": (lead or {}).get("id")}})
+        contact = {**contact, "lead_id": (lead or {}).get("id")}
+    return contact
+
+
+async def _credit_outbound(lead: dict) -> None:
+    """Our email reached them before they became a lead with no better-known source: outbound is the first touch."""
+    first = await _db().sends.find_one({"email": lead["email"], "bounced": {"$ne": True}, "status": {"$in": ["sent", "simulated"]}},
+                                       {"_id": 0, "sent_at": 1}, sort=[("sent_at", 1)])
+    if not first:
+        return
+    import intent
+    ft = lead.get("first_touch") or {}
+    sets = {"tags": sorted(set(lead.get("tags") or []) | {"outbound"})}
+    known = any(ft.get(k) for k in ("referrer", "utm_source", "utm_medium", "chat", "outbound"))
+    if not known and first["sent_at"] < (lead.get("created_at") or ""):
+        sets["first_touch"] = {"outbound": True, "source": "outbound", "at": first["sent_at"], "landing": ft.get("landing")}
+    await _db().leads.update_one({"id": lead["id"]}, {"$set": sets})
+    if "first_touch" in sets:
+        await intent.rollup_lead(lead["id"])
+    cache.bump("reports")
+
+
+async def on_inbound(lead: dict, stype: str) -> int:
+    """Someone in outbound engaged on the website: stop emailing them and hand them to the owner."""
+    email = (lead.get("email") or "").lower()
+    if not email:
+        return 0
+    await _db().contacts.update_many({"email": email}, {"$set": {"lead_id": lead["id"]}})
+    await _credit_outbound(lead)
+    action = INBOUND_ACTIONS.get(stype)
+    if not action:  # a newsletter sign-up isn't a reason to stop
+        return 0
+    stopped = 0
+    async for c in _db().contacts.find({"email": email}, {"_id": 0, "id": 1, "name": 1, "company_id": 1}):
+        n = await stop_contact(c["id"], "stopped", f"Engaged inbound: {action}")
+        if n and c.get("company_id"):
+            await rs.add_history(c["company_id"], "system", "inbound", f"{c.get('name') or email} {action}; outbound stopped")
+        stopped += n
+    if stopped:
+        await ops.notify("pipeline", f"{lead.get('name') or email} {action} while in an outbound sequence, so the sequence stopped. Owner: {lead.get('owner') or 'unassigned'}.",
+                         event="inbound_handoff", key=f"handoff:{lead['id']}:{stype}:{now_iso()[:10]}")
+    return stopped
 
 
 async def handle_reply(contact: dict, text: str, *, source: str, label: Optional[str] = None, by: str = "system", meta: Optional[dict] = None) -> dict:
@@ -585,8 +641,10 @@ async def handle_reply(contact: dict, text: str, *, source: str, label: Optional
         new = 0
         for em in set(re.findall(r"[\w.+-]+@[\w-]+\.[\w.-]+", text or "")) - {contact.get("email")}:
             if not await _db().contacts.find_one({"email": em.lower()}, {"_id": 1}):
-                await _db().contacts.insert_one(new_contact_doc({"email": em, "name": em.split("@")[0].replace(".", " ").title(), "source": "referral",
-                                                                 "source_url": None, "notes": f"Referred by {contact.get('email')}"}, company))
+                ref = new_contact_doc({"email": em, "name": em.split("@")[0].replace(".", " ").title(), "source": "referral",
+                                       "source_url": None, "notes": f"Referred by {contact.get('email')}"}, company)
+                await _db().contacts.insert_one(dict(ref))
+                await attach_lead(ref)
                 new += 1
         await stop_contact(contact["id"], "replied", f"Replied: {label}")
         await ops.notify("replies", f"{label.title()} from {who}; {new} new contact(s) added.", event="reply_referral")
@@ -743,6 +801,7 @@ async def create_contact(body: ContactIn, user: dict = Depends(get_current_admin
     company = await _company_for(data)
     doc = new_contact_doc(data, company)
     await _db().contacts.insert_one(dict(doc))
+    doc = await attach_lead(doc)
     if doc["email"]:
         doc = await set_verification(doc)
     if company:
@@ -786,8 +845,10 @@ async def patch_contact(contact_id: str, body: ContactPatch, user: dict = Depend
     sets["updated_at"] = now_iso()
     await _db().contacts.update_one({"id": contact_id}, {"$set": sets})
     c = await _db().contacts.find_one({"id": contact_id}, {"_id": 0})
-    if "email" in sets and c.get("email"):
-        c = await set_verification(c)
+    if "email" in sets:
+        c = await attach_lead(c)
+        if c.get("email"):
+            c = await set_verification(c)
     return c
 
 
@@ -850,6 +911,7 @@ async def import_contacts(body: ImportIn, user: dict = Depends(get_current_admin
         company = await _company_for(data)
         doc = new_contact_doc(data, company)
         await _db().contacts.insert_one(dict(doc))
+        await attach_lead(doc)
         counts["created"] += 1
     return counts
 
@@ -1005,7 +1067,7 @@ async def list_replies(label: Optional[str] = None, page: int = Query(1, ge=1), 
     q = {"label": label} if label else {}
     total = await _db().reply_log.count_documents(q)
     items = await _db().reply_log.find(q, {"_id": 0}).sort("received_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
-    names = {c["id"]: c async for c in _db().contacts.find({"id": {"$in": [i["contact_id"] for i in items]}}, {"_id": 0, "id": 1, "name": 1, "company": 1, "title": 1})}
+    names = {c["id"]: c async for c in _db().contacts.find({"id": {"$in": [i["contact_id"] for i in items]}}, {"_id": 0, "id": 1, "name": 1, "company": 1, "title": 1, "lead_id": 1})}
     for i in items:
         i["contact"] = names.get(i["contact_id"])
     return {"items": items, "total": total}

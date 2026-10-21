@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Iterable, List, Optional
 
 import database
+import ops
 import radar_model as rm
 import scoring
 from database import now_iso
@@ -112,6 +113,8 @@ async def get_or_create_company(name: str, *, domain: Optional[str] = None, hq: 
         if changes:
             await _db().companies.update_one({"id": company["id"]}, changes)
             company = await _db().companies.find_one({"id": company["id"]}, {"_id": 0})
+            if "domains" in changes.get("$addToSet", {}):
+                await link_by_domain(company, [dom])
         return company
     now = now_iso()
     company = {
@@ -123,6 +126,8 @@ async def get_or_create_company(name: str, *, domain: Optional[str] = None, hq: 
         "source": source, "created_at": now, "updated_at": now,
     }
     await _db().companies.insert_one(dict(company))
+    if dom:
+        await link_by_domain(company)
     return company
 
 
@@ -159,7 +164,7 @@ async def _website_intent(company: dict) -> tuple[Optional[dict], list]:
     if not company.get("lead_ids") and not company.get("domains"):
         return None, []
     q = {"$or": [{"company_id": company["id"]}] + ([{"id": {"$in": company["lead_ids"]}}] if company.get("lead_ids") else [])}
-    leads = await _db().leads.find(q, {"_id": 0, "id": 1, "score": 1, "product_scores": 1, "stage": 1, "email": 1}).to_list(200)
+    leads = await _db().leads.find(q, {"_id": 0, "id": 1, "score": 1, "product_scores": 1, "stage": 1, "email": 1, "owner": 1}).to_list(200)
     if not leads:
         return None, []
     scores: dict = {}
@@ -221,7 +226,23 @@ async def recompute(company_id: str, *, terr: Optional[dict] = None, members: Op
     update["status"] = status
     update["stamp"] = rm.freshness_stamp({**company, **update})
     await db.companies.update_one({"id": company_id}, {"$set": update})
+    await _sync_lead_owners({**company, **update}, leads)
     return {**company, **update}
+
+
+async def _sync_lead_owners(company: dict, leads: list) -> None:
+    """The account owner works its unowned website leads; a lead someone else owns is flagged, never moved."""
+    owner = company.get("owner")
+    if not owner or not leads:
+        return
+    unowned = [l["id"] for l in leads if not l.get("owner")]
+    if unowned:
+        entry = {"at": now_iso(), "by": "radar", "action": "owner", "detail": f"Owner → {owner} (owner of {company['name']} in the Radar)"}
+        await _db().leads.update_many({"id": {"$in": unowned}, "owner": {"$in": [None, ""]}}, {"$set": {"owner": owner}, "$push": {"history": {"$each": [entry], "$slice": -50}}})
+    for l in leads:
+        if l.get("owner") and l["owner"] != owner and l.get("stage") not in ("lost", "disqualified"):
+            await ops.notify("conflicts", f"{l.get('email')} is owned by {l['owner']}, but its account {company['name']} belongs to {owner}. Agree who works it.",
+                             event="owner_conflict", key=f"conflict:{l['id']}:{l['owner']}:{owner}")
 
 
 async def recompute_many(ids: Iterable[str]) -> int:
@@ -276,6 +297,8 @@ async def patch_company(company: dict, body: dict, user: dict) -> dict:
     await _db().companies.update_one({"id": company["id"]}, {"$set": sets})
     for action, detail in notes:
         await add_history(company["id"], user.get("email", "system"), action, detail)
+    if sets.get("domains"):
+        await link_by_domain({**company, **sets})
     return await recompute(company["id"])
 
 
@@ -292,6 +315,9 @@ async def link_lead(lead: dict) -> Optional[str]:
     if not company and lead.get("company"):
         key = rm.company_key(lead["company"])
         company = await _db().companies.find_one({"$or": [{"key": key}, {"alias_keys": key}]}, {"_id": 0, "id": 1}) if key else None
+    if not company:  # the same person may already be an outbound contact on an account
+        contact = await _db().contacts.find_one({"email": lead["email"].lower(), "company_id": {"$ne": None}}, {"_id": 0, "company_id": 1})
+        company = {"id": contact["company_id"]} if contact else None
     if not company:
         return None
     if lead.get("company_id") != company["id"]:
@@ -300,6 +326,24 @@ async def link_lead(lead: dict) -> Optional[str]:
         await add_history(company["id"], "system", "lead", f"Website lead linked: {lead['email']}")
     await recompute(company["id"])
     return company["id"]
+
+
+async def link_by_domain(company: dict, domains: Optional[List[str]] = None) -> int:
+    """Attach website leads and outbound contacts that arrived before this account (or this domain) was known."""
+    n = 0
+    for dom in domains or company.get("domains") or []:
+        if not dom or dom in scoring.FREE_EMAIL_DOMAINS:
+            continue
+        rx = {"$regex": f"@{re.escape(dom)}$", "$options": "i"}
+        ids = [l["id"] async for l in _db().leads.find({"email": rx, "company_id": None}, {"_id": 0, "id": 1})]
+        if ids:
+            await _db().leads.update_many({"id": {"$in": ids}}, {"$set": {"company_id": company["id"]}})
+            await _db().companies.update_one({"id": company["id"]}, {"$addToSet": {"lead_ids": {"$each": ids}}})
+            n += len(ids)
+        await _db().contacts.update_many({"email": rx, "company_id": None}, {"$set": {"company_id": company["id"], "company": company.get("name")}})
+    if n:
+        await add_history(company["id"], "system", "lead", f"{n} earlier website lead(s) linked by email domain")
+    return n
 
 
 async def on_lead_changed(lead: dict) -> None:

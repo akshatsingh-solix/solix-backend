@@ -26,8 +26,8 @@ can_work = Depends(require_roles("admin", "sales"))
 admin_only = Depends(require_roles("admin"))
 
 LINE_LABELS = {k: v["label"] for k, v in scoring.PRODUCT_LINES.items()}
-CHANNELS = ("paid", "organic_search", "social", "email", "referral", "chat", "direct")
-LEAD_LIST_FIELDS = {"_id": 0, "direct_scores": 0, "stage_history": 0, "visitor_ids": 0, "industries": 0}
+CHANNELS = ("paid", "organic_search", "social", "email", "referral", "chat", "outbound", "direct")
+LEAD_LIST_FIELDS = {"_id": 0, "direct_scores": 0, "stage_history": 0, "history": 0, "visitor_ids": 0, "industries": 0}
 
 
 # --- Filters ------------------------------------------------------------------
@@ -46,6 +46,7 @@ class LeadFilters(BaseModel):
     date_from: Optional[str] = None
     date_to: Optional[str] = None
     active_days: Optional[int] = None
+    linked: Optional[Literal["radar", "outbound", "dnc"]] = None
 
 
 def filters_dep(
@@ -53,6 +54,7 @@ def filters_dep(
     owner: Optional[str] = None, channel: Optional[str] = None, country: Optional[str] = None, industry: Optional[str] = None,
     min_score: Optional[float] = None, date_field: Literal["created_at", "last_activity_at", "mql_at"] = "created_at",
     date_from: Optional[str] = None, date_to: Optional[str] = None, active_days: Optional[int] = Query(None, ge=1, le=365),
+    linked: Optional[Literal["radar", "outbound", "dnc"]] = None,
 ) -> LeadFilters:
     return LeadFilters(**{k: v for k, v in locals().items()})
 
@@ -85,6 +87,12 @@ def lead_query(f: LeadFilters) -> dict:
         clauses.append({"owner": {"$in": [None, ""]}} if f.owner == "unassigned" else {"owner": f.owner})
     if f.channel and f.channel != "all":
         clauses.append({"channel": f.channel})
+    if f.linked == "radar":  # on a Radar account
+        clauses.append({"company_id": {"$nin": [None, ""]}})
+    elif f.linked == "outbound":  # sourced or touched by outbound
+        clauses.append({"tags": "outbound"})
+    elif f.linked == "dnc":
+        clauses.append({"do_not_contact": {"$nin": [None, ""]}})
     if f.country and f.country != "all":
         clauses.append({"country": f.country})
     if f.industry and f.industry != "all":
@@ -149,7 +157,10 @@ async def get_lead(lead_id: str):
     timeline += [{"kind": "stage", "at": h["at"], "type": h["stage"], "detail": h.get("reason"), "by": h.get("by")} for h in lead.get("stage_history") or []]
     deliveries = await db.deliveries.find({"email": lead["email"], "status": {"$in": ["sent", "failed"]}}, {"_id": 0}).sort("created_at", -1).to_list(50)
     timeline += [{"kind": "email", "at": d["created_at"], "type": f"asset_{d['status']}", "detail": d.get("title"), "meta": {"attached": d.get("attached"), "reason": d.get("detail")}} for d in deliveries]
-    timeline.sort(key=lambda x: x["at"], reverse=True)
+    timeline += [{"kind": "activity", "at": h["at"], "type": h.get("action"), "detail": h.get("detail"), "by": h.get("by")} for h in lead.get("history") or []]
+    linked = await _linked(lead)
+    timeline += linked.pop("timeline")
+    timeline.sort(key=lambda x: x["at"] or "", reverse=True)
     products = sorted(((p, v) for p, v in (lead.get("product_scores") or {}).items()), key=lambda x: -x[1])
     return {
         "lead": _decorate(lead),
@@ -160,6 +171,37 @@ async def get_lead(lead_id: str):
         },
         "submissions": subs,
         "timeline": timeline[:300],
+        **linked,
+    }
+
+
+ACCOUNT_FIELDS = {"_id": 0, "id": 1, "name": 1, "status": 1, "strength": 1, "score": 1, "owner": 1, "owner_name": 1, "territory": 1, "signal_count": 1,
+                  "competitors": 1, "research_score": 1, "research_verdict": 1, "excluded_reason": 1, "surge": 1}
+
+
+async def _linked(lead: dict) -> dict:
+    """The same person elsewhere: their Radar account, outbound record, events and do-not-contact status."""
+    import compliance
+    email = lead["email"]
+    account = await db.companies.find_one({"id": lead["company_id"]}, ACCOUNT_FIELDS) if lead.get("company_id") else None
+    contacts = await db.contacts.find({"email": email}, {"_id": 0, "id": 1, "company_id": 1, "email_status": 1, "suppressed": 1, "persona": 1, "source": 1, "created_at": 1}).to_list(5)
+    cids = [c["id"] for c in contacts]
+    enrollments = await db.enrollments.find({"contact_id": {"$in": cids}}, {"_id": 0, "steps": 0, "history": 0, "gate": 0}).sort("created_at", -1).to_list(20) if cids else []
+    sends = await db.sends.find({"$or": [{"contact_id": {"$in": cids}}, {"email": email}]}, {"_id": 0, "body": 0}).sort("sent_at", -1).to_list(50)
+    replies = await db.reply_log.find({"$or": [{"contact_id": {"$in": cids}}, {"email": email}]}, {"_id": 0, "meta": 0}).sort("received_at", -1).to_list(20)
+    regs = await db.event_registrations.find({"email": email}, {"_id": 0, "event": 1, "status": 1, "ticket_name": 1, "checked_in": 1, "checked_in_at": 1, "created_at": 1}).to_list(20)
+    sup = await db.suppression.find_one({"email_hash": compliance.email_hash(email)}, {"_id": 0, "reason": 1, "added_at": 1, "source": 1})
+    timeline = [{"kind": "outbound", "at": e.get("created_at"), "type": "enrolled", "detail": e.get("sequence_name"), "meta": {"status": e.get("status")}} for e in enrollments]
+    timeline += [{"kind": "outbound", "at": x.get("sent_at") or x.get("created_at"), "type": "bounced" if x.get("bounced") else "sent", "detail": x.get("subject"),
+                  "meta": {"step": x.get("step"), "status": x.get("status")}} for x in sends]
+    timeline += [{"kind": "outbound", "at": r.get("received_at"), "type": "reply", "detail": (r.get("text") or "")[:200], "meta": {"label": r.get("label")}} for r in replies]
+    timeline += [{"kind": "attended", "at": r["checked_in_at"], "type": "checked_in", "detail": r.get("event")} for r in regs if r.get("checked_in_at")]
+    return {
+        "account": account,
+        "outbound": {"contacts": contacts, "enrollments": enrollments, "sends": len(sends), "replies": [{k: r.get(k) for k in ("label", "received_at", "source")} for r in replies]},
+        "events": regs,
+        "suppressed": sup,
+        "timeline": timeline,
     }
 
 
@@ -173,8 +215,10 @@ class LeadPatch(BaseModel):
 
 async def _apply_patch(lead: dict, body: LeadPatch, user: dict) -> dict:
     changes: dict = {}
-    if body.owner is not None:
+    notes: list = []
+    if body.owner is not None and (body.owner.strip().lower() or None) != lead.get("owner"):
         changes["owner"] = body.owner.strip().lower() or None
+        notes.append({"at": now_iso(), "by": user["email"], "action": "owner", "detail": f"Owner → {changes['owner'] or 'unassigned'}"})
     if body.notes is not None:
         changes["notes"] = body.notes
     if body.tags is not None:
@@ -192,12 +236,26 @@ async def _apply_patch(lead: dict, body: LeadPatch, user: dict) -> dict:
         changes["stage_history"] = ((lead.get("stage_history") or []) + [{"stage": body.stage, "at": now, "by": user["email"], "reason": body.reason}])[-50:]
     if changes:
         changes["updated_at"] = now_iso()
+        if notes:
+            changes["history"] = ((lead.get("history") or []) + notes)[-50:]
         await db.leads.update_one({"id": lead["id"]}, {"$set": changes})
         cache.bump("reports")
         if "stage" in changes and lead.get("company_id"):
             import radar_service  # a deal stage moves its Radar account forward and sets exclusions
             await radar_service.on_lead_changed({**lead, **changes})
+        if "stage" in changes or "owner" in changes:
+            await _announce({**lead, **changes}, changes, user)
     return {**lead, **changes}
+
+
+async def _announce(lead: dict, changes: dict, user: dict) -> None:
+    """Pipeline moves reach Slack #pipeline and Digiprise like the Radar's own events."""
+    import ops
+    who = f"{lead.get('name') or lead['email']}{' at ' + lead['company'] if lead.get('company') else ''}"
+    if changes.get("stage") in ("sql", "opportunity", "won", "lost"):
+        await ops.notify("pipeline", f"{who} → {changes['stage'].upper()} by {user['email']}. Owner: {lead.get('owner') or 'unassigned'}.", event="lead_stage")
+    await ops.digiprise("lead.updated", {"lead_id": lead["id"], "email": lead["email"], "stage": lead.get("stage"), "owner": lead.get("owner"),
+                                         "account_id": lead.get("company_id"), "by": user["email"]}, key=f"dp-lead-upd:{lead['id']}:{lead.get('stage')}:{lead.get('owner')}")
 
 
 @router.patch("/leads/{lead_id}", dependencies=[can_work])
@@ -328,7 +386,7 @@ async def overview(request: Request, date_from: Optional[str] = None, date_to: O
         lead_filter: dict = {"created_at": {"$gte": start, "$lte": end}}
         if line and line != "all":
             lead_filter["primary_line"] = line
-        fields = {"_id": 0, "created_at": 1, "mql_at": 1, "sql_at": 1, "stage": 1, "primary_line": 1, "channel": 1, "owner": 1, "country": 1, "industry": 1, "score": 1, "primary_product": 1}
+        fields = {"_id": 0, "created_at": 1, "mql_at": 1, "sql_at": 1, "stage": 1, "primary_line": 1, "channel": 1, "owner": 1, "country": 1, "industry": 1, "score": 1, "primary_product": 1, "company_id": 1, "tags": 1}
         mql_filter: dict = {"mql_at": {"$gte": start, "$lte": end}}
         if line and line != "all":
             mql_filter["mql_line"] = line
@@ -417,6 +475,23 @@ async def overview(request: Request, date_from: Optional[str] = None, date_to: O
             for p, s in (v.get("product_scores") or {}).items():
                 interest[p] = round(interest.get(p, 0) + s, 1)
 
+        def share(rows: list) -> dict:
+            return {"leads": len(rows), "sqls": sum(1 for r in rows if r.get("stage") in ("sql", "opportunity", "won")), "won": sum(1 for r in rows if r.get("stage") == "won")}
+
+        status_counts = {r["_id"] or "new": r["n"] async for r in db.companies.aggregate([{"$match": {"signal_count": {"$gt": 0}}}, {"$group": {"_id": "$status", "n": {"$sum": 1}}}])}
+        account_funnel = [{"status": st, "count": sum(n for k, n in status_counts.items() if k in later)}
+                          for st, later in (("signal", set(status_counts)), ("contacted", {"contacted", "replied", "meeting_booked", "opportunity", "won"}),
+                                            ("replied", {"replied", "meeting_booked", "opportunity", "won"}), ("meeting_booked", {"meeting_booked", "opportunity", "won"}),
+                                            ("opportunity", {"opportunity", "won"}), ("won", {"won"}))]
+        influence = {
+            "radar_accounts": share([l for l in leads if l.get("company_id")]),
+            "outbound_sourced": share([l for l in leads if l.get("channel") == "outbound"]),
+            "outbound_touched": share([l for l in leads if "outbound" in (l.get("tags") or [])]),
+            "sends": await db.sends.count_documents({"sent_at": {"$gte": start, "$lte": end}}),
+            "positive_replies": await db.reply_log.count_documents({"received_at": {"$gte": start, "$lte": end}, "label": {"$in": ["interested", "meeting"]}}),
+            "account_funnel": account_funnel,
+        }
+
         total_leads = len(leads)
         mql_count = len(mqls)
         sql_count = sum(1 for l in leads if l.get("stage") in ("sql", "opportunity", "won"))
@@ -439,6 +514,7 @@ async def overview(request: Request, date_from: Optional[str] = None, date_to: O
             "top_content": sorted(content_rows.values(), key=lambda r: -(r["views"] + 3 * r["downloads"]))[:10],
             "top_pages": [{"path": p, "views": c} for p, c in sorted(page_rows.items(), key=lambda x: -x[1])[:10]],
             "product_interest": [{"slug": p, "line": scoring.PRODUCT_TO_LINE.get(p), "score": s} for p, s in sorted(interest.items(), key=lambda x: -x[1])[:15]],
+            "influence": influence,
         }
 
     data = await cache.memo("reports", f"{start}|{end}|{line}", 60, produce)

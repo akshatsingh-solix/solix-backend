@@ -35,10 +35,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
 
 import cache
+import scoring
 from auth import get_current_admin, require_roles
 from database import db, now_iso
 from emailer import email_provider, notify_lead, send_email
-from intent import record_submission
+from intent import get_scoring_settings, record_submission, rollup_lead
 
 logger = logging.getLogger("solix.events")
 public = APIRouter(prefix="/api/events", tags=["events"])
@@ -555,11 +556,35 @@ async def patch_registration(slug: str, reg_id: str, body: RegistrationPatch, us
         changes["checked_in_at"] = now_iso() if body.checked_in else None
     changes["updated_at"] = now_iso()
     changes["updated_by"] = user["email"]
+    before = await db.event_registrations.find_one({"event": slug, "id": reg_id}, {"_id": 0, "checked_in": 1})
     res = await db.event_registrations.find_one_and_update({"event": slug, "id": reg_id}, {"$set": changes}, projection={"_id": 0}, return_document=True)
     if not res:
         raise HTTPException(status_code=404, detail="Registration not found")
     cache.bump("events")
+    if body.checked_in and not (before or {}).get("checked_in"):
+        try:
+            await _attended(res, user)
+        except Exception:
+            logger.exception("lead update failed for check-in %s", reg_id)
     return res
+
+
+async def _attended(reg: dict, user: dict) -> None:
+    """Turning up is a stronger signal than registering: score it on the lead and its account."""
+    lead = await db.leads.find_one({"email": reg["email"]}, {"_id": 0})
+    if not lead:
+        return
+    settings = await get_scoring_settings()
+    topics = scoring.clean_topics([t for i in reg.get("interests") or [] if i in INTERESTS for t in INTERESTS[i]["topics"]])
+    direct = scoring.decay_scores(lead.get("direct_scores") or {}, lead.get("direct_scored_at"), settings["half_life_days"])
+    scoring.add_points(direct, topics, scoring.SUBMISSION_WEIGHTS["event"])
+    note = {"at": now_iso(), "by": user["email"], "action": "attended", "detail": f"Checked in at {reg['event']}"}
+    await db.leads.update_one({"id": lead["id"]}, {"$set": {"direct_scores": direct, "direct_scored_at": now_iso(), "last_activity_at": now_iso(),
+                                                            "history": ((lead.get("history") or []) + [note])[-50:]}})
+    result = await rollup_lead(lead["id"], settings)
+    if (result or {}).get("company_id"):
+        import radar_service
+        await radar_service.on_lead_changed(result)
 
 
 EXPORT = [("Code", "code"), ("Status", "status"), ("Pass", "ticket_name"), ("First name", "first_name"), ("Last name", "last_name"), ("Email", "email"),
