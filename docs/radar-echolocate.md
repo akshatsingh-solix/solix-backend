@@ -153,3 +153,29 @@ match, and also excludes it from automated outreach (the rep is working it).
   setting, in order.
 - **Legacy**: `GET /api/admin/radar/legacy.json` returns the original page's
   JSON contract, and `export.xlsx` the workbook layout.
+
+## 10. How the pieces link
+
+One person is one **lead** (by email); one company is one **account** (by
+domain or name). Every feature writes to those two, so each screen can show
+and link to the others.
+
+| When this happens | It also updates |
+|---|---|
+| A form, chat booking, trial or event registration | The lead (score, stage, first touch); its account (website-intent signal, score, status); any outbound contact with that email (linked, active sequence stopped, #pipeline hand-off) |
+| An account gains a domain (import, collector, edit) | Earlier leads and contacts with that email domain are linked to it |
+| An account has an owner | Its unowned leads take that owner (logged on the lead); a lead someone else owns is flagged in #conflicts, never moved |
+| An outbound email is sent | Account status Contacted; the lead's first touch is credited to outbound if the email came first |
+| A reply is classified | Interested/meeting: sequence stopped, lead MQL/SQL, account Replied/Meeting booked, owner emailed, Slack and Digiprise. No/unsubscribe: suppressed, lead marked do-not-contact |
+| A lead's stage changes | Its account moves forward (never back) and is excluded from automated outreach at SAL+; the gate blocks cold email to people at SQL+; #pipeline and Digiprise hear about SQL/opportunity/won/lost |
+| An event check-in | The lead's score and timeline, then its account |
+| An erasure | Every collection above, plus account history and queued Slack/Digiprise/email jobs; only a hash remains on the suppression list |
+
+**Measured where**: the lead page timeline (forms, pages, stages, asset
+emails, outbound emails and replies, owner changes, suppressions, check-ins);
+the account drawer (signals, deep dive, contacts, website leads, history);
+Outbound → Overview (sends, bounce, replies, day-30 checklist); the dashboard
+(lead sources including *Outbound (Radar)*, pipeline from Radar accounts and
+outbound, and the account funnel from signal to won). The leads list filters
+`linked=radar|outbound|dnc` and `channel=outbound` open the leads behind each
+number.
