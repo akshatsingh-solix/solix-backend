@@ -18,9 +18,9 @@ from mongomock_motor import AsyncMongoMockClient  # noqa: E402
 
 import database  # noqa: E402
 
-import accounts, admin, auth, cache, chat, content, emailer, intent, leads_admin, press, server  # noqa: E402,E401
+import accounts, admin, auth, cache, chat, chat_leads, content, emailer, intent, leads_admin, press, server  # noqa: E402,E401
 
-MODULES = (accounts, admin, auth, chat, content, emailer, intent, leads_admin, press, server)
+MODULES = (accounts, admin, auth, chat, chat_leads, content, emailer, intent, leads_admin, press, server)
 PDF = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF"
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 
@@ -274,3 +274,11 @@ def test_form_before_first_beacon_still_links_browsing_and_campaign(client):
     lead = client.get("/api/admin/leads", headers=staff(client)).json()["items"][0]
     assert lead["product_scores"] == {"enterprise-ai": 3.0}
     assert lead["first_touch"]["utm_source"] == "linkedin" and lead["channel"] == "paid"
+
+
+def test_submission_list_is_staff_only(client):
+    # Submissions are people's contact details: the public API must not list them.
+    client.post("/api/submissions", json={"type": "demo", "email": "pat@corp.com", "name": "Pat"})
+    assert client.get("/api/submissions").status_code == 401
+    r = client.get("/api/submissions", headers=staff(client))
+    assert r.status_code == 200 and r.json()[0]["email"] == "pat@corp.com"

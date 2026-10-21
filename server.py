@@ -4,14 +4,14 @@ import asyncio
 import logging
 from typing import List, Optional, Literal
 
-from fastapi import FastAPI, APIRouter, Query, Request
+from fastapi import FastAPI, APIRouter, Depends, Query, Request
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from database import db, client, now_iso
 from emailer import notify_lead
-from auth import router as auth_router, seed_admin
+from auth import router as auth_router, seed_admin, get_current_admin
 from admin import router as admin_router
 from chat import router as chat_router
 from press import router as press_router
@@ -88,7 +88,9 @@ async def create_submission(payload: SubmissionCreate, request: Request):
     return Submission(**doc)
 
 
-@api_router.get("/submissions", response_model=List[Submission])
+# Staff only: these are people's names, emails and phone numbers. The admin uses
+# /api/admin/submissions; this older list stays for scripts that hold a token.
+@api_router.get("/submissions", response_model=List[Submission], dependencies=[Depends(get_current_admin)])
 async def list_submissions(type: Optional[SubmissionType] = Query(default=None), limit: int = Query(default=100, le=500)):
     query = {"type": type} if type else {}
     docs = await db.submissions.find(query, {"_id": 0}).sort("created_at", -1).to_list(limit)
