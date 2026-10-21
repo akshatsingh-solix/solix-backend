@@ -15,11 +15,12 @@ them; each says who does it and whether it costs anything.
 
 ## 1. Merge and deploy (admin, 10 minutes)
 
-1. Merge **solix-backend PR #17** first: Render redeploys the API. Wait until
-   `https://solix-backend-mf5w.onrender.com/api/` answers.
-2. Merge **Website PR #38**: the *Deploy frontend* workflow republishes the admin
-   to GitHub Pages in about 5 minutes.
-3. Sign in to the admin: **Radar** and **Outbound** appear in the section bar.
+Done on 2026-10-21: solix-backend #17, #18 (submissions lock) and #19
+(cross-links), then Website #38 and #39. Before any real email goes out, also
+merge **solix-backend #20**: it stops overlapping runs from sending the same
+email twice, which step 3b makes likely.
+
+Sign in to the admin: **Radar** and **Outbound** appear in the section bar.
 
 ## 2. Render environment (admin, 10 minutes)
 
@@ -30,7 +31,7 @@ Render → *solix-backend* → **Environment**. Generate random values with
 |---|---|---|
 | `PUBLIC_API_URL` | unsubscribe links, Instantly webhook | `https://solix-backend-mf5w.onrender.com` (check it isn't the older `solix-backend.onrender.com`) |
 | `UNSUBSCRIBE_SECRET` | signing unsubscribe links | random; set it so rotating `JWT_SECRET` never breaks old links |
-| `OPS_TOKEN` | optional external scheduler (`POST /api/ops/tick`) | random |
+| `OPS_TOKEN` | the external scheduler in step 3b (`POST /api/ops/tick`) | random; without it the tick answers 401 |
 | `GROQ_API_KEY` or `GEMINI_API_KEY` | openers, reply classification, deep dives | free key from console.groq.com or aistudio.google.com. Without one, openers come from the deep dive and replies are labelled by rules |
 | `SMTP_HOST` `SMTP_PORT` `SMTP_USER` `SMTP_PASSWORD` `EMAIL_FROM` (or `RESEND_API_KEY`) | owner alerts, digests, SMTP sending | your existing transport |
 | `CRUSTDATA_API_KEY` | paid job index | only if you buy credits |
@@ -40,8 +41,9 @@ Render → *solix-backend* → **Environment**. Generate random values with
 | `SLACK_WEBHOOK_REPLIES` / `_PIPELINE` / `_CONFLICTS` / `_WATCHDOG` | Slack alerts | or paste them in the admin (step 8) |
 
 Save; Render restarts the API. The API runs its own loop while awake (deliveries
-every minute, the sender every 10 minutes, checks every 30), and the Website
-repo's *Keep backend warm* workflow keeps it awake.
+every minute, the sender every 10 minutes, checks every 30). Render's free tier
+sleeps after 15 idle minutes, and the Website repo's *Keep backend warm*
+workflow actually fires every 30–45 minutes, so step 3b is needed.
 
 ## 3. Daily Radar job (admin, 10 minutes)
 
@@ -58,6 +60,20 @@ solix-backend on GitHub → **Settings → Secrets and variables → Actions**.
 - Test it: **Actions → Radar daily run → Run workflow** (steps `daily`). It then
   runs by itself at 05:00 UTC and emails each rep their digest.
 
+## 3b. Keep the API awake and the sender running (admin, 5 minutes, free)
+
+1. Sign up at **cron-job.org** (free).
+2. Create a cron job:
+   - URL `https://solix-backend-mf5w.onrender.com/api/ops/tick`, every 5 minutes.
+   - Under *Advanced*: request method **POST**, header `X-Ops-Token` with the
+     `OPS_TOKEN` value, timeout 30 seconds.
+3. **Test run**: expect `200` with JSON counts (`401` means the token doesn't
+   match Render's).
+
+Each call wakes the API and delivers queued Slack/Digiprise/email, runs the
+sender (within the send window and daily cap) and the health checks.
+Merge #20 first.
+
 ## 4. People and roles (admin, 10 minutes)
 
 Admin → **Settings**.
@@ -69,6 +85,9 @@ Admin → **Settings**.
   the Radar territory table (for example "Bo Deas"). This is how routed accounts
   turn into emails and digests. Reps who don't log in can be given emails in
   **Radar → Setup → Rep emails** instead.
+- An account's owner also becomes the owner of its unowned website leads
+  (logged on the lead). A lead already owned by someone else is never moved; it
+  is flagged in Slack #conflicts (step 8).
 
 ## 5. Radar (sales ops, 20 minutes)
 
@@ -120,8 +139,13 @@ auto-pause protects the domain.
 
 Admin → **Outbound → Health → Integrations**.
 
-- **Slack**: create incoming webhooks (Slack → Apps → *Incoming Webhooks*) for
-  replies, pipeline, conflicts and watchdog channels, and paste them.
+- **Slack**: create incoming webhooks (api.slack.com/apps → *Create app* →
+  *Incoming Webhooks* → *Add New Webhook*, one per channel) and paste them:
+  - **replies**: classified outbound replies;
+  - **pipeline**: inbound hand-offs from outbound, SQL/opportunity/won/lost,
+    new strong Radar accounts;
+  - **conflicts**: a lead owned by someone other than its account owner;
+  - **watchdog**: stalled jobs, bounce pauses, settings and LIA changes.
 - **Digiprise**: the endpoint URL from the Digiprise team.
 
 ## 9. Real sending (admin)
