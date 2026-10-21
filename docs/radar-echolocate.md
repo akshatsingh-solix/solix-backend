@@ -89,12 +89,18 @@ match, and also excludes it from automated outreach (the rep is working it).
 
 1. **Contacts** come from deep dives, CSV import or the account drawer, with
    their source recorded (GDPR Art. 14). Email is checked for a mail server;
-   with `REACHER_URL` set, the mailbox itself is verified.
+   with `REACHER_URL` set, the mailbox itself is verified. An address confirmed
+   another way (a reply, Seamless) can be **marked verified**, which records who
+   did it; a bounced or invalid address cannot.
 2. **Gate** (`compliance.gate`), checked at enrollment, approval and every send:
-   verified business email, name, title, lawful basis, not suppressed, not in
-   Germany or Poland, account not excluded, account has a signal and a score of
-   at least 30, a signed Legitimate Interest Assessment for the region, and not
-   already in another active sequence.
+   verified business email (a warning instead when Compliance allows unverified
+   addresses), name, title, lawful basis, not suppressed, not in Germany or
+   Poland, account not excluded, account has a signal and a score of at least
+   30, a signed Legitimate Interest Assessment for the region, and not already
+   in another active sequence. The region is the contact's country, else the
+   account's HQ, else its routed territory and signal countries (most Radar
+   accounts have no HQ on file). A sequence written for another region is
+   refused.
 3. **Personalisation**: a two-sentence opener grounded in the account's strongest
    signal or approved deep dive. It never names a competitor and never quotes
    prices, and it's rejected and replaced if it does.
@@ -141,7 +147,9 @@ match, and also excludes it from automated outreach (the rep is working it).
 - **Continuous**: inside the API, the outbox delivers every minute, the sender
   runs every 10 minutes, and the watchdog every 30 minutes. `POST /api/ops/tick`
   with `X-Ops-Token` lets an external scheduler drive the same work.
-- **Import** the original Leads Radar from **Radar → Import** (its `radar.html`
-  or JSON). Owner, Status and Notes columns are kept.
+- **Import** the original Leads Radar from **Radar → Setup → Import** (its
+  `radar.html` or JSON). Owner, Status and Notes columns are kept.
+- **Going live**: [`GO-LIVE.md`](GO-LIVE.md) lists every account, key and
+  setting, in order.
 - **Legacy**: `GET /api/admin/radar/legacy.json` returns the original page's
   JSON contract, and `export.xlsx` the workbook layout.
