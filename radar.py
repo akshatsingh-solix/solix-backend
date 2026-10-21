@@ -216,7 +216,7 @@ async def get_account(company_id: str, user: dict = Depends(get_current_admin)):
     signals = await _db().company_signals.find({"company_id": company_id}, {"_id": 0, "raw": 0}).sort([("posted_at", -1), ("first_seen_at", -1)]).to_list(1000)
     signals.sort(key=lambda s: (rm.STRENGTH_RANK.get(s.get("role_strength") or "Unrated", 3) if s["type"] == "competitor_job" else 4, str(s.get("posted_at") or s.get("first_seen_at") or "")), reverse=False)
     research = await _db().radar_research.find({"company_id": company_id}, {"_id": 0}).sort("created_at", -1).to_list(10)
-    leads = await _db().leads.find({"$or": [{"company_id": company_id}, {"id": {"$in": c.get("lead_ids") or []}}]}, {"_id": 0, "id": 1, "email": 1, "name": 1, "job_title": 1, "stage": 1, "score": 1, "primary_line": 1, "last_activity_at": 1}).to_list(100)
+    leads = await _db().leads.find({"$or": [{"company_id": company_id}, {"id": {"$in": c.get("lead_ids") or []}}]}, {"_id": 0, "id": 1, "email": 1, "name": 1, "job_title": 1, "stage": 1, "score": 1, "primary_line": 1, "last_activity_at": 1, "owner": 1, "channel": 1}).to_list(100)
     contacts = await _db().contacts.find({"company_id": company_id}, {"_id": 0}).sort("created_at", 1).to_list(200)
     enrollments = await _db().enrollments.find({"company_id": company_id}, {"_id": 0}).sort("created_at", -1).to_list(100)
     for e in enrollments:  # the rendered copy stays out of the drawer payload; only its length is shown

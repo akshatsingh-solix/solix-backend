@@ -182,6 +182,31 @@ def test_inbound_lead_links_to_account_and_deal_excludes_it(client):
     assert "website" in g["signal_types"]
 
 
+def test_lead_before_account_links_by_domain_and_takes_owner(client):
+    client.post("/api/submissions", json={"type": "demo", "email": "ops@initech.example", "name": "Ira Ops"})
+    lead = run(_mock_db.leads.find_one({"email": "ops@initech.example"}, {"_id": 0}))
+    assert not lead.get("company_id") and not lead.get("owner")
+    acc = client.post("/api/admin/radar/accounts", json={"name": "Initech", "domain": "initech.example", "country": "United States"}).json()
+    lead = run(_mock_db.leads.find_one({"email": "ops@initech.example"}, {"_id": 0}))
+    assert lead["company_id"] == acc["id"] and lead["id"] in acc["lead_ids"]
+    client.patch(f"/api/admin/radar/accounts/{acc['id']}", json={"owner": "pat@example.com"})
+    lead = run(_mock_db.leads.find_one({"email": "ops@initech.example"}, {"_id": 0}))
+    assert lead["owner"] == "pat@example.com" and lead["history"][-1]["action"] == "owner"
+    # Someone else's lead is flagged in #conflicts, never moved.
+    client.patch(f"/api/admin/leads/{lead['id']}", json={"owner": "sam@example.com"})
+    client.patch(f"/api/admin/radar/accounts/{acc['id']}", json={"notes": "touch"})
+    assert run(_mock_db.leads.find_one({"id": lead["id"]}))["owner"] == "sam@example.com"
+    assert run(_mock_db.ops_outbox.find_one({"event": "owner_conflict", "payload.channel": "conflicts"}))
+    assert run(_mock_db.ops_outbox.find_one({"event": "lead.updated"})) is None  # Digiprise isn't configured
+
+
+def test_channel_for_outbound_sourced_leads():
+    import scoring
+    assert scoring.channel_for({"outbound": True}) == "outbound"
+    assert scoring.channel_for({"landing": "radar"}) == "outbound"  # leads promoted before the channel existed
+    assert scoring.channel_for({"landing": "/pricing"}) == "direct"
+
+
 def test_research_queue_without_a_model_drafts_a_rules_brief(client):
     acme = _company(client, "Acme Mutual")
     r = client.post(f"/api/admin/radar/accounts/{acme['id']}/research")
@@ -307,9 +332,37 @@ def test_enroll_approve_send_reply_flow(client, monkeypatch):
     assert e["status"] == "replied"
     lead = run(_mock_db.leads.find_one({"email": "jordan@acmemutual.example"}))
     assert lead["stage"] == "mql" and lead["company_id"] == acme["id"] and "outbound" in lead["tags"]
+    assert lead["channel"] == "outbound" and lead["owner"] == "pat@example.com"
+    assert run(_mock_db.contacts.find_one({"email": "jordan@acmemutual.example"}))["lead_id"] == lead["id"]
+    d = client.get(f"/api/admin/leads/{lead['id']}").json()
+    assert d["account"]["id"] == acme["id"] and len(d["outbound"]["enrollments"]) == 1 and d["outbound"]["replies"][0]["label"] == "interested"
+    kinds = {(t["kind"], t["type"]) for t in d["timeline"]}
+    assert {("outbound", "enrolled"), ("outbound", "sent"), ("outbound", "reply")} <= kinds
+    inf = client.get("/api/admin/reports/overview").json()["influence"]
+    assert inf["outbound_sourced"]["leads"] == 1 and inf["radar_accounts"]["leads"] >= 2 and inf["sends"] == 1 and inf["positive_replies"] == 1
+    assert [r["status"] for r in inf["account_funnel"]] == ["signal", "contacted", "replied", "meeting_booked", "opportunity", "won"]
     assert _company(client, "Acme Mutual")["status"] == "replied"
     k = client.get("/api/admin/outbound/kpis").json()
     assert k["sends"] == 1 and k["positive"] == 1 and k["dod"]["qualified_reply_this_week"]
+
+
+def test_inbound_form_stops_outbound_and_links_the_person(client, monkeypatch):
+    monkeypatch.setattr(outbound, "verify_email", _valid)
+    acme = _company(client, "Acme Mutual")
+    c = client.post("/api/admin/outbound/contacts", json={"name": "Lee Park", "email": "lee@acmemutual.example", "title": "Chief Data Officer", "company_id": acme["id"], "country": "United States"}).json()
+    us = next(s for s in client.get("/api/admin/outbound/sequences").json() if s["region"] == "us")
+    r = client.post("/api/admin/outbound/enrollments", json={"contact_ids": [c["id"]], "sequence_id": us["id"]}).json()
+    assert r["created"], r
+    client.post("/api/submissions", json={"type": "demo", "email": "lee@acmemutual.example", "name": "Lee Park"})
+    e = run(_mock_db.enrollments.find_one({"id": r["created"][0]["id"]}))
+    assert e["status"] == "stopped" and "requested a demo" in e["history"][-1]["detail"]
+    lead = run(_mock_db.leads.find_one({"email": "lee@acmemutual.example"}))
+    assert run(_mock_db.contacts.find_one({"id": c["id"]}))["lead_id"] == lead["id"] and lead["company_id"] == acme["id"]
+    assert run(_mock_db.ops_outbox.find_one({"event": "inbound_handoff"}))
+    # The gate sees the funnel: a person already in a live deal can't be cold-emailed.
+    client.patch(f"/api/admin/leads/{lead['id']}", json={"stage": "sql"})
+    assert any("sales pipeline" in x for x in client.get(f"/api/admin/compliance/gate/{c['id']}").json()["reasons"])
+    assert run(_mock_db.ops_outbox.find_one({"event": "lead_stage", "payload.channel": "pipeline"}))
 
 
 def test_unsubscribe_link_and_webhook_bounce(client):
@@ -317,6 +370,9 @@ def test_unsubscribe_link_and_webhook_bounce(client):
     assert client.get("/api/outbound/unsubscribe", params={"t": token}).status_code == 200
     assert client.post("/api/outbound/unsubscribe", data={"t": token}).status_code == 200
     assert run(compliance.is_suppressed("jordan@acmemutual.example")) == "unsubscribed"
+    lead = run(_mock_db.leads.find_one({"email": "jordan@acmemutual.example"}))
+    assert lead["do_not_contact"] == "unsubscribed" and lead["history"][-1]["action"] == "suppressed"
+    assert client.get(f"/api/admin/leads/{lead['id']}").json()["suppressed"]["reason"] == "unsubscribed"
     assert client.post("/api/outbound/unsubscribe", data={"t": token + "x"}).status_code == 400
     bad = client.post("/api/outbound/webhooks/instantly", json={"event_type": "email_bounced", "lead_email": "max@acmemutual.example"})
     assert bad.status_code == 401
@@ -331,6 +387,10 @@ def test_erasure_cascades_and_keeps_only_a_hash(client):
     assert run(_mock_db.contacts.find_one({"email": "jordan@acmemutual.example"})) is None
     sup = run(_mock_db.suppression.find_one({"email_hash": compliance.email_hash("jordan@acmemutual.example")}))
     assert sup["reason"] == "gdpr_erasure" and sup["email"] is None
+    assert r["counts"]["account_history"] >= 1
+    acme = run(_mock_db.companies.find_one({"name": "Acme Mutual Insurance"}))
+    assert not any("jordan" in (h.get("detail") or "").lower() or "Jordan Smith" in (h.get("detail") or "") for h in acme["history"])
+    assert run(_mock_db.ops_outbox.find_one({"payload.email": "jordan@acmemutual.example", "target": {"$nin": ["instantly_delete", "instantly_block"]}})) is None
 
 
 def test_bounce_rate_pauses_sending_and_watchdog_reports(client):

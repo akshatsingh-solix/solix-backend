@@ -192,3 +192,17 @@ def test_capacity_waitlist_admin_stats_and_export(client):
     from openpyxl import load_workbook
     assert load_workbook(io.BytesIO(x.content))["Registrations"].max_row == 3
     assert client.get("/api/admin/events", headers=h).json()[0]["registered"] == 1
+
+
+def test_check_in_scores_the_lead_once(client):
+    h = make_free(client)
+    reg(client)
+    lead = client.get("/api/admin/leads", headers=h).json()["items"][0]
+    rid = client.get(f"/api/admin/events/{SLUG}/registrations", headers=h).json()["items"][0]["id"]
+    client.patch(f"/api/admin/events/{SLUG}/registrations/{rid}", json={"checked_in": True}, headers=h)
+    d = client.get(f"/api/admin/leads/{lead['id']}", headers=h).json()
+    assert d["lead"]["score"] > lead["score"]
+    assert any(t["kind"] == "attended" for t in d["timeline"]) and any(t["kind"] == "activity" and t["type"] == "attended" for t in d["timeline"])
+    assert d["events"][0]["checked_in"] is True
+    client.patch(f"/api/admin/events/{SLUG}/registrations/{rid}", json={"checked_in": True}, headers=h)  # again: no double count
+    assert client.get(f"/api/admin/leads/{lead['id']}", headers=h).json()["lead"]["score"] == d["lead"]["score"]

@@ -284,6 +284,11 @@ async def record_submission(sub: dict, *, visitor_id: Optional[str] = None, topi
                 result["company_id"] = cid
         except Exception:
             logger.exception("radar link failed for lead %s", lead["id"])
+        try:  # someone in an outbound sequence engaged here: stop emailing them and hand off
+            import outbound
+            await outbound.on_inbound(result, stype)
+        except Exception:
+            logger.exception("outbound hand-off failed for lead %s", lead["id"])
     if result and sub.get("id"):
         await db.submissions.update_one({"id": sub["id"]}, {"$set": {
             "lead_id": lead["id"], "lead_stage": result.get("stage"), "primary_line": result.get("primary_line"),
