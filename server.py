@@ -24,6 +24,10 @@ from delivery import public as delivery_router, admin as delivery_admin_router, 
 from migrate import router as migrate_router, resume_interrupted
 from site_settings import public as site_router, admin as site_admin_router
 from seo import router as seo_router
+from radar import router as radar_router
+from outbound import router as outbound_router, webhooks as outbound_webhooks
+from compliance import router as compliance_router, public as outbound_public
+import ops
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("solix")
@@ -109,6 +113,13 @@ app.include_router(migrate_router)
 app.include_router(site_router)
 app.include_router(site_admin_router)
 app.include_router(seo_router)
+app.include_router(radar_router)
+app.include_router(outbound_router)
+app.include_router(outbound_webhooks)
+app.include_router(outbound_public)
+app.include_router(compliance_router)
+app.include_router(ops.router)
+app.include_router(ops.public)
 
 # Compress JSON/CSV responses; tiny responses aren't worth the CPU.
 app.add_middleware(GZipMiddleware, minimum_size=800)
@@ -164,10 +175,46 @@ async def on_startup():
         db.seo_snapshots.create_index("geo", unique=True),
         db.seo_cache.create_index([("kind", 1), ("key", 1)], unique=True),
         db.seo_ai_runs.create_index("ran_at"),
+        # Radar + EchoLocate.
+        db.leads.create_index("company_id", sparse=True),
+        db.companies.create_index("id", unique=True),
+        db.companies.create_index("key"),
+        db.companies.create_index("alias_keys"),
+        db.companies.create_index("domains"),
+        db.companies.create_index([("owner", 1), ("strength", 1)]),
+        db.companies.create_index([("score", -1)]),
+        db.company_signals.create_index("dedupe_key", unique=True),
+        db.company_signals.create_index([("company_id", 1), ("posted_at", -1)]),
+        db.company_signals.create_index([("type", 1), ("first_seen_at", -1)]),
+        db.radar_research.create_index("id", unique=True),
+        db.radar_research.create_index([("company_id", 1), ("created_at", -1)]),
+        db.radar_research.create_index([("status", 1), ("created_at", 1)]),
+        db.radar_seen.create_index([("user_id", 1), ("company_id", 1)], unique=True),
+        db.contacts.create_index("id", unique=True),
+        db.contacts.create_index("email", sparse=True),
+        db.contacts.create_index("company_id"),
+        db.sequences.create_index("id", unique=True),
+        db.enrollments.create_index("id", unique=True),
+        db.enrollments.create_index([("status", 1), ("next_send_at", 1)]),
+        db.enrollments.create_index("contact_id"),
+        db.sends.create_index([("sent_at", -1)]),
+        db.sends.create_index("contact_id"),
+        db.sends.create_index([("sequence_id", 1), ("variant", 1)]),
+        db.reply_log.create_index([("received_at", -1)]),
+        db.reply_log.create_index("contact_id"),
+        db.suppression.create_index("email_hash", unique=True),
+        db.suppression.create_index("domain", sparse=True),
+        db.ops_runs.create_index([("job", 1), ("started_at", -1)]),
+        db.ops_outbox.create_index([("status", 1), ("next_attempt_at", 1)]),
+        db.ops_outbox.create_index("key", sparse=True),
+        db.ops_alerts.create_index([("code", 1), ("created_at", -1)]),
+        db.webhook_events.create_index("received_at"),
     )
     await seed_admin()
     await resume_interrupted()
     asyncio.create_task(_rescore_loop())
+    # Outbox, outbound sender and watchdog (Radar + EchoLocate); OPS_LOOP=0 turns it off.
+    ops.start_background()
 
 
 async def _rescore_loop():
@@ -178,6 +225,11 @@ async def _rescore_loop():
             await rescore_all()
         except Exception:
             logger.exception("periodic rescore failed")
+        try:
+            import radar_service  # decay moves Radar account scores too
+            await radar_service.recompute_all()
+        except Exception:
+            logger.exception("periodic radar recompute failed")
 
 
 @app.on_event("shutdown")
