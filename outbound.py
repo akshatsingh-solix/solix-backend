@@ -344,7 +344,18 @@ async def _send_instantly(enr: dict, contact: dict, sequence: dict, settings: di
     return res.get("id") or "instantly"
 
 
+async def _claim(enr: dict) -> bool:
+    """Only one run sends a given step: the in-API loop, "Run now" and an external tick can overlap."""
+    now = _now()
+    got = await _db().enrollments.find_one_and_update(
+        {"id": enr["id"], "step_index": enr["step_index"], "$or": [{"claim_until": None}, {"claim_until": {"$lt": now.isoformat()}}]},
+        {"$set": {"claim_until": (now + timedelta(minutes=10)).isoformat()}})
+    return got is not None
+
+
 async def send_step(enr: dict, settings: dict) -> str:
+    if not await _claim(enr):
+        return "skipped"
     contact = await _db().contacts.find_one({"id": enr["contact_id"]}, {"_id": 0})
     company = await _db().companies.find_one({"id": enr.get("company_id")}, {"_id": 0}) if enr.get("company_id") else None
     if not contact:
@@ -365,7 +376,7 @@ async def send_step(enr: dict, settings: dict) -> str:
         send["provider_ref"] = await _send_instantly(enr, contact, sequence, settings)
         send["status"] = "handed_off"
         await _db().sends.insert_one(dict(send))
-        await _set_status(enr, "active", "system", "Handed to Instantly (it sends every step)", {"step_index": len(enr["steps"]), "handed_off_at": now_iso()})
+        await _set_status(enr, "active", "system", "Handed to Instantly (it sends every step)", {"step_index": len(enr["steps"]), "handed_off_at": now_iso(), "claim_until": None})
     else:
         if provider == "smtp":
             from emailer import send_email
@@ -379,11 +390,11 @@ async def send_step(enr: dict, settings: dict) -> str:
         await _db().sends.insert_one(dict(send))
         nxt = enr["step_index"] + 1
         if nxt >= len(enr["steps"]):
-            await _set_status(enr, "completed", "system", f"Step {nxt} sent; sequence finished", {"step_index": nxt})
+            await _set_status(enr, "completed", "system", f"Step {nxt} sent; sequence finished", {"step_index": nxt, "claim_until": None})
         else:
             started = datetime.fromisoformat(enr.get("first_sent_at") or now_iso())
             due = (started + timedelta(days=enr["steps"][nxt]["day"])).isoformat()
-            await _set_status(enr, "active", "system", f"Step {nxt} sent", {"step_index": nxt, "next_send_at": due, "first_sent_at": enr.get("first_sent_at") or send["sent_at"]})
+            await _set_status(enr, "active", "system", f"Step {nxt} sent", {"step_index": nxt, "next_send_at": due, "first_sent_at": enr.get("first_sent_at") or send["sent_at"], "claim_until": None})
     if company and company.get("status") in rm.SYSTEM_STATUSES:
         await _db().companies.update_one({"id": company["id"]}, {"$set": {"status": "contacted"}})
         await rs.add_history(company["id"], "system", "outbound", f"First email {'handed to Instantly' if provider == 'instantly' else provider} for {contact.get('name')}")
@@ -444,10 +455,12 @@ async def tick() -> dict:
                 continue
             try:
                 result = await send_step(e, settings)
+                if result == "skipped":  # another run has it
+                    continue
                 counts["stopped" if result == "stopped" else "sent"] += 1
             except Exception as exc:  # noqa: BLE001 - one bad address must not stop the batch
                 counts["errors"] += 1
-                await _set_status(e, e["status"], "system", f"Send failed: {str(exc)[:200]}", {"next_send_at": (now + timedelta(hours=2)).isoformat(), "last_error": str(exc)[:300]})
+                await _set_status(e, e["status"], "system", f"Send failed: {str(exc)[:200]}", {"next_send_at": (now + timedelta(hours=2)).isoformat(), "last_error": str(exc)[:300], "claim_until": None})
         run["counts"] = counts
     return counts
 

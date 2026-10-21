@@ -150,6 +150,11 @@ async def process_outbox(limit: int = 50) -> dict:
         return counts
     async with httpx.AsyncClient() as client:
         for item in items:
+            # Claim it first so overlapping runs (in-API loop, external tick, "Run now") deliver it once.
+            lease = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+            if not await _db().ops_outbox.find_one_and_update(
+                    {"id": item["id"], "status": "pending", "$or": [{"lease_until": None}, {"lease_until": {"$lt": now_iso()}}]}, {"$set": {"lease_until": lease}}):
+                continue
             try:
                 result = await _deliver(client, item, cfg)
                 await _db().ops_outbox.update_one({"id": item["id"]}, {"$set": {"status": result, "done_at": now_iso(), "attempts": item["attempts"] + 1}})
@@ -161,7 +166,7 @@ async def process_outbox(limit: int = 50) -> dict:
                     counts["failed"] += 1
                 else:
                     nxt = (datetime.now(timezone.utc) + timedelta(minutes=RETRY_MINUTES[n - 1])).isoformat()
-                    await _db().ops_outbox.update_one({"id": item["id"]}, {"$set": {"attempts": n, "error": str(exc)[:300], "next_attempt_at": nxt}})
+                    await _db().ops_outbox.update_one({"id": item["id"]}, {"$set": {"attempts": n, "error": str(exc)[:300], "next_attempt_at": nxt, "lease_until": None}})
                     counts["retry"] += 1
     return counts
 
