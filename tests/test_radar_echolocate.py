@@ -356,11 +356,14 @@ def test_inbound_form_stops_outbound_and_links_the_person(client, monkeypatch):
     us = next(s for s in client.get("/api/admin/outbound/sequences").json() if s["region"] == "us")
     r = client.post("/api/admin/outbound/enrollments", json={"contact_ids": [c["id"]], "sequence_id": us["id"]}).json()
     assert r["created"], r
+    # Our first email reached them before they filled in the form.
+    run(_mock_db.sends.insert_one({"id": "lee-1", "email": "lee@acmemutual.example", "contact_id": c["id"], "status": "simulated", "sent_at": "2026-01-01T09:00:00+00:00", "step": 1}))
     client.post("/api/submissions", json={"type": "demo", "email": "lee@acmemutual.example", "name": "Lee Park"})
     e = run(_mock_db.enrollments.find_one({"id": r["created"][0]["id"]}))
     assert e["status"] == "stopped" and "requested a demo" in e["history"][-1]["detail"]
     lead = run(_mock_db.leads.find_one({"email": "lee@acmemutual.example"}))
     assert run(_mock_db.contacts.find_one({"id": c["id"]}))["lead_id"] == lead["id"] and lead["company_id"] == acme["id"]
+    assert lead["channel"] == "outbound" and "outbound" in lead["tags"]  # first touch was the email, not the form
     assert run(_mock_db.ops_outbox.find_one({"event": "inbound_handoff"}))
     # The gate sees the funnel: a person already in a live deal can't be cold-emailed.
     client.patch(f"/api/admin/leads/{lead['id']}", json={"stage": "sql"})

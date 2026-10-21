@@ -188,7 +188,7 @@ async def rollup_lead(lead_id: str, settings: Optional[dict] = None) -> Optional
         if v.get("first_touch"):
             touches.append(v["first_touch"])
     first_touch = lead.get("first_touch") or {}
-    if touches and not any(first_touch.get(k) for k in ("referrer", "utm_source", "utm_medium", "chat")):
+    if touches and not any(first_touch.get(k) for k in ("referrer", "utm_source", "utm_medium", "chat", "outbound")):
         # The form only knew its own page; the visitor's real landing is better attribution.
         first_touch = min(touches, key=lambda t: t.get("at") or "")
         lead["first_touch"] = first_touch

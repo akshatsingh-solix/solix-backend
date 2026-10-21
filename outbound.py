@@ -558,12 +558,30 @@ async def attach_lead(contact: dict) -> dict:
     return contact
 
 
+async def _credit_outbound(lead: dict) -> None:
+    """Our email reached them before they became a lead with no better-known source: outbound is the first touch."""
+    first = await _db().sends.find_one({"email": lead["email"], "bounced": {"$ne": True}, "status": {"$in": ["sent", "simulated"]}},
+                                       {"_id": 0, "sent_at": 1}, sort=[("sent_at", 1)])
+    if not first:
+        return
+    import intent
+    ft = lead.get("first_touch") or {}
+    sets = {"tags": sorted(set(lead.get("tags") or []) | {"outbound"})}
+    known = any(ft.get(k) for k in ("referrer", "utm_source", "utm_medium", "chat", "outbound"))
+    if not known and first["sent_at"] < (lead.get("created_at") or ""):
+        sets["first_touch"] = {"outbound": True, "source": "outbound", "at": first["sent_at"], "landing": ft.get("landing")}
+    await _db().leads.update_one({"id": lead["id"]}, {"$set": sets})
+    if "first_touch" in sets:
+        await intent.rollup_lead(lead["id"])
+
+
 async def on_inbound(lead: dict, stype: str) -> int:
     """Someone in outbound engaged on the website: stop emailing them and hand them to the owner."""
     email = (lead.get("email") or "").lower()
     if not email:
         return 0
     await _db().contacts.update_many({"email": email}, {"$set": {"lead_id": lead["id"]}})
+    await _credit_outbound(lead)
     action = INBOUND_ACTIONS.get(stype)
     if not action:  # a newsletter sign-up isn't a reason to stop
         return 0
