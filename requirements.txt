@@ -38,3 +38,5 @@ markdownify>=0.13.1
 defusedxml>=0.7.1
 # SEO topic deep dives: article text extraction when PARALLEL_API_KEY is not set
 trafilatura>=2.0
+# Radar DNS fingerprints and EchoLocate email (MX) verification.
+dnspython>=2.6.1

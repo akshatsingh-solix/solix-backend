@@ -130,7 +130,7 @@ def _from_header(addr: str) -> str:
     return formataddr((EMAIL_FROM_NAME, addr))
 
 
-def _send_smtp(cfg: dict, to: str, subject: str, html: str, reply_to: str | None, attachments: list[dict]) -> str:
+def _send_smtp(cfg: dict, to: str, subject: str, html: str, reply_to: str | None, attachments: list[dict], headers: dict | None = None) -> str:
     import smtplib
     import ssl
     from email.message import EmailMessage
@@ -143,6 +143,8 @@ def _send_smtp(cfg: dict, to: str, subject: str, html: str, reply_to: str | None
     msg["Message-ID"] = make_msgid(domain=cfg["from"].split("@")[-1])
     if reply_to:
         msg["Reply-To"] = reply_to
+    for name, value in (headers or {}).items():
+        msg[name] = value
     msg.set_content("This message is best viewed in an email app that shows HTML.")
     msg.add_alternative(html, subtype="html")
     for a in attachments:
@@ -161,7 +163,7 @@ def _send_smtp(cfg: dict, to: str, subject: str, html: str, reply_to: str | None
     return msg["Message-ID"]
 
 
-async def send_email(*, to: str, subject: str, html: str, reply_to: str | None = None, attachments: list[dict] | None = None) -> str | None:
+async def send_email(*, to: str, subject: str, html: str, reply_to: str | None = None, attachments: list[dict] | None = None, headers: dict | None = None) -> str | None:
     """Send one email. `attachments` items are {name, content_type, data: bytes};
     they are dropped (links in the body still work) on transports without support."""
     _assert_safe_email(subject, html)
@@ -170,12 +172,14 @@ async def send_email(*, to: str, subject: str, html: str, reply_to: str | None =
     attachments = attachments or []
     if provider == "smtp":
         import asyncio
-        return await asyncio.to_thread(_send_smtp, _smtp_config(), to, subject, html, reply_to, attachments)
+        return await asyncio.to_thread(_send_smtp, _smtp_config(), to, subject, html, reply_to, attachments, headers)
     if provider == "resend":
         import base64
         payload = {"from": _from_header(os.environ["EMAIL_FROM"]), "to": [to], "subject": subject, "html": html}
         if reply_to:
             payload["reply_to"] = reply_to
+        if headers:
+            payload["headers"] = headers
         if attachments:
             payload["attachments"] = [{"filename": a["name"], "content": base64.b64encode(a["data"]).decode()} for a in attachments]
         async with httpx.AsyncClient(timeout=30) as client:

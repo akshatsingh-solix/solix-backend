@@ -20,8 +20,9 @@ MAX_ATTEMPTS = 5
 LOCKOUT = timedelta(minutes=15)
 
 # Staff roles. admin: everything; sales: work leads; editor: publish content;
-# viewer: read-only leads and reports (leadership).
-ROLES = ("admin", "sales", "editor", "viewer")
+# viewer: read-only leads and reports (leadership); compliance: suppression,
+# erasure and the LIA register for outbound.
+ROLES = ("admin", "sales", "editor", "viewer", "compliance")
 
 
 def hash_password(password: str) -> str:

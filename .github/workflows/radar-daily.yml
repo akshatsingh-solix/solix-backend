@@ -1,0 +1,58 @@
+name: Radar daily run
+
+# Collects competitor signals, rescores and routes every account, drafts deep
+# dives for the hottest ones and emails each owner their digest. Runs here, not
+# in the API, because the free web instance is small and restarts on deploy.
+#
+# Needs repository secrets MONGO_URL and DB_NAME (the same values as the API),
+# plus any of GROQ_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY for research,
+# CRUSTDATA_API_KEY for the paid job index, and SMTP_* or RESEND_API_KEY with
+# EMAIL_FROM for digests. Logs print counts only: this repository's logs are public.
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+    inputs:
+      steps:
+        description: "daily, collect, score, research or digest"
+        default: daily
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: radar-daily
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Run the Radar
+        env:
+          MONGO_URL: ${{ secrets.MONGO_URL }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          JWT_SECRET: not-used-by-the-runner
+          ADMIN_EMAIL: runner@example.com
+          ADMIN_PASSWORD: not-used-by-the-runner
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          CRUSTDATA_API_KEY: ${{ secrets.CRUSTDATA_API_KEY }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          SITE_URL: ${{ vars.SITE_URL }}
+        run: python radar_run.py "${{ github.event.inputs.steps || 'daily' }}"

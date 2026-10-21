@@ -276,6 +276,14 @@ async def record_submission(sub: dict, *, visitor_id: Optional[str] = None, topi
         "last_submission_type": stype, "submissions_count": (lead.get("submissions_count") or 0) + 1,
     }})
     result = await rollup_lead(lead["id"], settings)
+    if result:
+        try:  # attach the lead to its Radar account (same email domain); never blocks the lead
+            import radar_service
+            cid = await radar_service.link_lead(result)
+            if cid:
+                result["company_id"] = cid
+        except Exception:
+            logger.exception("radar link failed for lead %s", lead["id"])
     if result and sub.get("id"):
         await db.submissions.update_one({"id": sub["id"]}, {"$set": {
             "lead_id": lead["id"], "lead_stage": result.get("stage"), "primary_line": result.get("primary_line"),

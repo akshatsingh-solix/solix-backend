@@ -69,3 +69,18 @@ services:
         sync: false
       - key: EMAIL_FROM
         sync: false
+      # Radar + EchoLocate (optional). See .env.example.
+      - key: CRUSTDATA_API_KEY
+        sync: false
+      - key: INSTANTLY_API_KEY
+        sync: false
+      - key: INSTANTLY_WEBHOOK_SECRET
+        generateValue: true
+      - key: REACHER_URL
+        sync: false
+      - key: DIGIPRISE_URL
+        sync: false
+      - key: DIGIPRISE_TOKEN
+        sync: false
+      - key: OPS_TOKEN
+        generateValue: true

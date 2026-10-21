@@ -194,6 +194,9 @@ async def _apply_patch(lead: dict, body: LeadPatch, user: dict) -> dict:
         changes["updated_at"] = now_iso()
         await db.leads.update_one({"id": lead["id"]}, {"$set": changes})
         cache.bump("reports")
+        if "stage" in changes and lead.get("company_id"):
+            import radar_service  # a deal stage moves its Radar account forward and sets exclusions
+            await radar_service.on_lead_changed({**lead, **changes})
     return {**lead, **changes}
 
 

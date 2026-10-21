@@ -39,6 +39,21 @@ fully with just MongoDB configured.
   in-process cache for published content and reports, and a 180-day TTL on
   raw events.
 
+## Radar and EchoLocate
+
+- **Radar** (Admin → Radar): companies with a live competitive signal
+  (competitor job postings, problem postings, DNS/certificate fingerprints,
+  filings, tenders, news, website intent), scored, routed to the right rep,
+  researched with cited deep dives, and tracked per viewer. It imports the
+  original Leads Radar (`radar.html`) and exports its JSON and workbook layout.
+- **EchoLocate** (Admin → Outbound): verified contacts, a compliance gate
+  (suppression, Germany/Poland, LIA, exclusions, confidence), signal-grounded
+  sequences with A/B variants and human approval, sending via SMTP or Instantly,
+  reply classification, lead writeback, Slack/Digiprise pushes, bounce
+  auto-pause, a watchdog and weekly learning.
+- Daily job: `.github/workflows/radar-daily.yml` (needs the `MONGO_URL` and
+  `DB_NAME` secrets). Full method: [`docs/radar-echolocate.md`](docs/radar-echolocate.md).
+
 ## Sol, the AI concierge
 
 Sol answers visitors in the site's chat widget on free-tier models.
