@@ -80,6 +80,9 @@ services:
         generateValue: true
       - key: REACHER_URL
         sync: false
+      # Radar web research and page reading (1,000 free credits a month); Parallel is the backup.
+      - key: FIRECRAWL_API_KEY
+        sync: false
       # Optional: business emails and decision makers for Radar accounts (25 free searches a month).
       - key: HUNTER_API_KEY
         sync: false

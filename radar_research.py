@@ -165,7 +165,7 @@ async def _draft(company: dict, sources: List[dict]) -> dict:
     facts = (f"Account: {company['name']}\nDomains: {', '.join(company.get('domains') or []) or 'unknown'}\nTerritory: {company.get('territory')}\n"
              f"Competitor products seen: {', '.join(company.get('competitors') or []) or 'none named'}\nSignal types: {', '.join(company.get('signal_types') or [])}\n"
              f"Primary Solix product fit: {company.get('primary_product') or 'unknown'}")
-    src_block = "\n\n".join(f"[{s['n']}] {s['title']} ({s.get('date') or 'undated'}) {s.get('url') or ''}\n{(s.get('text') or '')[:1400 if s['kind'].startswith('web') else 700]}"
+    src_block = "\n\n".join(f"[{s['n']}] {s['title']} ({s.get('date') or 'undated'}) {s.get('url') or ''}\n{(s.get('text') or '')[:2500 if s['kind'] == 'web:people' else 1400 if s['kind'].startswith('web') else 700]}"
                               for s in sources)
     user = f"{facts}\n\nSOURCES\n{src_block or '(no sources)'}\n\nSOLIX KNOWLEDGE\n{kb or '(none)'}\n\nReturn the JSON object now."
     text, provider, model = await _complete(SYSTEM, user)

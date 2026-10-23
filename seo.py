@@ -34,6 +34,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+import firecrawl_api
 from auth import get_current_admin
 from database import db, now_iso
 
@@ -849,6 +850,11 @@ DEEP_SCHEMA = """{
 }"""
 
 
+def _why(exc: Exception) -> str:
+    import radar_intel  # the provider's own reason ("Firecrawl returned 402: ..."), shared with the Radar
+    return radar_intel.why(exc)
+
+
 async def parallel_search(client: httpx.AsyncClient, topic: str, objective: str) -> List[dict]:
     r = await client.post(f"{PARALLEL_URL}/search", headers={"x-api-key": os.environ["PARALLEL_API_KEY"]}, timeout=60, json={
         "objective": objective,
@@ -959,13 +965,21 @@ async def deep_dive(body: DeepDiveBody):
     async with httpx.AsyncClient(headers=UA, follow_redirects=True) as client:
         radar = await gather_topic(client, topic, brands)
         found: List[dict] = []
-        if os.environ.get("PARALLEL_API_KEY"):
+        parallel_ok = bool(os.environ.get("PARALLEL_API_KEY"))
+        if parallel_ok:
             try:
                 found = await parallel_search(client, topic, objective)
             except (httpx.HTTPError, ValueError) as e:
-                notes.append(f"Parallel search failed ({e.__class__.__name__}); using the news radar only.")
-        else:
-            notes.append("Add PARALLEL_API_KEY for expert and analyst sources and full-text extraction of JavaScript-heavy pages.")
+                parallel_ok = False
+                notes.append(f"Parallel search failed ({_why(e)}).")
+        # Firecrawl when Parallel isn't set up or failed: one search (2 credits), and later up to 3 page reads.
+        if not found and firecrawl_api.available():
+            try:
+                found = [{**x, "via": "firecrawl"} for x in await firecrawl_api.search(client, f"{topic} expert analysis", limit=8, tbs="qdr:m")]
+            except (httpx.HTTPError, ValueError) as e:
+                notes.append(f"Firecrawl search failed ({_why(e)}); using the news radar only.")
+        elif not found and not parallel_ok:
+            notes.append("Add FIRECRAWL_API_KEY (or PARALLEL_API_KEY) for expert and analyst sources and full-text extraction of JavaScript-heavy pages.")
         # Expert-leaning sources first, then the rest of the radar (Reddit threads are opinions, not articles).
         radar_items = sorted([i for i in radar["top"] if "reddit.com" not in (i.get("url") or "")], key=lambda i: i["kind"] != "analysts")
         candidates, seen = [], set()
@@ -977,7 +991,7 @@ async def deep_dive(body: DeepDiveBody):
         candidates = candidates[:8]
 
         full: Dict[str, dict] = {}
-        if candidates and os.environ.get("PARALLEL_API_KEY"):
+        if candidates and parallel_ok:
             try:
                 full = await parallel_extract(client, [c["url"] for c in candidates], objective)
             except (httpx.HTTPError, ValueError):
@@ -993,6 +1007,12 @@ async def deep_dive(body: DeepDiveBody):
             for url, got in await asyncio.gather(*(fetch(c) for c in missing)):
                 if got and len(got["text"]) > 400:
                     full[url] = got
+        # Pages a plain fetch couldn't read (JavaScript-heavy, blocked): Firecrawl reads up to 3, a credit each.
+        unread = [c for c in candidates if c["url"] not in full][:3]
+        if unread and firecrawl_api.available():
+            for c, got in zip(unread, await asyncio.gather(*(firecrawl_api.read(client, c["url"]) for c in unread), return_exceptions=True)):
+                if isinstance(got, dict) and len(got["text"]) > 400:
+                    full[c["url"]] = got
 
         sources = []
         for c in candidates:
