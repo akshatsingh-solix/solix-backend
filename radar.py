@@ -153,7 +153,8 @@ async def meta():
 def _live_sources() -> dict:
     import llm
     import radar_intel
-    return {**radar_intel.sources_available(), "ai_model": bool(llm.configured_providers()), "crustdata": bool(os.environ.get("CRUSTDATA_API_KEY"))}
+    return {**radar_intel.sources_available(), "web_provider": radar_intel.web_provider(), "ai_model": bool(llm.configured_providers()),
+            "crustdata": bool(os.environ.get("CRUSTDATA_API_KEY"))}
 
 
 async def _meta() -> dict:
@@ -494,7 +495,7 @@ async def find_people(company_id: str, user: dict = Depends(get_current_admin)):
         raise HTTPException(status_code=404, detail="Account not found")
     known = {p["name"] async for p in _db().contacts.find({"company_id": company_id}, {"_id": 0, "name": 1}) if p.get("name")}
     if not any(radar_intel.sources_available().values()):
-        raise HTTPException(status_code=422, detail="Add PARALLEL_API_KEY (web research) or HUNTER_API_KEY (business emails) on the server to find people.")
+        raise HTTPException(status_code=422, detail="Add FIRECRAWL_API_KEY (web research) or HUNTER_API_KEY (business emails) on the server to find people.")
     async with httpx.AsyncClient(follow_redirects=True) as client:
         out = await radar_intel.find_people(client, c, known)
     await rs.add_history(company_id, user["email"], "people", f"People search: {len(out['people'])} candidate(s)")

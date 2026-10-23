@@ -3,9 +3,13 @@
 The original Leads Radar's deep dives came from open web research (press releases, the company's own site,
 filings, investor material, conference talks, job postings). This does the same from live sources:
 
-* Parallel Search (PARALLEL_API_KEY): three searches per account, run together, each returning ranked pages
-  with readable excerpts: the account's programs and migrations, the named leaders who own IT, data,
-  architecture and records, and recent material news.
+* Web research, three angles per account searched together: the account's programs and migrations, the named
+  leaders who own IT, data, architecture and records, and recent material news.
+  - Firecrawl (FIRECRAWL_API_KEY) first: ranked pages with highlights, and the best leadership pages read in
+    full, because names and titles rarely fit in a snippet.
+  - Parallel Search (PARALLEL_API_KEY) when Firecrawl isn't set up or fails.
+  An identical search within a day comes from the cache, so repeat clicks and a deep dive after Find people
+  spend no credits.
 * Hunter (HUNTER_API_KEY, optional): business email addresses, titles and the company's email pattern, each
   with the public pages it was seen on.
 
@@ -16,13 +20,17 @@ Only business contact details are collected: name, title, work email, public pro
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 import httpx
+
+import firecrawl_api
 
 logger = logging.getLogger("solix.radar.intel")
 
@@ -32,7 +40,11 @@ TARGET_TITLES = re.compile(r"\b(chief|cio|cto|cdo|cdao|ciso|vice president|vp|sv
 
 
 def sources_available() -> Dict[str, bool]:
-    return {"web_search": bool(os.environ.get("PARALLEL_API_KEY")), "hunter": bool(os.environ.get("HUNTER_API_KEY"))}
+    return {"web_search": bool(firecrawl_api.available() or os.environ.get("PARALLEL_API_KEY")), "hunter": bool(os.environ.get("HUNTER_API_KEY"))}
+
+
+def web_provider() -> Optional[str]:
+    return "firecrawl" if firecrawl_api.available() else "parallel" if os.environ.get("PARALLEL_API_KEY") else None
 
 
 def why(exc: Exception) -> str:
@@ -47,7 +59,7 @@ def why(exc: Exception) -> str:
         msg = body.get("message") or (err.get("message") if isinstance(err, dict) else err) or ((body.get("errors") or [{}])[0].get("details")) or ""
     except (ValueError, AttributeError, IndexError):
         pass
-    host = {"api.parallel.ai": "Parallel", "api.hunter.io": "Hunter"}.get(r.request.url.host, r.request.url.host)
+    host = {"api.parallel.ai": "Parallel", "api.hunter.io": "Hunter", "api.firecrawl.dev": "Firecrawl"}.get(r.request.url.host, r.request.url.host)
     return f"{host} returned {r.status_code}" + (f": {str(msg)[:160]}" if msg else "")
 
 
@@ -69,7 +81,12 @@ def search_name(name: str) -> str:
 
 # --- Web search --------------------------------------------------------------------------------
 
-async def web_search(client: httpx.AsyncClient, objective: str, queries: List[str], max_chars: int = 9000) -> List[dict]:
+FC_RESULTS = 5          # per Firecrawl query: one 2-credit block of results
+WEB_CACHE_TTL = timedelta(hours=24)
+_PEOPLE_PAGE = re.compile(r"leader|team|management|executive|about|board|officer|people|governance", re.I)
+
+
+async def parallel_search(client: httpx.AsyncClient, objective: str, queries: List[str], max_chars: int = 9000) -> List[dict]:
     """One Parallel Search call: ranked pages with the excerpts relevant to the objective."""
     r = await client.post(f"{PARALLEL_URL}/search", headers={"x-api-key": os.environ["PARALLEL_API_KEY"]}, timeout=60,
                           json={"objective": objective, "search_queries": [q[:200] for q in queries[:5]], "mode": "fast", "max_chars_total": max_chars})
@@ -78,40 +95,102 @@ async def web_search(client: httpx.AsyncClient, objective: str, queries: List[st
             for x in r.json().get("results", []) if x.get("url")]
 
 
-def _angles(company: dict) -> Dict[str, tuple]:
+async def firecrawl_angle(client: httpx.AsyncClient, angle: dict) -> List[dict]:
+    """Firecrawl searches for one angle, then the most promising pages read in full (`read` of them, 1 credit each)."""
+    batches = await asyncio.gather(*(firecrawl_api.search(client, q, FC_RESULTS, angle.get("tbs")) for q in angle["fc_queries"]))
+    found, seen = [], set()
+    for batch in batches:
+        for x in batch:
+            if x["url"] not in seen:
+                seen.add(x["url"])
+                found.append(x)
+    # Read leadership-looking pages (or else the top result): a credit spent on a news article rarely finds a title.
+    likely = [x for x in found if _PEOPLE_PAGE.search(x["url"] + " " + x["title"])]
+    picks = (likely or found[:1])[:angle.get("read", 0)]
+
+    async def read(x: dict) -> None:
+        try:
+            page = await firecrawl_api.read(client, x["url"])
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.info("could not read %s: %s", x["url"], why(exc))  # the snippet still stands
+            return
+        if page["text"]:
+            x["text"] = focus(page["text"])
+            x["date"] = x["date"] or page["date"]
+    await asyncio.gather(*(read(x) for x in picks))
+    return found
+
+
+def focus(text: str, limit: int = 3500) -> str:
+    """The lines of a full page that name roles, with the line either side (where the name usually is)."""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    keep = sorted({j for i, ln in enumerate(lines) if len(ln) < 300 and TARGET_TITLES.search(ln) for j in (i - 1, i, i + 1) if 0 <= j < len(lines)})
+    return "\n".join(lines[i] for i in keep)[:limit] if keep else "\n".join(lines)[:limit]
+
+
+async def web_search(client: httpx.AsyncClient, angle: dict, problems: Optional[List[str]] = None) -> List[dict]:
+    """One angle's pages from the first web provider that answers: Firecrawl, then Parallel. Failures go to `problems`."""
+    providers = []
+    if firecrawl_api.available():
+        providers.append(("firecrawl", lambda: firecrawl_angle(client, angle)))
+    if os.environ.get("PARALLEL_API_KEY"):
+        providers.append(("parallel", lambda: parallel_search(client, angle["objective"], angle["queries"])))
+    for name, call in providers:
+        try:
+            return await call()
+        except (httpx.HTTPError, KeyError, ValueError) as exc:
+            logger.warning("web search via %s failed: %s", name, why(exc))
+            _note(problems, f"Web search failed: {why(exc)}")
+    return []
+
+
+async def cached_search(client: httpx.AsyncClient, angle: dict, problems: Optional[List[str]] = None) -> List[dict]:
+    """web_search, reusing an identical search from the last day; only searches that found something are kept."""
+    import database
+    key = hashlib.sha1(json.dumps([angle["objective"], angle["queries"], angle["fc_queries"]]).encode()).hexdigest()
+    hit = await database.db.web_cache.find_one({"key": key}, {"_id": 0})
+    if hit and hit["at"] > (datetime.now(timezone.utc) - WEB_CACHE_TTL).isoformat():
+        return hit["results"]
+    results = await web_search(client, angle, problems)
+    if results:
+        await database.db.web_cache.update_one({"key": key}, {"$set": {"key": key, "at": datetime.now(timezone.utc).isoformat(), "results": results}}, upsert=True)
+    return results
+
+
+def _angles(company: dict) -> Dict[str, dict]:
+    """Per angle: Parallel's objective and keyword queries, and Firecrawl's queries, time filter and pages to read in full."""
     name, short = company["name"], search_name(company["name"])
     comps = company.get("competitors") or []
     site = f" Prefer {company['domains'][0]}, press releases, filings and conference talks." if company.get("domains") else ""
     year = datetime.now(timezone.utc).year
     # Objectives carry the full name; the keyword queries stay short (Parallel asks for 3 to 6 words each).
     return {
-        "programs": (f"Find recent, specific evidence that {name} is modernising, migrating, consolidating or retiring legacy applications, content management, "
-                     f"records or data archive platforms{', including ' + ', '.join(comps[:3]) if comps else ''}, and why.{site}",
-                     [f"{short} legacy system modernization", f"{short} {comps[0]} migration" if comps else f"{short} application retirement",
-                      f"{short} records retention archive"]),
-        "people": (f"Identify the named people at {name} who lead IT, data, enterprise architecture, records management, information governance or content "
-                   f"platforms, with their exact current job titles.{site}",
-                   [f"{short} chief information officer", f"{short} VP enterprise architecture", f"{short} records management director"]),
-        "news": (f"Material news about {name} in the last 12 months: acquisitions, divestitures, restructuring, regulatory actions, technology partnerships "
-                 f"and IT investments.", [f"{short} acquisition", f"{short} technology partnership", f"{short} press release {year}"]),
+        "programs": {"objective": f"Find recent, specific evidence that {name} is modernising, migrating, consolidating or retiring legacy applications, content "
+                                  f"management, records or data archive platforms{', including ' + ', '.join(comps[:3]) if comps else ''}, and why.{site}",
+                     "queries": [f"{short} legacy system modernization", f"{short} {comps[0]} migration" if comps else f"{short} application retirement",
+                                 f"{short} records retention archive"],
+                     "fc_queries": [f"{short} {comps[0]} migration" if comps else f"{short} legacy system modernization"], "read": 0},
+        "people": {"objective": f"Identify the named people at {name} who lead IT, data, enterprise architecture, records management, information governance or "
+                                f"content platforms, with their exact current job titles.{site}",
+                   "queries": [f"{short} chief information officer", f"{short} VP enterprise architecture", f"{short} records management director"],
+                   "fc_queries": [f"{short} leadership team", f"{short} chief information officer"], "read": 2},
+        "news": {"objective": f"Material news about {name} in the last 12 months: acquisitions, divestitures, restructuring, regulatory actions, technology "
+                              f"partnerships and IT investments.",
+                 "queries": [f"{short} acquisition", f"{short} technology partnership", f"{short} press release {year}"],
+                 "fc_queries": [f"{short} news"], "tbs": "qdr:y", "read": 0},
     }
 
 
 async def research_sources(client: httpx.AsyncClient, company: dict, angles: Optional[List[str]] = None, problems: Optional[List[str]] = None) -> List[dict]:
-    """The account's live web sources, every angle searched at once. Empty without PARALLEL_API_KEY.
+    """The account's live web sources, every angle searched at once. Empty without a web provider key.
     Why a search failed goes into `problems`, so the screen can say so instead of showing an empty list."""
-    if not os.environ.get("PARALLEL_API_KEY"):
+    if not web_provider():
         return []
     plan = {k: v for k, v in _angles(company).items() if not angles or k in angles}
 
-    async def one(kind: str, objective: str, queries: List[str]) -> List[dict]:
-        try:
-            return [{**x, "kind": f"web:{kind}"} for x in await web_search(client, objective, queries)]
-        except (httpx.HTTPError, KeyError, ValueError) as exc:
-            logger.warning("web search (%s) failed for %s: %s", kind, company["name"], why(exc))
-            _note(problems, f"Web search failed: {why(exc)}")
-            return []
-    found = await asyncio.gather(*(one(k, o, q) for k, (o, q) in plan.items()))
+    async def one(kind: str, angle: dict) -> List[dict]:
+        return [{**x, "kind": f"web:{kind}"} for x in await cached_search(client, angle, problems)]
+    found = await asyncio.gather(*(one(k, a) for k, a in plan.items()))
     out, seen = [], set()
     for batch in found:
         for x in batch:
@@ -127,13 +206,28 @@ _PERSON = re.compile(r"\b([A-Z][a-z]+(?:[ -][A-Z]\.)?(?: [A-Z][a-zA-Z'\-]+){1,2}
                      r"(?:Vice President|VP|SVP|EVP|Chief [A-Za-z ]{2,40}?Officer|Director|Head of [A-Za-z ,&]{2,40}|Manager|CIO|CTO|CDO|CISO)[^.;\n]{0,80})")
 
 
+_NAME_LINE = re.compile(r"^([A-Z][a-z]+(?:[ -][A-Z]\.)?(?: [A-Z][a-zA-Z'\-]+){1,2})$")
+_TITLE_LINE = re.compile(r"^(?:(?:Executive|Senior|Group|Global|Deputy|Associate) )?(?:Vice President|VP|SVP|EVP|Chief [A-Za-z ]{2,40}?Officer|Director|Head of|"
+                         r"Manager|President|CIO|CTO|CDO|CISO)\b")
+# Headings that look like two capitalised words but aren't people ("Our Team", "Executive Leadership").
+_NOT_NAMES = {"Our", "The", "Team", "Leadership", "Executive", "Executives", "Board", "Management", "Officers", "Directors", "Company", "About", "Meet",
+              "Chief", "Senior", "Global", "Read", "More", "View", "Bio", "Contact", "News", "Committee", "Corporate", "Governance", "Investor", "Relations"}
+
+
 def people_from_text(sources: List[dict]) -> List[dict]:
-    """Without a model: "Name, Title" patterns in the excerpts. Narrow on purpose; the model does better."""
+    """Without a model: "Name, Title" in a sentence, or a name line followed by a title line (how leadership pages
+    lay it out). Narrow on purpose; the model does better."""
     out = []
     for s in sources:
-        for name, title in _PERSON.findall(s.get("text") or ""):
+        text = s.get("text") or ""
+        for name, title in _PERSON.findall(text):
             title = re.split(r",\s+(?=[a-z])", title)[0]  # "CIO, leads technology" -> "CIO"
             out.append({"name": name.strip(), "title": title.strip(" ,"), "source_url": s.get("url"), "source_title": s.get("title")})
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        for a, b in zip(lines, lines[1:]):
+            m = _NAME_LINE.match(a)
+            if m and len(b) < 160 and _TITLE_LINE.match(b) and not set(m.group(1).split()) & _NOT_NAMES:
+                out.append({"name": m.group(1), "title": b.strip(" ,"), "source_url": s.get("url"), "source_title": s.get("title")})
     return out
 
 
@@ -162,7 +256,7 @@ async def extract_people(company: dict, sources: List[dict]) -> List[dict]:
     if not sources:
         return []
     import radar_research
-    block = "\n\n".join(f"[{i + 1}] {s['title']} ({s.get('url')})\n{(s.get('text') or '')[:1500]}" for i, s in enumerate(sources[:12]))
+    block = "\n\n".join(f"[{i + 1}] {s['title']} ({s.get('url')})\n{(s.get('text') or '')[:3500]}" for i, s in enumerate(sources[:12]))
     text, _, _ = await radar_research._complete(PEOPLE_SYSTEM, f"Company: {company['name']}\n\nSOURCES\n{block}")
     data = radar_research._parse_json(text or "") if text else None
     people = []
@@ -171,7 +265,7 @@ async def extract_people(company: dict, sources: List[dict]) -> List[dict]:
             n = p.get("source")
             src = sources[n - 1] if isinstance(n, int) and 0 < n <= len(sources) else {}
             people.append({"name": str(p["name"])[:120], "title": str(p.get("title") or "")[:200], "source_url": src.get("url"), "source_title": src.get("title")})
-    return people if data else people_from_text(sources)
+    return people + people_from_text(sources)  # the rules catch "Name / Title" lines the model skipped; duplicates are dropped later
 
 
 async def hunter_people(client: httpx.AsyncClient, domain: Optional[str], limit: int = 10, company: Optional[str] = None) -> dict:

@@ -215,11 +215,42 @@ def test_deep_dive_end_to_end(monkeypatch):
     assert len(calls) == before
 
 
+def test_deep_dive_uses_firecrawl_when_parallel_is_out_of_credit(monkeypatch):
+    from mongomock_motor import AsyncMongoMockClient
+    import json as _json
+
+    monkeypatch.setattr(seo, "db", AsyncMongoMockClient()["t"])
+    monkeypatch.setenv("PARALLEL_API_KEY", "pk")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "fc")
+    for k in ("OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "NEWSMCP_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    article = "Practitioners report that archive consolidation cut storage costs by a third. " * 10
+    calls = []
+
+    def handler(req):
+        host, path = req.url.host, req.url.path
+        calls.append(f"{host}{path}")
+        if host == "api.parallel.ai":
+            return httpx.Response(402, json={"message": "Insufficient credit in account"})
+        if host == "api.firecrawl.dev" and path == "/v2/search":
+            assert _json.loads(req.content)["tbs"] == "qdr:m"
+            return httpx.Response(200, json={"success": True, "data": {"web": [{"url": "https://practitioner.example/post", "title": "Consolidation notes", "description": "short"}]}})
+        if host == "api.firecrawl.dev" and path == "/v2/scrape":
+            return httpx.Response(200, json={"success": True, "data": {"markdown": article, "metadata": {"title": "Consolidation notes"}}})
+        return httpx.Response(503)  # news feeds and the plain page fetch are unavailable in this test
+
+    _mock_client(handler, monkeypatch)
+    data = run_sync(seo.deep_dive(seo.DeepDiveBody(topic="archive consolidation")))
+    assert "api.parallel.ai/v1/extract" not in calls  # no second paid call once Parallel said it had no credit
+    assert any("Parallel returned 402: Insufficient credit" in n for n in data["notes"])
+    assert data["sources"][0]["url"] == "https://practitioner.example/post" and data["sources"][0]["chars"] == len(article.strip())
+
+
 def test_deep_dive_without_keys_explains(monkeypatch):
     from mongomock_motor import AsyncMongoMockClient
 
     monkeypatch.setattr(seo, "db", AsyncMongoMockClient()["t"])
-    for k in ("PARALLEL_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "NEWSMCP_API_KEY"):
+    for k in ("PARALLEL_API_KEY", "FIRECRAWL_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "NEWSMCP_API_KEY"):
         monkeypatch.delenv(k, raising=False)
     _mock_client(lambda req: httpx.Response(503), monkeypatch)
     data = run_sync(seo.deep_dive(seo.DeepDiveBody(topic="data sovereignty")))

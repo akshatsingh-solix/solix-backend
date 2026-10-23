@@ -635,7 +635,8 @@ WEB = {
 def _fake_web(monkeypatch):
     import radar_intel
 
-    async def web_search(client_, objective, queries, max_chars=9000):
+    async def web_search(client_, angle, problems=None):
+        objective = angle["objective"]
         kind = "people" if "lead IT" in objective else "news" if "Material news" in objective else "programs"
         return [dict(x) for x in WEB[kind]]
     monkeypatch.setenv("PARALLEL_API_KEY", "test-key")
@@ -739,6 +740,83 @@ def test_live_source_failures_are_explained_and_hunter_works_without_a_domain(mo
     assert seen["hunter"]["company"] == "Varonis Systems" and "domain" not in seen["hunter"]
     assert seen["hunter"]["limit"] == "10"  # Hunter's free plan rejects more than 10
     assert out["hunter_domain"] == "varonis.example" and [p["name"] for p in out["people"]] == ["Jane Doe"]
+
+
+LEADERSHIP_MD = """# Leadership
+
+![photo](https://northwind.example/img/a.jpg)
+
+### [Grace Okafor](https://northwind.example/team/grace)
+
+Chief Information Officer
+
+### Our Team
+
+Chief Executive Officer office
+
+**Tomas Lindqvist**
+
+Vice President, Enterprise Architecture
+
+We are a leading provider of storage."""
+
+
+def test_firecrawl_reads_leadership_pages_and_caches(monkeypatch):
+    import httpx
+    import radar_intel
+    import radar_research
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-test")
+    monkeypatch.delenv("PARALLEL_API_KEY", raising=False)
+    monkeypatch.delenv("HUNTER_API_KEY", raising=False)
+
+    async def no_model(system, user):
+        return None, None, None
+    monkeypatch.setattr(radar_research, "_complete", no_model)  # the name-line / title-line rule finds them
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        assert request.headers["authorization"] == "Bearer fc-test"
+        if request.url.path == "/v2/search":
+            q = json.loads(request.content)["query"]
+            assert "Inc" not in q
+            return httpx.Response(200, json={"success": True, "data": {"web": [
+                {"url": "https://northwind.example/about/leadership", "title": "Leadership | Northwind", "description": "Meet our leaders."},
+                {"url": "https://news.example/northwind-q3", "title": "Northwind Q3 results", "description": "Revenue grew."}]}})
+        assert json.loads(request.content)["url"] == "https://northwind.example/about/leadership"  # only the leadership page is read in full
+        return httpx.Response(200, json={"success": True, "data": {"markdown": LEADERSHIP_MD, "metadata": {"title": "Leadership | Northwind"}}})
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            return await radar_intel.find_people(c, {"name": "Northwind Data Inc", "domains": []})
+    out = run(go())
+    people = {p["name"]: p for p in out["people"]}
+    assert set(people) == {"Grace Okafor", "Tomas Lindqvist"} and out["problems"] == []
+    assert people["Grace Okafor"]["title"] == "Chief Information Officer"
+    assert people["Grace Okafor"]["source_url"] == "https://northwind.example/about/leadership"
+    assert calls.count("/v2/search") == 2 and calls.count("/v2/scrape") == 1
+    run(go())  # the same search within a day comes from the cache: no new credits spent
+    assert calls.count("/v2/search") == 2 and calls.count("/v2/scrape") == 1
+
+
+def test_parallel_backs_up_firecrawl(monkeypatch):
+    import httpx
+    import radar_intel
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-test")
+    monkeypatch.setenv("PARALLEL_API_KEY", "test-key")
+
+    def handler(request):
+        if request.url.host == "api.firecrawl.dev":
+            return httpx.Response(402, json={"success": False, "error": "Insufficient credits to perform this request."})
+        return httpx.Response(200, json={"results": [{"url": "https://contoso.example/news/archive", "title": "Contoso retires its archive", "excerpts": ["Done by 2027."]}]})
+
+    async def go():
+        problems = []
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            return await radar_intel.research_sources(c, {"name": "Contoso Unique Ltd", "domains": []}, ["programs"], problems), problems
+    found, problems = run(go())
+    assert [x["url"] for x in found] == ["https://contoso.example/news/archive"]
+    assert problems == ["Web search failed: Firecrawl returned 402: Insufficient credits to perform this request."]
 
 
 def test_find_email_tries_hunter_first(client, monkeypatch):
