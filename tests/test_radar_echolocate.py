@@ -493,3 +493,108 @@ def test_bulk_paths_make_no_per_account_round_trips(client, monkeypatch):
     assert client.post("/api/admin/radar/seen", json={"all": True}).status_code == 200
     r = client.post("/api/admin/radar/import", files={"file": ("radar.json", json.dumps(RADAR), "application/json")})
     assert r.status_code == 200 and r.json()["signals_new"] == 0
+
+
+# --- The advanced Radar ----------------------------------------------------------------------
+
+def test_sales_team_becomes_the_radar_reps_once(client):
+    import radar_model
+    import radar_service as rs
+    assert run(_mock_db.settings.find_one({"key": "migrations"}))["sales_team_radar_v1"]  # applied at startup
+    # On a database that hasn't had it yet: the old names are replaced, and kept in the migration record.
+    run(_mock_db.settings.delete_one({"key": "migrations"}))
+    old = run(rs.sales_team())
+    assert run(rs.ensure_sales_team()) is True
+    team = run(rs.sales_team())
+    assert [m["name"] for m in team] == [n for n, _ in radar_model.SALES_REPS] and len(team) == 14
+    assert {"name": "Bo Deas", "email": "bo.deas@solix.com"} in team and {"name": "Samit Mandal", "email": "samit.mandal@solix.com"} in team
+    assert run(_mock_db.settings.find_one({"key": "migrations"}))["sales_team_radar_v1"]["previous_members"] == old
+    # Edits made afterwards in Settings are never overwritten.
+    client.put("/api/admin/team", json={"members": [*team, {"name": "New Rep", "email": "new.rep@solix.com"}]})
+    assert run(rs.ensure_sales_team()) is False and len(run(rs.sales_team())) == 15
+    meta = client.get("/api/admin/radar/meta").json()
+    assert [m["name"] for m in meta["team"]][:14] == [n for n, _ in radar_model.SALES_REPS]
+    assert all(m["email"] != "admin@example.com" for m in meta["team"])  # staff logins aren't sales reps
+    assert meta["rep_patch"]["Bob Wright"] == "Canada" and "United States" in meta["countries"]
+
+
+def test_search_reaches_job_titles_and_places(client):
+    client.post("/api/admin/radar/recompute")
+    names = {a["name"] for a in client.get("/api/admin/radar/accounts", params={"q": "surveillance"}).json()["items"]}
+    assert names == {"Globex Bank"}  # "Manager, Surveillance" is a job title, not in the company's name
+    assert "search_text" not in client.get("/api/admin/radar/accounts").json()["items"][0]
+    assert any(a["name"].startswith("Acme") for a in client.get("/api/admin/radar/accounts", params={"q": "hartford"}).json()["items"])
+
+
+def test_next_action_rules():
+    import radar_model as rmod
+    base = {"status": "new", "owner": "a@x.com", "strength": "Medium", "score": 10, "signal_types": ["competitor_job"]}
+
+    def code(c, **kw):
+        out = rmod.next_action({**base, **c}, reachable=kw.get("reachable", 0), enrolled=kw.get("enrolled", False), research=kw.get("research"),
+                               signals=kw.get("signals", []), refresh_days=30)
+        return out and out["code"]
+    assert code({"excluded_reason": "Existing customer", "status": "replied"}) is None
+    assert code({"status": "replied"}) == "book_meeting"
+    assert code({"owner": None, "strength": "Strong"}) == "assign"
+    assert code({}, research={"status": "draft"}) == "review_dive"
+    assert code({"surge": True, "signals_7d": 4}) == "act_now"
+    assert code({"status": "ready"}, research={"status": "approved"}) == "add_people"
+    assert code({"status": "ready"}, reachable=2, research={"status": "approved"}) == "start_outreach"
+    assert code({"status": "ready"}, reachable=2, enrolled=True, research={"status": "approved", "created_at": "2099-01-01"}) is None
+    assert code({"strength": "Strong"}) == "deep_dive"
+    old = {"status": "approved", "created_at": "2026-01-01T00:00:00+00:00"}
+    assert code({}, research=old, signals=[{"first_seen_at": "2026-06-01T00:00:00+00:00"}]) == "refresh_dive"
+    assert code({}, research=old, signals=[{"first_seen_at": "2025-12-01T00:00:00+00:00"}]) is None
+
+
+def test_todo_view_score_breakdown_and_trend(client):
+    todo = client.get("/api/admin/radar/accounts", params={"tab": "todo"}).json()["items"]
+    assert todo and all(a["next_action"]["label"] and a["next_action"]["why"] for a in todo)
+    s = client.get("/api/admin/radar/summary").json()
+    assert s["tabs"]["todo"] == len(todo)
+    assert len(s["trend"]["weeks"]) == 12 and all(len(x["counts"]) == 12 for x in s["trend"]["series"])
+    for a in client.get("/api/admin/radar/accounts").json()["items"]:
+        assert abs(sum((a.get("score_parts") or {}).values()) - (a.get("score") or 0)) <= 1  # the parts explain the score
+
+
+def test_dns_changes_against_the_last_scan(client, monkeypatch):
+    import radar_collectors as rcol
+    import radar_run
+    import radar_service as rs
+    first = rcol.dns_signals_from("Initech", "initech.example", {"MX": ["10 initech-example.mail.mimecast.com."]})
+    assert [x["action"] for x in first] == ["present"]  # a first scan is the baseline
+    moved = rcol.dns_signals_from("Initech", "initech.example", {"MX": ["10 mx1.pphosted.com."]}, {"MX": ["10 initech-example.mail.mimecast.com."]})
+    assert {(x["competitor_key"], x["action"]) for x in moved} == {("proofpoint", "added"), ("mimecast", "removed")}
+    assert "new since the last scan" in next(x for x in moved if x["action"] == "added")["title"]
+    # A record type whose lookup failed is never read as removed.
+    assert rcol.dns_signals_from("Initech", "initech.example", {}, {"MX": ["10 initech-example.mail.mimecast.com."]}) == []
+
+    run(rs.save_radar_settings({"collectors": {"ats": False, "crustdata": False, "dns": True, "news": False, "filings": False, "tenders": False}, "dns_domains": []}))
+    scans = iter([{"MX": ["10 initech-example.mail.mimecast.com."]}, {"MX": ["10 mx1.pphosted.com."]}])
+
+    async def records(client_, domain, use_crtsh=True):
+        return next(scans) if domain == "initech.example" else {}
+    monkeypatch.setattr(radar_run.rc, "dns_records", records)
+    one = {"id": "dns-1", "counts": {}, "notes": []}
+    run(radar_run.collect(one))
+    two = {"id": "dns-2", "counts": {}, "notes": []}
+    run(radar_run.collect(two))
+    assert two["counts"]["dns_changes"] == 2
+    snap = run(_mock_db.radar_dns.find_one({"domain": "initech.example"}))
+    assert snap["records"]["MX"] == ["10 mx1.pphosted.com."]
+    acc = next(a for a in client.get("/api/admin/radar/accounts", params={"q": "initech"}).json()["items"] if a["name"] == "Initech")
+    sigs = client.get(f"/api/admin/radar/accounts/{acc['id']}").json()["signals"]
+    assert {(x.get("competitor_key"), x.get("action")) for x in sigs if x["type"] == "dns"} >= {("proofpoint", "added"), ("mimecast", "removed"), ("mimecast", "present")}
+
+
+def test_rep_scorecard(client):
+    import radar_service as rs
+    run(rs.recompute_all())
+    rows = client.get("/api/admin/radar/reps").json()["reps"]
+    team = {m["email"] for m in run(rs.sales_team())}
+    assert team <= {r["owner"] for r in rows}  # every rep has a row, even with no accounts yet
+    total = run(_mock_db.companies.count_documents({"signal_count": {"$gt": 0}}))
+    assert sum(r["accounts"] for r in rows) == total
+    for r in rows:
+        assert r["contacted"] >= r["replied"] >= r["meetings"] >= r["won"]

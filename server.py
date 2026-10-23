@@ -212,10 +212,14 @@ async def on_startup():
         db.ops_runs.create_index([("job", 1), ("started_at", -1)]),
         db.ops_outbox.create_index([("status", 1), ("next_attempt_at", 1)]),
         db.ops_outbox.create_index("key", sparse=True),
+        db.radar_dns.create_index("domain", unique=True),
         db.ops_alerts.create_index([("code", 1), ("created_at", -1)]),
         db.webhook_events.create_index("received_at"),
     )
     await seed_admin()
+    import radar_service  # Settings → Sales team becomes the Leads Radar's reps, once
+    if await radar_service.ensure_sales_team():
+        asyncio.create_task(radar_service.recompute_all())
     await resume_interrupted()
     asyncio.create_task(_rescore_loop())
     # Outbox, outbound sender and watchdog (Radar + EchoLocate); OPS_LOOP=0 turns it off.
