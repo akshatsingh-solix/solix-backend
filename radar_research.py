@@ -93,7 +93,8 @@ async def gather(client: httpx.AsyncClient, company: dict, problems: Optional[Li
         if len(sources) >= 6:
             break
     import radar_intel
-    for w in await radar_intel.research_sources(client, company, problems=problems):
+    # Programs and people from the web; news comes from the free headline feeds below, so no credits go on a news search.
+    for w in await radar_intel.research_sources(client, company, ["programs", "people"], problems):
         if w["url"] in seen_urls:
             continue
         seen_urls.add(w["url"])
@@ -179,10 +180,17 @@ async def _draft(company: dict, sources: List[dict]) -> dict:
     verdict = data.get("verdict") or ("Ready for Outreach" if score >= rm.READY_SCORE else "Research More" if score >= 4 else "Not a Fit")
     ft = data.get("first_touch") or {}
     return {**_people_and_evidence(data.get("contacts"), sources),
-        "score": score, "verdict": verdict, "headline": str(data.get("headline") or "")[:500], "summary": str(data.get("summary") or "")[:6000],
-        "trigger": str(data.get("trigger") or "")[:3000], "why_solix_wins": str(data.get("why_solix_wins") or "")[:4000],
-        "first_touch": {"subject": str(ft.get("subject") or "")[:200], "body": str(ft.get("body") or "")[:3000]}, "gaps": str(data.get("gaps") or "")[:3000], "provider": provider, "model": model,
+        "score": score, "verdict": verdict, "headline": _text(data.get("headline"))[:500], "summary": _text(data.get("summary"))[:6000],
+        "trigger": _text(data.get("trigger"))[:3000], "why_solix_wins": _text(data.get("why_solix_wins"))[:4000],
+        "first_touch": {"subject": _text(ft.get("subject"))[:200], "body": _text(ft.get("body"))[:3000]}, "gaps": _text(data.get("gaps"))[:3000], "provider": provider, "model": model,
     }
+
+
+def _text(value) -> str:
+    """Models sometimes answer a text field with a list; show it as one sentence run, not as "['a.', 'b.']"."""
+    if isinstance(value, (list, tuple)):
+        return "; ".join(str(v).strip().rstrip(".;") for v in value if str(v).strip()) + ("." if value else "")
+    return str(value or "")
 
 
 def _people_and_evidence(contacts, sources: List[dict]) -> dict:
