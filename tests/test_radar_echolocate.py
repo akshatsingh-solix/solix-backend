@@ -695,7 +695,7 @@ def test_find_people_merges_web_and_hunter_and_skips_known(client, monkeypatch):
         return None, None, None
     monkeypatch.setattr(radar_research, "_complete", no_model)  # the "Name, Title" rules still find people
 
-    async def hunter(client_, domain, limit=15, company=None):
+    async def hunter(client_, domain, limit=10, company=None):
         return {"people": [{"name": "Priya Nair", "title": "VP Enterprise Architecture", "email": "priya.nair@acmemutual.example", "email_confidence": 94,
                             "email_status": "valid", "linkedin_url": None, "source_url": "https://www.acmemutual.example/blog/archive", "source_title": "acmemutual.example",
                             "via": "hunter"}], "pattern": "{first}.{last}"}
@@ -737,6 +737,7 @@ def test_live_source_failures_are_explained_and_hunter_works_without_a_domain(mo
     assert out["problems"] == ["Web search failed: Parallel returned 401: Invalid API key (C.1)"]
     assert all(len(q.split()) <= 6 and "Inc" not in q for q in seen["queries"])
     assert seen["hunter"]["company"] == "Varonis Systems" and "domain" not in seen["hunter"]
+    assert seen["hunter"]["limit"] == "10"  # Hunter's free plan rejects more than 10
     assert out["hunter_domain"] == "varonis.example" and [p["name"] for p in out["people"]] == ["Jane Doe"]
 
 
