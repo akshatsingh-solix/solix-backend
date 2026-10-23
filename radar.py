@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Literal, Optional
 
@@ -149,13 +150,19 @@ async def meta():
     return await cache.memo("radar_ctx", "meta", 60, _meta)
 
 
+def _live_sources() -> dict:
+    import llm
+    import radar_intel
+    return {**radar_intel.sources_available(), "ai_model": bool(llm.configured_providers()), "crustdata": bool(os.environ.get("CRUSTDATA_API_KEY"))}
+
+
 async def _meta() -> dict:
     terr, settings, team, countries, states = await asyncio.gather(rs.territories(), rs.radar_settings(), rs.sales_team(),
                                                                    _db().companies.distinct("countries"), _db().companies.distinct("states"))
     return {
         "strengths": rm.STRENGTHS, "statuses": [{"key": s, "label": rm.STATUS_LABELS[s]} for s in rm.STATUSES], "territories": rm.TERRITORY_ORDER,
         "competitors": [{"key": c["key"], "product": c["product"], "vendor": c["vendor"]} for c in rm.COMPETITORS], "highlight": rm.highlight_terms(),
-        "signal_types": rm.SIGNAL_TYPES, "team": team, "rep_patch": rm.REP_PATCH,
+        "signal_types": rm.SIGNAL_TYPES, "team": team, "rep_patch": rm.REP_PATCH, "live_sources": _live_sources(),
         "countries": sorted(c for c in countries if c), "states": sorted(x for x in states if x), "reps": sorted({na["rep"] for na in terr.get("named_accounts", [])} | set((terr.get("us_states") or {}).values()) | set((terr.get("territory_owners") or {}).values())),
         "settings": {k: settings[k] for k in ("research_per_run", "refresh_days", "collectors")}, "ready_score": rm.READY_SCORE,
     }
@@ -398,6 +405,27 @@ class ResearchPatch(BaseModel):
     reason: Optional[str] = Field(default=None, max_length=300)
 
 
+async def _contacts_from_research(r: dict, user: dict) -> int:
+    from outbound import attach_lead, new_contact_doc
+    company = await _db().companies.find_one({"id": r["company_id"]}, {"_id": 0})
+    if not company:
+        return 0
+    have = {c["name"].lower() async for c in _db().contacts.find({"company_id": company["id"]}, {"_id": 0, "name": 1}) if c.get("name")}
+    n = 0
+    for c in r.get("contacts") or []:
+        if not c.get("name") or c["name"].lower() in have:
+            continue
+        doc = new_contact_doc({"company_id": company["id"], "name": c["name"], "title": c.get("title"), "linkedin_url": c.get("linkedin_url"),
+                               "source": "research", "source_url": c.get("source_url") or ((r.get("evidence") or [{}])[0]).get("url")}, company)
+        await _db().contacts.insert_one(dict(doc))
+        await attach_lead(doc)
+        have.add(c["name"].lower())
+        n += 1
+    if n:
+        await rs.add_history(company["id"], user["email"], "contact", f"{n} contact(s) added from the approved deep dive")
+    return n
+
+
 @router.patch("/research/{research_id}", dependencies=[can_work])
 async def review_research(research_id: str, body: ResearchPatch, user: dict = Depends(get_current_admin)):
     import radar_research
@@ -414,6 +442,9 @@ async def review_research(research_id: str, body: ResearchPatch, user: dict = De
         if blocking:
             raise HTTPException(status_code=422, detail="Fix before approving: " + "; ".join(c["message"] for c in blocking))
         sets.update({"status": "approved", "reviewed_by": user["email"], "reviewed_at": now_iso()})
+        added = await _contacts_from_research({**r, **{k: v for k, v in sets.items() if k == "contacts"}}, user)
+        if added:
+            sets["contacts_added"] = added
         await _db().radar_research.update_many({"company_id": r["company_id"], "status": "approved", "id": {"$ne": research_id}}, {"$set": {"status": "stale"}})
     elif body.action == "reject":
         sets.update({"status": "rejected", "reviewed_by": user["email"], "reviewed_at": now_iso(), "reject_reason": body.reason})
@@ -452,6 +483,22 @@ class TerritoriesIn(BaseModel):
     named_accounts: List[Dict[str, str]] = Field(default_factory=list, max_length=2000)
     rep_territory: Dict[str, str] = Field(default_factory=dict)
     rep_emails: Dict[str, str] = Field(default_factory=dict)
+
+
+@router.post("/accounts/{company_id}/people", dependencies=[can_work])
+async def find_people(company_id: str, user: dict = Depends(get_current_admin)):
+    import httpx
+    import radar_intel
+    c = await _db().companies.find_one({"id": company_id, **(await _visible(user))}, {"_id": 0})
+    if not c:
+        raise HTTPException(status_code=404, detail="Account not found")
+    known = {p["name"] async for p in _db().contacts.find({"company_id": company_id}, {"_id": 0, "name": 1}) if p.get("name")}
+    if not any(radar_intel.sources_available().values()):
+        raise HTTPException(status_code=422, detail="Add PARALLEL_API_KEY (web research) or HUNTER_API_KEY (business emails) on the server to find people.")
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        out = await radar_intel.find_people(client, c, known)
+    await rs.add_history(company_id, user["email"], "people", f"People search: {len(out['people'])} candidate(s)")
+    return out
 
 
 @router.get("/territories")

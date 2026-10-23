@@ -618,3 +618,106 @@ def test_keep_awake_pings_the_public_address(monkeypatch):
     monkeypatch.setenv("PUBLIC_API_URL", "http://127.0.0.1:8001")  # local preview: never ping
     run(ops.keep_awake())
     assert calls == ["https://api.example.test/api/"]
+
+
+# --- Live intelligence: web research and people -----------------------------------------------
+
+WEB = {
+    "programs": [{"url": "https://www.acmemutual.example/news/content-platform", "title": "Acme Mutual consolidates its content platforms", "date": "2026-09-01",
+                  "text": "Acme Mutual Insurance is retiring three legacy document systems by 2027 as part of a platform consolidation."}],
+    "people": [{"url": "https://www.acmemutual.example/about/leadership", "title": "Leadership | Acme Mutual", "date": "",
+                "text": "Dana Whitfield, Executive Vice President and Chief Information Officer, leads technology. Omar Haddad, Director of Records Management."}],
+    "news": [{"url": "https://news.example/acme-acquires", "title": "Acme Mutual completes acquisition of Initrode Life", "date": "2026-08-15",
+              "text": "The integration of Initrode Life's systems will run through 2027."}],
+}
+
+
+def _fake_web(monkeypatch):
+    import radar_intel
+
+    async def web_search(client_, objective, queries, max_chars=9000):
+        kind = "people" if "lead IT" in objective else "news" if "Material news" in objective else "programs"
+        return [dict(x) for x in WEB[kind]]
+    monkeypatch.setenv("PARALLEL_API_KEY", "test-key")
+    monkeypatch.setattr(radar_intel, "web_search", web_search)
+
+
+def test_people_must_be_named_in_a_source():
+    import radar_intel
+    sources = [{"url": "https://x.example/a", "title": "A", "text": "Dana Whitfield, Executive Vice President and Chief Information Officer"}]
+    kept = radar_intel.named_in_sources([{"name": "Dana Whitfield", "title": "EVP & CIO"}, {"name": "Invented Person", "title": "CTO"}], sources)
+    assert [p["name"] for p in kept] == ["Dana Whitfield"] and kept[0]["source_url"] == "https://x.example/a"
+    found = radar_intel.people_from_text(WEB["people"])
+    assert {p["name"] for p in found} == {"Dana Whitfield", "Omar Haddad"}
+    assert next(p for p in found if p["name"] == "Omar Haddad")["title"].startswith("Director of Records Management")
+
+
+def test_deep_dive_uses_live_web_sources_and_keeps_only_named_people(client, monkeypatch):
+    import radar_research
+    _fake_web(monkeypatch)
+
+    async def model(system, user):
+        assert "retiring three legacy document systems" in user and "Dana Whitfield" in user  # the model reads the pages, not just headlines
+        n = next(int(x) for x in __import__("re").findall(r"\[(\d+)\] Leadership \| Acme Mutual", user))
+        return (json.dumps({"score": 7, "verdict": "Ready for Outreach", "headline": "Acme is retiring legacy document systems [1].", "summary": "Platform consolidation [1].",
+                            "trigger": "Retirement by 2027 [1].", "why_solix_wins": "One archive.", "first_touch": {"subject": "Retiring old systems", "body": "Hi Dana,\n\nShort note.\n\nBest,\nPat"},
+                            "contacts": [{"name": "Dana Whitfield", "title": "EVP and CIO", "source": n}, {"name": "Made Up", "title": "CTO", "source": n}], "gaps": ""}), "test", "test-model")
+    monkeypatch.setattr(radar_research, "_complete", model)
+    acme = _company(client, "Acme Mutual")
+    client.post(f"/api/admin/radar/accounts/{acme['id']}/research")
+    run(radar_research.run_queue(only=None))
+    r = run(_mock_db.radar_research.find_one({"company_id": acme["id"], "status": "draft"}, sort=[("created_at", -1)]))
+    assert [c["name"] for c in r["contacts"]] == ["Dana Whitfield"]
+    assert r["contacts"][0]["source_url"] == "https://www.acmemutual.example/about/leadership"
+    kinds = {e["kind"] for e in r["evidence"]}
+    assert {"web:programs", "web:people", "web:news"} <= kinds and all("excerpt" in e for e in r["evidence"])
+    # Approving it puts the verified people on the account, with the page that named them.
+    before = run(_mock_db.contacts.count_documents({"company_id": acme["id"]}))
+    client.patch(f"/api/admin/radar/research/{r['id']}", json={"action": "approve"})
+    dana = run(_mock_db.contacts.find_one({"company_id": acme["id"], "name": "Dana Whitfield"}))
+    assert dana and dana["source"] == "research" and dana["source_url"] == "https://www.acmemutual.example/about/leadership"
+    assert run(_mock_db.contacts.count_documents({"company_id": acme["id"]})) == before + 1
+
+
+def test_find_people_merges_web_and_hunter_and_skips_known(client, monkeypatch):
+    import radar_intel
+    import radar_research
+    acme = _company(client, "Acme Mutual")
+    monkeypatch.delenv("PARALLEL_API_KEY", raising=False)
+    monkeypatch.delenv("HUNTER_API_KEY", raising=False)
+    assert client.post(f"/api/admin/radar/accounts/{acme['id']}/people").status_code == 422  # no live source configured
+    _fake_web(monkeypatch)
+    monkeypatch.setenv("HUNTER_API_KEY", "test-key")
+
+    async def no_model(system, user):
+        return None, None, None
+    monkeypatch.setattr(radar_research, "_complete", no_model)  # the "Name, Title" rules still find people
+
+    async def hunter(client_, domain, limit=15):
+        return {"people": [{"name": "Priya Nair", "title": "VP Enterprise Architecture", "email": "priya.nair@acmemutual.example", "email_confidence": 94,
+                            "email_status": "valid", "linkedin_url": None, "source_url": "https://www.acmemutual.example/blog/archive", "source_title": "acmemutual.example",
+                            "via": "hunter"}], "pattern": "{first}.{last}"}
+    monkeypatch.setattr(radar_intel, "hunter_people", hunter)
+    out = client.post(f"/api/admin/radar/accounts/{acme['id']}/people").json()
+    names = [p["name"] for p in out["people"]]
+    assert "Omar Haddad" in names and "Priya Nair" in names and "Dana Whitfield" not in names  # Dana is already a contact
+    assert out["email_pattern"] == "{first}.{last}" and out["sources_used"]["web_pages"] >= 1
+    assert all(p["source_url"] for p in out["people"])
+    assert next(p for p in out["people"] if p["name"] == "Priya Nair")["email"] == "priya.nair@acmemutual.example"
+
+
+def test_find_email_tries_hunter_first(client, monkeypatch):
+    import radar_intel
+    acme = _company(client, "Acme Mutual")
+    client.patch(f"/api/admin/radar/accounts/{acme['id']}", json={"domains": ["acmemutual.example"]})
+    c = client.post("/api/admin/outbound/contacts", json={"name": "Omar Haddad", "title": "Director of Records Management", "company_id": acme["id"]}).json()
+
+    async def finder(client_, domain, first, last):
+        assert (domain, first, last) == ("acmemutual.example", "Omar", "Haddad")
+        return {"email": "omar.haddad@acmemutual.example", "score": 91, "status": "valid", "source_url": "https://www.acmemutual.example/team"}
+    monkeypatch.setattr(radar_intel, "hunter_email", finder)
+    monkeypatch.setattr(outbound, "verify_email", _valid)
+    r = client.post(f"/api/admin/outbound/contacts/{c['id']}/find-email").json()
+    assert r["found"] == "omar.haddad@acmemutual.example"
+    saved = run(_mock_db.contacts.find_one({"id": c["id"]}))
+    assert saved["email_status"] == "valid" and saved["source_email"] == "hunter" and saved["email_source_url"] == "https://www.acmemutual.example/team"

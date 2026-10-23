@@ -895,6 +895,19 @@ async def find_email(contact_id: str):
     if not domain:
         raise HTTPException(status_code=422, detail="Add the account's web domain first (Account → Details)")
     tried = []
+    import radar_intel
+    async with httpx.AsyncClient() as client:
+        try:
+            hit = await radar_intel.hunter_email(client, domain, c.get("first_name"), c.get("last_name"))
+        except (httpx.HTTPError, ValueError):
+            hit = None
+    if hit:
+        v = await verify_email(hit["email"])
+        status = "valid" if hit.get("status") == "valid" or v["status"] == "valid" else v["status"]
+        await _db().contacts.update_one({"id": contact_id}, {"$set": {"email": hit["email"], "email_status": status, "verified_at": now_iso() if status == "valid" else None,
+                                                                    "verify_detail": f"Hunter (confidence {hit.get('score')})", "source_email": "hunter",
+                                                                    "email_source_url": hit.get("source_url")}})
+        return {"found": hit["email"], "tried": [{"email": hit["email"], "status": status, "detail": "Hunter Email Finder"}]}
     for cand in guess_emails(c.get("first_name"), c.get("last_name"), domain)[:6]:
         v = await verify_email(cand)
         tried.append({"email": cand, **v})
