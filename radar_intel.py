@@ -27,6 +27,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -268,6 +269,43 @@ async def extract_people(company: dict, sources: List[dict]) -> List[dict]:
     return people + people_from_text(sources)  # the rules catch "Name / Title" lines the model skipped; duplicates are dropped later
 
 
+_GENERIC_WORDS = {"systems", "system", "group", "holdings", "holding", "technologies", "technology", "tech", "solutions", "data", "software", "international",
+                  "global", "services", "the", "and", "company", "networks", "labs", "digital", "health", "financial", "bank", "energy", "industries",
+                  "partners", "capital", "resources", "mutual", "insurance", "communications", "enterprises", "therapeutics", "pharmaceuticals"}
+
+
+def _name_tokens(name: str) -> List[str]:
+    """The distinctive words of a company name: "Varonis Systems Inc" -> ["varonis"]."""
+    return [t for t in re.findall(r"[a-z0-9]+", search_name(name).lower()) if len(t) >= 3 and t not in _GENERIC_WORDS]
+
+
+def registrable(host: str) -> str:
+    """"blog.varonis.com" -> "varonis.com", "www.bbc.co.uk" -> "bbc.co.uk"."""
+    parts = host.lower().strip(".").split(".")
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in ("co", "com", "org", "net", "ac", "gov", "edu"):
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
+def domain_matches(domain: str, name: str) -> bool:
+    """Whether a domain plausibly belongs to the company: a distinctive word of its name is in the domain's own label
+    (varonis.com for Varonis Systems; not marini.systems, not varonis.myworkdayjobs.com)."""
+    label = registrable(domain).split(".")[0]
+    compact = re.sub(r"[^a-z0-9]", "", search_name(name).lower())
+    return any(t in label for t in _name_tokens(name)) or (len(compact) >= 3 and compact in label)
+
+
+def company_domain(company: dict, sources: List[dict]) -> Optional[str]:
+    """The account's domain, or else the company's own site among the fetched pages (its About page, its blog)."""
+    if company.get("domains"):
+        return company["domains"][0]
+    for s in sources:
+        host = urlparse(s.get("url") or "").hostname or ""
+        if host and domain_matches(host, company["name"]):
+            return registrable(host)
+    return None
+
+
 async def hunter_people(client: httpx.AsyncClient, domain: Optional[str], limit: int = 10, company: Optional[str] = None) -> dict:
     """Hunter Domain Search: decision makers in IT, executive and management, with work emails and where they were seen.
     Without a domain on the account, Hunter is asked by company name and says which domain it matched.
@@ -275,10 +313,13 @@ async def hunter_people(client: httpx.AsyncClient, domain: Optional[str], limit:
     if not os.environ.get("HUNTER_API_KEY") or not (domain or company):
         return {"people": [], "pattern": None, "domain": None}
     r = await client.get(f"{HUNTER_URL}/domain-search", timeout=30, params={
-        **({"domain": domain} if domain else {"company": company}), "api_key": os.environ["HUNTER_API_KEY"], "type": "personal", "limit": limit,
+        **({"domain": domain} if domain else {"company": search_name(company)}), "api_key": os.environ["HUNTER_API_KEY"], "type": "personal", "limit": limit,
         "department": "it,executive,management,legal,operations", "seniority": "senior,executive"})
     r.raise_for_status()
     data = r.json().get("data") or {}
+    if not domain and data.get("domain") and not domain_matches(data["domain"], company):
+        # Asked by name, Hunter picked a different company ("Varonis Systems" -> marini.systems): its people aren't the account's.
+        return {"people": [], "pattern": None, "domain": None, "mismatch": data["domain"]}
     domain = domain or data.get("domain")
     people = []
     for e in data.get("emails") or []:
@@ -312,8 +353,17 @@ async def find_people(client: httpx.AsyncClient, company: dict, known_names: Opt
     """Live candidates for an account: named in fetched web sources and/or found by Hunter, never invented."""
     known = {n.lower() for n in known_names or set()}
     problems: List[str] = []
-    web, hunter = await asyncio.gather(research_sources(client, company, ["people"], problems),
-                                       _safe_hunter(client, (company.get("domains") or [None])[0], search_name(company["name"]), problems))
+    if company.get("domains"):
+        web, hunter = await asyncio.gather(research_sources(client, company, ["people"], problems),
+                                           _safe_hunter(client, company["domains"][0], None, problems))
+    else:
+        # No domain on the account: find the company's own site in the web results first, so Hunter searches the right company.
+        web = await research_sources(client, company, ["people"], problems)
+        domain = company_domain(company, web)
+        hunter = await _safe_hunter(client, domain, None if domain else company["name"], problems)
+    if hunter.get("mismatch"):
+        _note(problems, f"Hunter matched {hunter['mismatch']}, which doesn't look like {company['name']}, so its people were left out. "
+                        "Add the account's website domain to use Hunter.")
     people = named_in_sources(await extract_people(company, web), web) + hunter["people"]
     out, seen = [], set()
     for p in people:

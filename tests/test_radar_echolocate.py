@@ -672,7 +672,8 @@ def test_deep_dive_uses_live_web_sources_and_keeps_only_named_people(client, mon
     assert [c["name"] for c in r["contacts"]] == ["Dana Whitfield"]
     assert r["contacts"][0]["source_url"] == "https://www.acmemutual.example/about/leadership"
     kinds = {e["kind"] for e in r["evidence"]}
-    assert {"web:programs", "web:people", "web:news"} <= kinds and all("excerpt" in e for e in r["evidence"])
+    assert {"web:programs", "web:people"} <= kinds and all("excerpt" in e for e in r["evidence"])
+    assert "web:news" not in kinds  # news comes from the free headline feeds, not a paid search
     assert r["source_notes"] == []
     # Approving it puts the verified people on the account, with the page that named them.
     before = run(_mock_db.contacts.count_documents({"company_id": acme["id"]}))
@@ -797,6 +798,57 @@ def test_firecrawl_reads_leadership_pages_and_caches(monkeypatch):
     assert calls.count("/v2/search") == 2 and calls.count("/v2/scrape") == 1
     run(go())  # the same search within a day comes from the cache: no new credits spent
     assert calls.count("/v2/search") == 2 and calls.count("/v2/scrape") == 1
+
+
+def test_company_domains_are_checked_against_the_name():
+    import radar_intel
+    assert radar_intel.domain_matches("www.varonis.com", "Varonis Systems Inc")
+    assert not radar_intel.domain_matches("marini.systems", "Varonis Systems Inc")
+    assert not radar_intel.domain_matches("varonis.wd1.myworkdayjobs.com", "Varonis Systems Inc")
+    assert radar_intel.domain_matches("8x8.com", "8X8 Inc /De/") and radar_intel.domain_matches("box.com", "Box Inc")
+    sources = [{"url": "https://www.comparably.com/companies/varonis-systems/executive-team"}, {"url": "https://www.varonis.com/company"}]
+    assert radar_intel.company_domain({"name": "Varonis Systems Inc"}, sources) == "varonis.com"
+    assert radar_intel.company_domain({"name": "Varonis Systems Inc", "domains": ["varonis.example"]}, sources) == "varonis.example"
+
+
+def test_hunter_uses_the_site_found_on_the_web_and_drops_a_wrong_company(monkeypatch):
+    import httpx
+    import radar_intel
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-test")
+    monkeypatch.setenv("HUNTER_API_KEY", "test-key")
+    monkeypatch.delenv("PARALLEL_API_KEY", raising=False)
+    hunter_asked = []
+
+    def handler(request):
+        if request.url.host == "api.hunter.io":
+            hunter_asked.append(dict(request.url.params))
+            if "company" in request.url.params:  # asked by name, Hunter matched someone else
+                return httpx.Response(200, json={"data": {"domain": "marini.systems", "pattern": "{first}.{last}", "emails": [
+                    {"value": "manuel.marini@marini.systems", "first_name": "Manuel", "last_name": "Marini", "position": "CEO", "confidence": 79}]}})
+            return httpx.Response(200, json={"data": {"domain": request.url.params["domain"], "pattern": "{first}", "emails": [
+                {"value": "gilad@tallwood.example", "first_name": "Gilad", "last_name": "Raz", "position": "CIO", "confidence": 91,
+                 "sources": [{"uri": "https://tallwood.example/company"}]}]}})
+        if request.url.path == "/v2/search":
+            q = json.loads(request.content)["query"]
+            web = [{"url": "https://www.tallwood.example/company", "title": "About Us", "description": "Leadership."}] if "Tallwood" in q else []
+            return httpx.Response(200, json={"success": True, "data": {"web": web}})
+        return httpx.Response(200, json={"success": True, "data": {"markdown": "Board of Directors", "metadata": {}}})
+
+    async def go(name):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            return await radar_intel.find_people(c, {"name": name, "domains": []})
+    found = run(go("Tallwood Archive Systems Inc"))
+    assert hunter_asked[-1]["domain"] == "tallwood.example" and "company" not in hunter_asked[-1]  # the company's own site, not a name guess
+    assert [p["name"] for p in found["people"]] == ["Gilad Raz"]
+    wrong = run(go("Quillfeather Systems Inc"))  # nothing on the web, so Hunter is asked by name and picks another company
+    assert hunter_asked[-1]["company"] == "Quillfeather Systems" and wrong["people"] == []
+    assert any("marini.systems" in p and "left out" in p for p in wrong["problems"])
+
+
+def test_list_answers_become_text():
+    import radar_research
+    assert radar_research._text(["No archiving pain named.", "Acquisition may shift priorities"]) == "No archiving pain named; Acquisition may shift priorities."
+    assert radar_research._text("Plain.") == "Plain." and radar_research._text(None) == ""
 
 
 def test_parallel_backs_up_firecrawl(monkeypatch):
