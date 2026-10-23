@@ -123,23 +123,23 @@ def _decorate(lead: dict) -> dict:
 @router.get("/leads")
 async def list_leads(f: LeadFilters = Depends(filters_dep), sort: str = "score", page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=200)):
     query = lead_query(f)
-    total = await db.leads.count_documents(query)
     cursor = db.leads.find(query, LEAD_LIST_FIELDS)
     for field, direction in SORTS.get(sort, SORTS["score"]):
         cursor = cursor.sort(field, direction)
-    items = await cursor.skip((page - 1) * page_size).limit(page_size).to_list(page_size)
+    total, items = await asyncio.gather(db.leads.count_documents(query), cursor.skip((page - 1) * page_size).limit(page_size).to_list(page_size))
     return {"items": [_decorate(i) for i in items], "total": total, "page": page, "page_size": page_size}
 
 
 @router.get("/leads/meta")
 async def leads_meta():
     """Everything the filter bar needs: lines, products, stages, owners, countries."""
-    team = await db.settings.find_one({"key": "team"}, {"_id": 0}) or {}
-    countries = sorted({c for c in await db.leads.distinct("country") if c})
+    team, countries, settings = await asyncio.gather(db.settings.find_one({"key": "team"}, {"_id": 0}), db.leads.distinct("country"), get_scoring_settings())
+    team = team or {}
+    countries = sorted({c for c in countries if c})
     return {
         "lines": [{"key": k, "label": v["label"], "products": v["products"]} for k, v in scoring.PRODUCT_LINES.items()],
         "stages": scoring.STAGES, "channels": list(CHANNELS), "industries": sorted(scoring.INDUSTRIES),
-        "owners": team.get("members", []), "countries": countries, "settings": await get_scoring_settings(),
+        "owners": team.get("members", []), "countries": countries, "settings": settings,
     }
 
 
@@ -148,17 +148,16 @@ async def get_lead(lead_id: str):
     lead = await db.leads.find_one({"id": lead_id}, {"_id": 0})
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
-    subs = await db.submissions.find({"$or": [{"lead_id": lead["id"]}, {"email": lead["email"]}]}, {"_id": 0}).sort("created_at", -1).to_list(100)
-    events = []
-    if lead.get("visitor_ids"):
-        events = await db.events.find({"visitor_id": {"$in": lead["visitor_ids"]}}, {"_id": 0, "at_dt": 0}).sort("at", -1).to_list(300)
+    subs, events, deliveries, linked = await asyncio.gather(
+        db.submissions.find({"$or": [{"lead_id": lead["id"]}, {"email": lead["email"]}]}, {"_id": 0}).sort("created_at", -1).to_list(100),
+        db.events.find({"visitor_id": {"$in": lead["visitor_ids"]}}, {"_id": 0, "at_dt": 0}).sort("at", -1).to_list(300) if lead.get("visitor_ids") else _empty(),
+        db.deliveries.find({"email": lead["email"], "status": {"$in": ["sent", "failed"]}}, {"_id": 0}).sort("created_at", -1).to_list(50),
+        _linked(lead))
     timeline = [{"kind": "form", "at": s["created_at"], "type": s["type"], "detail": s.get("interest") or s.get("resource") or s.get("message"), "source_page": s.get("source_page")} for s in subs]
     timeline += [{"kind": "event", "at": e["at"], "type": e["type"], "path": e.get("path"), "topics": e.get("topics"), "points": e.get("points"), "meta": e.get("meta")} for e in events]
     timeline += [{"kind": "stage", "at": h["at"], "type": h["stage"], "detail": h.get("reason"), "by": h.get("by")} for h in lead.get("stage_history") or []]
-    deliveries = await db.deliveries.find({"email": lead["email"], "status": {"$in": ["sent", "failed"]}}, {"_id": 0}).sort("created_at", -1).to_list(50)
     timeline += [{"kind": "email", "at": d["created_at"], "type": f"asset_{d['status']}", "detail": d.get("title"), "meta": {"attached": d.get("attached"), "reason": d.get("detail")}} for d in deliveries]
     timeline += [{"kind": "activity", "at": h["at"], "type": h.get("action"), "detail": h.get("detail"), "by": h.get("by")} for h in lead.get("history") or []]
-    linked = await _linked(lead)
     timeline += linked.pop("timeline")
     timeline.sort(key=lambda x: x["at"] or "", reverse=True)
     products = sorted(((p, v) for p, v in (lead.get("product_scores") or {}).items()), key=lambda x: -x[1])
@@ -175,6 +174,14 @@ async def get_lead(lead_id: str):
     }
 
 
+async def _empty() -> list:
+    return []
+
+
+async def _null() -> None:
+    return None
+
+
 ACCOUNT_FIELDS = {"_id": 0, "id": 1, "name": 1, "status": 1, "strength": 1, "score": 1, "owner": 1, "owner_name": 1, "territory": 1, "signal_count": 1,
                   "competitors": 1, "research_score": 1, "research_verdict": 1, "excluded_reason": 1, "surge": 1}
 
@@ -183,14 +190,16 @@ async def _linked(lead: dict) -> dict:
     """The same person elsewhere: their Radar account, outbound record, events and do-not-contact status."""
     import compliance
     email = lead["email"]
-    account = await db.companies.find_one({"id": lead["company_id"]}, ACCOUNT_FIELDS) if lead.get("company_id") else None
-    contacts = await db.contacts.find({"email": email}, {"_id": 0, "id": 1, "company_id": 1, "email_status": 1, "suppressed": 1, "persona": 1, "source": 1, "created_at": 1}).to_list(5)
+    account, contacts, regs, sup = await asyncio.gather(
+        db.companies.find_one({"id": lead["company_id"]}, ACCOUNT_FIELDS) if lead.get("company_id") else _null(),
+        db.contacts.find({"email": email}, {"_id": 0, "id": 1, "company_id": 1, "email_status": 1, "suppressed": 1, "persona": 1, "source": 1, "created_at": 1}).to_list(5),
+        db.event_registrations.find({"email": email}, {"_id": 0, "event": 1, "status": 1, "ticket_name": 1, "checked_in": 1, "checked_in_at": 1, "created_at": 1}).to_list(20),
+        db.suppression.find_one({"email_hash": compliance.email_hash(email)}, {"_id": 0, "reason": 1, "added_at": 1, "source": 1}))
     cids = [c["id"] for c in contacts]
-    enrollments = await db.enrollments.find({"contact_id": {"$in": cids}}, {"_id": 0, "steps": 0, "history": 0, "gate": 0}).sort("created_at", -1).to_list(20) if cids else []
-    sends = await db.sends.find({"$or": [{"contact_id": {"$in": cids}}, {"email": email}]}, {"_id": 0, "body": 0}).sort("sent_at", -1).to_list(50)
-    replies = await db.reply_log.find({"$or": [{"contact_id": {"$in": cids}}, {"email": email}]}, {"_id": 0, "meta": 0}).sort("received_at", -1).to_list(20)
-    regs = await db.event_registrations.find({"email": email}, {"_id": 0, "event": 1, "status": 1, "ticket_name": 1, "checked_in": 1, "checked_in_at": 1, "created_at": 1}).to_list(20)
-    sup = await db.suppression.find_one({"email_hash": compliance.email_hash(email)}, {"_id": 0, "reason": 1, "added_at": 1, "source": 1})
+    enrollments, sends, replies = await asyncio.gather(
+        db.enrollments.find({"contact_id": {"$in": cids}}, {"_id": 0, "steps": 0, "history": 0, "gate": 0}).sort("created_at", -1).to_list(20) if cids else _empty(),
+        db.sends.find({"$or": [{"contact_id": {"$in": cids}}, {"email": email}]}, {"_id": 0, "body": 0}).sort("sent_at", -1).to_list(50),
+        db.reply_log.find({"$or": [{"contact_id": {"$in": cids}}, {"email": email}]}, {"_id": 0, "meta": 0}).sort("received_at", -1).to_list(20))
     timeline = [{"kind": "outbound", "at": e.get("created_at"), "type": "enrolled", "detail": e.get("sequence_name"), "meta": {"status": e.get("status")}} for e in enrollments]
     timeline += [{"kind": "outbound", "at": x.get("sent_at") or x.get("created_at"), "type": "bounced" if x.get("bounced") else "sent", "detail": x.get("subject"),
                   "meta": {"step": x.get("step"), "status": x.get("status")}} for x in sends]
@@ -478,7 +487,11 @@ async def overview(request: Request, date_from: Optional[str] = None, date_to: O
         def share(rows: list) -> dict:
             return {"leads": len(rows), "sqls": sum(1 for r in rows if r.get("stage") in ("sql", "opportunity", "won")), "won": sum(1 for r in rows if r.get("stage") == "won")}
 
-        status_counts = {r["_id"] or "new": r["n"] async for r in db.companies.aggregate([{"$match": {"signal_count": {"$gt": 0}}}, {"$group": {"_id": "$status", "n": {"$sum": 1}}}])}
+        status_rows, sends_n, positive_n = await asyncio.gather(
+            db.companies.aggregate([{"$match": {"signal_count": {"$gt": 0}}}, {"$group": {"_id": "$status", "n": {"$sum": 1}}}]).to_list(None),
+            db.sends.count_documents({"sent_at": {"$gte": start, "$lte": end}}),
+            db.reply_log.count_documents({"received_at": {"$gte": start, "$lte": end}, "label": {"$in": ["interested", "meeting"]}}))
+        status_counts = {r["_id"] or "new": r["n"] for r in status_rows}
         account_funnel = [{"status": st, "count": sum(n for k, n in status_counts.items() if k in later)}
                           for st, later in (("signal", set(status_counts)), ("contacted", {"contacted", "replied", "meeting_booked", "opportunity", "won"}),
                                             ("replied", {"replied", "meeting_booked", "opportunity", "won"}), ("meeting_booked", {"meeting_booked", "opportunity", "won"}),
@@ -487,8 +500,8 @@ async def overview(request: Request, date_from: Optional[str] = None, date_to: O
             "radar_accounts": share([l for l in leads if l.get("company_id")]),
             "outbound_sourced": share([l for l in leads if l.get("channel") == "outbound"]),
             "outbound_touched": share([l for l in leads if "outbound" in (l.get("tags") or [])]),
-            "sends": await db.sends.count_documents({"sent_at": {"$gte": start, "$lte": end}}),
-            "positive_replies": await db.reply_log.count_documents({"received_at": {"$gte": start, "$lte": end}, "label": {"$in": ["interested", "meeting"]}}),
+            "sends": sends_n,
+            "positive_replies": positive_n,
             "account_funnel": account_funnel,
         }
 

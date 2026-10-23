@@ -598,3 +598,23 @@ def test_rep_scorecard(client):
     assert sum(r["accounts"] for r in rows) == total
     for r in rows:
         assert r["contacted"] >= r["replied"] >= r["meetings"] >= r["won"]
+
+
+def test_keep_awake_pings_the_public_address(monkeypatch):
+    import httpx
+    import ops
+    calls = []
+
+    async def fake_get(self, url, **kw):
+        calls.append(url)
+        return httpx.Response(200)
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    monkeypatch.setenv("PUBLIC_API_URL", "https://api.example.test/")
+    run(ops.keep_awake())
+    assert calls == ["https://api.example.test/api/"]
+    monkeypatch.setenv("KEEP_AWAKE", "0")
+    run(ops.keep_awake())
+    monkeypatch.setenv("KEEP_AWAKE", "1")
+    monkeypatch.setenv("PUBLIC_API_URL", "http://127.0.0.1:8001")  # local preview: never ping
+    run(ops.keep_awake())
+    assert calls == ["https://api.example.test/api/"]

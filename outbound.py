@@ -17,6 +17,7 @@ Flow
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -397,6 +398,7 @@ async def send_step(enr: dict, settings: dict) -> str:
             await _set_status(enr, "active", "system", f"Step {nxt} sent", {"step_index": nxt, "next_send_at": due, "first_sent_at": enr.get("first_sent_at") or send["sent_at"], "claim_until": None})
     if company and company.get("status") in rm.SYSTEM_STATUSES:
         await _db().companies.update_one({"id": company["id"]}, {"$set": {"status": "contacted"}})
+        rs.companies_changed()
         await rs.add_history(company["id"], "system", "outbound", f"First email {'handed to Instantly' if provider == 'instantly' else provider} for {contact.get('name')}")
     return send["status"]
 
@@ -632,6 +634,7 @@ async def handle_reply(contact: dict, text: str, *, source: str, label: Optional
             target = "meeting_booked" if label == "meeting" else "replied"
             if rs.STATUS_ORDER.index(target) > (rs.STATUS_ORDER.index(company["status"]) if company.get("status") in rs.STATUS_ORDER else -1):
                 await _db().companies.update_one({"id": company["id"]}, {"$set": {"status": target}})
+                rs.companies_changed()
         await ops.notify("replies", f":large_green_circle: {label.title()} reply from {who}. Lead {lead.get('stage', '').upper()}. Owner: {owner or 'unassigned'}.", event="reply_positive")
         if owner:
             html = (f"<p><b>{escape(who)}</b> replied ({escape(label)}).</p><blockquote>{escape((text or '')[:1500])}</blockquote>"
@@ -724,13 +727,17 @@ async def kpis(days: int = 30) -> dict:
     db = _db()
     since = (_now() - timedelta(days=days)).isoformat()
     week = (_now() - timedelta(days=7)).isoformat()
-    sends = await db.sends.find({"sent_at": {"$gte": since}}, {"_id": 0, "sequence_id": 1, "variant": 1, "bounced": 1, "status": 1, "step": 1}).to_list(100000)
-    replies = await db.reply_log.find({"received_at": {"$gte": since}}, {"_id": 0, "label": 1, "sequence_id": 1, "variant": 1, "received_at": 1}).to_list(100000)
+    sends, replies, seq_rows, runs, status = await asyncio.gather(
+        db.sends.find({"sent_at": {"$gte": since}}, {"_id": 0, "sequence_id": 1, "variant": 1, "bounced": 1, "status": 1, "step": 1}).to_list(100000),
+        db.reply_log.find({"received_at": {"$gte": since}}, {"_id": 0, "label": 1, "sequence_id": 1, "variant": 1, "received_at": 1}).to_list(100000),
+        db.sequences.find({}, {"_id": 0, "id": 1, "name": 1}).to_list(None),
+        db.ops_runs.find({"job": "radar_daily", "status": "ok"}, {"_id": 0, "started_at": 1}).sort("started_at", -1).to_list(60),
+        db.enrollments.aggregate([{"$group": {"_id": "$status", "n": {"$sum": 1}}}]).to_list(None))
     delivered = [s for s in sends if s.get("status") in ("sent", "handed_off", "delivered", "simulated")]
     bounced = sum(1 for s in sends if s.get("bounced"))
     positive = [r for r in replies if r["label"] in POSITIVE]
     by_seq: Dict[str, dict] = {}
-    names = {s["id"]: s["name"] async for s in db.sequences.find({}, {"_id": 0, "id": 1, "name": 1})}
+    names = {s["id"]: s["name"] for s in seq_rows}
     for s in delivered:
         row = by_seq.setdefault(f"{s['sequence_id']}|{s.get('variant')}", {"sequence": names.get(s["sequence_id"], "?"), "variant": s.get("variant"), "sends": 0, "replies": 0, "positive": 0})
         row["sends"] += 1
@@ -738,7 +745,6 @@ async def kpis(days: int = 30) -> dict:
         row = by_seq.setdefault(f"{r.get('sequence_id')}|{r.get('variant')}", {"sequence": names.get(r.get("sequence_id"), "Logged by hand"), "variant": r.get("variant"), "sends": 0, "replies": 0, "positive": 0})
         row["replies"] += 1
         row["positive"] += r["label"] in POSITIVE
-    runs = await db.ops_runs.find({"job": "radar_daily", "status": "ok"}, {"_id": 0, "started_at": 1}).sort("started_at", -1).to_list(60)
     days_ok = sorted({r["started_at"][:10] for r in runs}, reverse=True)
     streak, d = 0, _now().date()
     for i in range(0, 60):
@@ -747,7 +753,6 @@ async def kpis(days: int = 30) -> dict:
             streak += 1
         elif i > 0:
             break
-    status = await db.enrollments.aggregate([{"$group": {"_id": "$status", "n": {"$sum": 1}}}]).to_list(None)
     return {
         "window_days": days, "sends": len(delivered), "bounced": bounced, "bounce_rate": round(100 * bounced / len(delivered), 2) if delivered else None,
         "replies": len(replies), "reply_rate": round(100 * len(replies) / len(delivered), 2) if delivered else None, "positive": len(positive),
@@ -801,8 +806,8 @@ async def list_contacts(q: Optional[str] = None, company_id: Optional[str] = Non
         query["company_id"] = company_id
     if status:
         query["email_status"] = status
-    total = await _db().contacts.count_documents(query)
-    items = await _db().contacts.find(query, {"_id": 0}).sort("created_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
+    total, items = await asyncio.gather(_db().contacts.count_documents(query),
+                                        _db().contacts.find(query, {"_id": 0}).sort("created_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size))
     return {"items": items, "total": total}
 
 
@@ -1009,8 +1014,8 @@ async def list_enrollments(status: Optional[str] = None, company_id: Optional[st
         q["status"] = {"$in": status.split(",")}
     if company_id:
         q["company_id"] = company_id
-    total = await _db().enrollments.count_documents(q)
-    items = await _db().enrollments.find(q, {"_id": 0}).sort("created_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
+    total, items = await asyncio.gather(_db().enrollments.count_documents(q),
+                                        _db().enrollments.find(q, {"_id": 0}).sort("created_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size))
     return {"items": items, "total": total}
 
 
@@ -1078,8 +1083,8 @@ async def log_reply(body: ReplyIn, user: dict = Depends(get_current_admin)):
 @router.get("/replies")
 async def list_replies(label: Optional[str] = None, page: int = Query(1, ge=1), page_size: int = Query(50, le=200)):
     q = {"label": label} if label else {}
-    total = await _db().reply_log.count_documents(q)
-    items = await _db().reply_log.find(q, {"_id": 0}).sort("received_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
+    total, items = await asyncio.gather(_db().reply_log.count_documents(q),
+                                        _db().reply_log.find(q, {"_id": 0}).sort("received_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size))
     names = {c["id"]: c async for c in _db().contacts.find({"id": {"$in": [i["contact_id"] for i in items]}}, {"_id": 0, "id": 1, "name": 1, "company": 1, "title": 1, "lead_id": 1})}
     for i in items:
         i["contact"] = names.get(i["contact_id"])
@@ -1088,8 +1093,7 @@ async def list_replies(label: Optional[str] = None, page: int = Query(1, ge=1), 
 
 @router.get("/sends")
 async def list_sends(page: int = Query(1, ge=1), page_size: int = Query(50, le=200)):
-    total = await _db().sends.count_documents({})
-    items = await _db().sends.find({}, {"_id": 0}).sort("sent_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
+    total, items = await asyncio.gather(_db().sends.count_documents({}), _db().sends.find({}, {"_id": 0}).sort("sent_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size))
     return {"items": items, "total": total}
 
 

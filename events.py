@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from html import escape
 from typing import Dict, List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
 
@@ -285,7 +285,7 @@ def _payment_instructions(event: dict, ticket: dict, reg: dict) -> Optional[dict
 
 
 @public.post("/{slug}/registrations", status_code=201)
-async def register(slug: str, body: RegistrationIn, request: Request):
+async def register(slug: str, body: RegistrationIn, request: Request, background: BackgroundTasks):
     if _rate_limited(f"reg:{_ip(request)}", 10):
         raise HTTPException(status_code=429, detail="Too many registrations from this network. Try again in a minute.")
     if not body.accept_terms:
@@ -346,11 +346,8 @@ async def register(slug: str, body: RegistrationIn, request: Request):
     }
     await db.submissions.insert_one(dict(sub))
     asyncio.create_task(notify_lead(sub))
-    try:
-        topics = [t for i in reg["interests"] for t in INTERESTS[i]["topics"]]
-        await record_submission(sub, visitor_id=body.visitor_id, topics=topics, extra={"country": body.country}, tags=[slug])
-    except Exception:
-        logger.exception("lead scoring failed for event registration %s", reg["code"])
+    topics = [t for i in reg["interests"] for t in INTERESTS[i]["topics"]]
+    background.add_task(_score_registration, sub, body.visitor_id, topics, body.country, slug, reg["code"])
     asyncio.create_task(_send_confirmation(event, reg))
     return {**_registration_view(reg), "already_registered": False}
 
@@ -516,10 +513,11 @@ async def registrations(slug: str, q: Optional[str] = None, status: Optional[str
                         checked_in: Optional[bool] = None, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200)):
     event = await get_event(slug)
     query = _reg_query(slug, q, status, ticket, interest, checked_in)
-    total = await db.event_registrations.count_documents(query)
-    items = await db.event_registrations.find(query, {"_id": 0}).sort("created_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
-    everyone = await db.event_registrations.find({"event": slug}, {"_id": 0, "status": 1, "ticket_id": 1, "interests": 1, "days": 1, "dinners": 1,
-                                                                  "checked_in": 1, "amount": 1, "currency": 1, "created_at": 1, "utm": 1, "hackathon": 1}).to_list(50000)
+    total, items, everyone = await asyncio.gather(
+        db.event_registrations.count_documents(query),
+        db.event_registrations.find(query, {"_id": 0}).sort("created_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size),
+        db.event_registrations.find({"event": slug}, {"_id": 0, "status": 1, "ticket_id": 1, "interests": 1, "days": 1, "dinners": 1,
+                                                     "checked_in": 1, "amount": 1, "currency": 1, "created_at": 1, "utm": 1, "hackathon": 1}).to_list(50000))
     active = [r for r in everyone if r["status"] in ACTIVE]
     by = lambda key: dict(sorted({k: sum(1 for r in active if k in (r.get(key) or [])) for k in {x for r in active for x in (r.get(key) or [])}}.items()))
     trend: Dict[str, int] = {}
@@ -567,6 +565,14 @@ async def patch_registration(slug: str, reg_id: str, body: RegistrationPatch, us
         except Exception:
             logger.exception("lead update failed for check-in %s", reg_id)
     return res
+
+
+async def _score_registration(sub: dict, visitor_id: Optional[str], topics: list, country: Optional[str], slug: str, code: str) -> None:
+    """After the registrant has their confirmation: the lead behind it, scored and linked."""
+    try:
+        await record_submission(sub, visitor_id=visitor_id, topics=topics, extra={"country": country}, tags=[slug])
+    except Exception:
+        logger.exception("lead scoring failed for event registration %s", code)
 
 
 async def _attended(reg: dict, user: dict) -> None:

@@ -61,9 +61,8 @@ async def stats():
 @router.get("/submissions")
 async def list_submissions(type: Optional[str] = None, q: Optional[str] = None, status: Optional[str] = None, owner: Optional[str] = None, page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=200)):
     query = _query(type, q, status, owner)
-    total = await db.submissions.count_documents(query)
     cursor = db.submissions.find(query, {"_id": 0}).sort("created_at", -1).skip((page - 1) * page_size).limit(page_size)
-    items = await cursor.to_list(page_size)
+    total, items = await asyncio.gather(db.submissions.count_documents(query), cursor.to_list(page_size))
     for it in items:
         it.setdefault("status", "new")
     return {"items": items, "total": total, "page": page, "page_size": page_size}

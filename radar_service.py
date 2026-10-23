@@ -9,6 +9,7 @@ Rules that keep the data honest (carried over from the original Leads Radar):
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
@@ -137,12 +138,14 @@ async def get_or_create_company(name: str, *, domain: Optional[str] = None, hq: 
             changes["$set"] = {"hq": {**(company.get("hq") or {}), **{k: v for k, v in hq.items() if v}}}
         if changes:
             await _db().companies.update_one({"id": company["id"]}, changes)
+            companies_changed()
             company = await _db().companies.find_one({"id": company["id"]}, {"_id": 0})
             if "domains" in changes.get("$addToSet", {}):
                 await link_by_domain(company, [dom])
         return company
     company = new_company_doc(name, key, dom, hq, source)
     await _db().companies.insert_one(dict(company))
+    companies_changed()
     if dom:
         await link_by_domain(company)
     return company
@@ -233,6 +236,8 @@ class Resolver:
             changes.append(UpdateOne({"id": cid}, update))
         if changes:
             await db.companies.bulk_write(changes, ordered=False)
+        if self.created or changes:
+            companies_changed()
         if self.linking:
             await link_by_domain_many(self.linking)
 
@@ -246,6 +251,11 @@ async def save_signals(ops: list) -> int:
 
 def _history_op(company_id: str, by: str, action: str, detail: str = "") -> UpdateOne:
     return UpdateOne({"id": company_id}, {"$push": {"history": {"$each": [{"at": now_iso(), "by": by, "action": action, "detail": detail[:500]}], "$slice": -100}}})
+
+
+def companies_changed() -> None:
+    """Clear the Radar's cached account list after a write that changes what it shows."""
+    cache.bump("radar_companies")
 
 
 async def add_history(company_id: str, by: str, action: str, detail: str = "") -> None:
@@ -362,35 +372,40 @@ async def _recompute_batch(ids: List[str], ctx: tuple) -> List[dict]:
     if not companies:
         return []
     ids = [c["id"] for c in companies]
+    with_leads = {c["id"]: c for c in companies if c.get("lead_ids") or c.get("domains")}
+    listed: dict = defaultdict(set)
+    for cid, c in with_leads.items():
+        for lid in c.get("lead_ids") or []:
+            listed[lid].add(cid)
+    q = {"$or": [{"company_id": {"$in": list(with_leads)}}] + ([{"id": {"$in": list(listed)}}] if listed else [])}
+    sig_rows, research_rows, lead_rows, people, enrollment_rows = await asyncio.gather(
+        db.company_signals.find({"company_id": {"$in": ids}}, {"_id": 0, "raw": 0}).to_list(None),
+        db.radar_research.find({"company_id": {"$in": ids}, "status": {"$in": ["approved", "draft", "queued", "running"]}}, RESEARCH_FIELDS).to_list(None),
+        db.leads.find(q, LEAD_FIELDS).to_list(None) if with_leads else _nothing(),
+        db.contacts.find({"company_id": {"$in": ids}}, {"_id": 0, "company_id": 1, "email": 1, "email_status": 1, "suppressed": 1}).to_list(None),
+        db.enrollments.find({"company_id": {"$in": ids}}, {"_id": 0, "company_id": 1}).to_list(None))
     signals: dict = defaultdict(list)
-    async for sig in db.company_signals.find({"company_id": {"$in": ids}}, {"_id": 0, "raw": 0}):
+    for sig in sig_rows:
         signals[sig["company_id"]].append(sig)
     latest: dict = {}
     pending: set = set()
-    async for r in db.radar_research.find({"company_id": {"$in": ids}, "status": {"$in": ["approved", "draft", "queued", "running"]}}, RESEARCH_FIELDS):
+    for r in research_rows:
         if r["status"] in ("queued", "running", "draft"):
             pending.add(r["company_id"])
         cur = latest.get(r["company_id"])
         if r["status"] in ("approved", "draft") and (cur is None or str(r.get("created_at") or "") > str(cur.get("created_at") or "")):
             latest[r["company_id"]] = r
     # Website leads: those pointing at the account or listed on it (only for accounts that can have any).
-    with_leads = {c["id"]: c for c in companies if c.get("lead_ids") or c.get("domains")}
-    listed: dict = defaultdict(set)
-    for cid, c in with_leads.items():
-        for lid in c.get("lead_ids") or []:
-            listed[lid].add(cid)
     leads: dict = defaultdict(list)
-    if with_leads:
-        q = {"$or": [{"company_id": {"$in": list(with_leads)}}] + ([{"id": {"$in": list(listed)}}] if listed else [])}
-        async for lead in db.leads.find(q, LEAD_FIELDS):
-            for cid in ({lead.get("company_id")} & set(with_leads)) | listed.get(lead["id"], set()):
-                if len(leads[cid]) < 200:
-                    leads[cid].append(lead)
+    for lead in lead_rows:
+        for cid in ({lead.get("company_id")} & set(with_leads)) | listed.get(lead["id"], set()):
+            if len(leads[cid]) < 200:
+                leads[cid].append(lead)
     reachable: dict = defaultdict(int)
-    async for p in db.contacts.find({"company_id": {"$in": ids}}, {"_id": 0, "company_id": 1, "email": 1, "email_status": 1, "suppressed": 1}):
+    for p in people:
         if p.get("email") and not p.get("suppressed") and p.get("email_status") != "invalid":
             reachable[p["company_id"]] += 1
-    enrolled = {e["company_id"] async for e in db.enrollments.find({"company_id": {"$in": ids}}, {"_id": 0, "company_id": 1})}
+    enrolled = {e["company_id"] for e in enrollment_rows}
     refresh = int(settings.get("refresh_days") or 30)
     out, writes = [], []
     for c in companies:
@@ -400,8 +415,13 @@ async def _recompute_batch(ids: List[str], ctx: tuple) -> List[dict]:
         writes.append(UpdateOne({"id": c["id"]}, {"$set": update}))
         out.append({**c, **update})
     await db.companies.bulk_write(writes, ordered=False)
+    cache.bump("radar_companies")
     await _sync_lead_owners(out, leads)
     return out
+
+
+async def _nothing() -> list:
+    return []
 
 
 async def _sync_lead_owners(companies: List[dict], leads: dict) -> None:
@@ -461,10 +481,15 @@ async def rep_scorecard(days: int = 30) -> list:
     def blank(name: str, email: Optional[str]) -> dict:
         return {"rep": name, "owner": email, "patch": rm.REP_PATCH.get(name), "accounts": 0, "strong": 0, "surging": 0, "ready": 0, "new_7d": 0, "to_do": 0,
                 "website_leads": 0, **{k: 0 for k in FUNNEL}, "sends": 0, "positive_replies": 0}
-    rows = {m["email"]: blank(m["name"], m["email"]) for m in await sales_team()}
+    team, companies, sends, replies = await asyncio.gather(
+        sales_team(),
+        db.companies.find({"signal_count": {"$gt": 0}}, {"_id": 0, "id": 1, "owner": 1, "owner_name": 1, "strength": 1, "surge": 1, "status": 1,
+                                                        "next_action": 1, "first_seen_at": 1, "lead_ids": 1}).to_list(None),
+        db.sends.find({"sent_at": {"$gte": since}}, {"_id": 0, "company_id": 1}).to_list(None),
+        db.reply_log.find({"received_at": {"$gte": since}, "label": {"$in": ["interested", "meeting"]}}, {"_id": 0, "company_id": 1}).to_list(None))
+    rows = {m["email"]: blank(m["name"], m["email"]) for m in team}
     owner_of = {}
-    async for c in db.companies.find({"signal_count": {"$gt": 0}}, {"_id": 0, "id": 1, "owner": 1, "owner_name": 1, "strength": 1, "surge": 1, "status": 1,
-                                                                   "next_action": 1, "first_seen_at": 1, "lead_ids": 1}):
+    for c in companies:
         key = c.get("owner") or "unassigned"
         owner_of[c["id"]] = key
         r = rows.setdefault(key, blank("Unassigned" if key == "unassigned" else c.get("owner_name") or key, c.get("owner")))
@@ -477,10 +502,10 @@ async def rep_scorecard(days: int = 30) -> list:
         r["website_leads"] += len(c.get("lead_ids") or [])
         for k, statuses in FUNNEL.items():
             r[k] += c.get("status") in statuses
-    async for x in db.sends.find({"sent_at": {"$gte": since}}, {"_id": 0, "company_id": 1}):
+    for x in sends:
         if owner_of.get(x.get("company_id")) in rows:
             rows[owner_of[x["company_id"]]]["sends"] += 1
-    async for x in db.reply_log.find({"received_at": {"$gte": since}, "label": {"$in": ["interested", "meeting"]}}, {"_id": 0, "company_id": 1}):
+    for x in replies:
         if owner_of.get(x.get("company_id")) in rows:
             rows[owner_of[x["company_id"]]]["positive_replies"] += 1
     return sorted(rows.values(), key=lambda r: (r["owner"] is None, -r["accounts"]))
@@ -493,7 +518,7 @@ async def patch_company(company: dict, body: dict, user: dict) -> dict:
     if "owner" in body and body["owner"] is not None:
         owner = (body["owner"] or "").strip().lower() or None
         if owner != company.get("owner"):
-            members = await team_members()
+            members = (await _context())[1]
             sets.update({"owner": owner, "owner_name": next((m["name"] for m in members if m["email"] == owner), owner), "owner_basis": "manual" if owner else None})
             notes.append(("owner", f"Owner → {owner or 'unassigned'}"))
     if body.get("status") and body["status"] != company.get("status"):
@@ -521,8 +546,9 @@ async def patch_company(company: dict, body: dict, user: dict) -> dict:
         return company
     sets["updated_at"] = now_iso()
     await _db().companies.update_one({"id": company["id"]}, {"$set": sets})
-    for action, detail in notes:
-        await add_history(company["id"], user.get("email", "system"), action, detail)
+    if notes:
+        entries = [{"at": now_iso(), "by": user.get("email", "system"), "action": action, "detail": detail[:500]} for action, detail in notes]
+        await _db().companies.update_one({"id": company["id"]}, {"$push": {"history": {"$each": entries, "$slice": -100}}})
     if sets.get("domains"):
         await link_by_domain({**company, **sets})
     return await recompute(company["id"])
@@ -589,6 +615,7 @@ async def link_by_domain_many(pairs: List[tuple]) -> int:
     if lead_ops:
         await _db().leads.bulk_write(lead_ops, ordered=False)
         await _db().companies.bulk_write(company_ops, ordered=True)
+        companies_changed()
     if contact_ops:
         await _db().contacts.bulk_write(contact_ops, ordered=False)
     return sum(len(v) for v in by_company.values())

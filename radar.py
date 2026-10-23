@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+import cache
 import database
 import radar_model as rm
 import radar_service as rs
@@ -60,7 +61,7 @@ LIST_FIELDS = {"_id": 0, "history": 0, "alias_keys": 0}
 
 
 async def _visible(user: dict) -> dict:
-    cfg = await _db().settings.find_one({"key": "radar"}, {"_id": 0, "reps_see_own_only": 1}) or {}
+    cfg = (await rs._context())[2]
     if cfg.get("reps_see_own_only") and user.get("role") == "sales":
         return {"owner": user["email"].lower()}
     return {}
@@ -126,7 +127,13 @@ def _sort_key(sort: str):
 
 
 async def _base(user: dict) -> list:
-    return await _db().companies.find(await _visible(user), LIST_FIELDS).to_list(20000)
+    """Every visible account. Read by each Radar page load, so cached for 15s and cleared when any account changes.
+    Callers must not modify the dicts."""
+    q = await _visible(user)
+
+    async def load():
+        return await _db().companies.find(q, LIST_FIELDS).to_list(20000)
+    return await cache.memo("radar_companies", repr(sorted(q.items())), 15, load)
 
 
 def _card(c: dict, fresh: str) -> dict:
@@ -139,21 +146,28 @@ def _card(c: dict, fresh: str) -> dict:
 
 @router.get("/meta")
 async def meta():
-    terr = await rs.territories()
-    settings = await rs.radar_settings()
+    return await cache.memo("radar_ctx", "meta", 60, _meta)
+
+
+async def _meta() -> dict:
+    terr, settings, team, countries, states = await asyncio.gather(rs.territories(), rs.radar_settings(), rs.sales_team(),
+                                                                   _db().companies.distinct("countries"), _db().companies.distinct("states"))
     return {
         "strengths": rm.STRENGTHS, "statuses": [{"key": s, "label": rm.STATUS_LABELS[s]} for s in rm.STATUSES], "territories": rm.TERRITORY_ORDER,
         "competitors": [{"key": c["key"], "product": c["product"], "vendor": c["vendor"]} for c in rm.COMPETITORS], "highlight": rm.highlight_terms(),
-        "signal_types": rm.SIGNAL_TYPES, "team": await rs.sales_team(), "rep_patch": rm.REP_PATCH,
-        "countries": sorted(c for c in await _db().companies.distinct("countries") if c), "states": sorted(x for x in await _db().companies.distinct("states") if x), "reps": sorted({na["rep"] for na in terr.get("named_accounts", [])} | set((terr.get("us_states") or {}).values()) | set((terr.get("territory_owners") or {}).values())),
+        "signal_types": rm.SIGNAL_TYPES, "team": team, "rep_patch": rm.REP_PATCH,
+        "countries": sorted(c for c in countries if c), "states": sorted(x for x in states if x), "reps": sorted({na["rep"] for na in terr.get("named_accounts", [])} | set((terr.get("us_states") or {}).values()) | set((terr.get("territory_owners") or {}).values())),
         "settings": {k: settings[k] for k in ("research_per_run", "refresh_days", "collectors")}, "ready_score": rm.READY_SCORE,
     }
 
 
 @router.get("/summary")
 async def summary(f: RadarFilters = Depends(filters_dep), user: dict = Depends(get_current_admin)):
-    companies = await _base(user)
-    seen = await rs.seen_map(user["id"])
+    companies, seen, last, visit = await asyncio.gather(
+        _base(user), rs.seen_map(user["id"]),
+        _db().ops_runs.find_one({"job": "radar_daily"}, {"_id": 0, "notes": 0}, sort=[("started_at", -1)]),
+        _db().settings.find_one({"key": f"radar_visit:{user['id']}"}, {"_id": 0}))
+    visit = visit or {}
     fresh = {c["id"]: rs.freshness(c, seen) for c in companies}
     base = [c for c in companies if _passes(c, f, fresh[c["id"]], with_tab=False)]
     ids = [c["id"] for c in base]
@@ -194,8 +208,6 @@ async def summary(f: RadarFilters = Depends(filters_dep), user: dict = Depends(g
         r = t["reps"].setdefault(rep, {"rep": rep, "owner": c.get("owner"), "accounts": 0, "strong": 0})
         r["accounts"] += 1
         r["strong"] += c.get("strength") == "Strong"
-    last = await _db().ops_runs.find_one({"job": "radar_daily"}, {"_id": 0, "notes": 0}, sort=[("started_at", -1)])
-    visit = await _db().settings.find_one({"key": f"radar_visit:{user['id']}"}, {"_id": 0}) or {}
     await _db().settings.update_one({"key": f"radar_visit:{user['id']}"}, {"$set": {"last_visit": now_iso(), "prev_visit": visit.get("last_visit")}}, upsert=True)
     return {
         "accounts": len(base), "signals": total_signals, "by_strength": by_strength, "multi_signal": sum(1 for c in base if len(c.get("signal_types") or []) >= 2),
@@ -220,8 +232,7 @@ async def reps(days: int = Query(30, ge=7, le=365)):
 
 @router.get("/accounts")
 async def list_accounts(f: RadarFilters = Depends(filters_dep), sort: str = "strength", page: int = Query(1, ge=1), page_size: int = Query(40, ge=1, le=500), user: dict = Depends(get_current_admin)):
-    companies = await _base(user)
-    seen = await rs.seen_map(user["id"])
+    companies, seen = await asyncio.gather(_base(user), rs.seen_map(user["id"]))
     rows = []
     for c in companies:
         fr = rs.freshness(c, seen)
@@ -239,15 +250,18 @@ async def get_account(company_id: str, user: dict = Depends(get_current_admin)):
     c = await _db().companies.find_one({"id": company_id, **(await _visible(user))}, {"_id": 0})
     if not c:
         raise HTTPException(status_code=404, detail="Account not found")
-    signals = await _db().company_signals.find({"company_id": company_id}, {"_id": 0, "raw": 0}).sort([("posted_at", -1), ("first_seen_at", -1)]).to_list(1000)
+    db = _db()
+    signals, research, leads, contacts, enrollments, seen = await asyncio.gather(
+        db.company_signals.find({"company_id": company_id}, {"_id": 0, "raw": 0}).sort([("posted_at", -1), ("first_seen_at", -1)]).to_list(1000),
+        db.radar_research.find({"company_id": company_id}, {"_id": 0}).sort("created_at", -1).to_list(10),
+        db.leads.find({"$or": [{"company_id": company_id}, {"id": {"$in": c.get("lead_ids") or []}}]}, {"_id": 0, "id": 1, "email": 1, "name": 1, "job_title": 1, "stage": 1, "score": 1,
+                                                                                                          "primary_line": 1, "last_activity_at": 1, "owner": 1, "channel": 1}).to_list(100),
+        db.contacts.find({"company_id": company_id}, {"_id": 0}).sort("created_at", 1).to_list(200),
+        db.enrollments.find({"company_id": company_id}, {"_id": 0}).sort("created_at", -1).to_list(100),
+        rs.seen_map(user["id"]))
     signals.sort(key=lambda s: (rm.STRENGTH_RANK.get(s.get("role_strength") or "Unrated", 3) if s["type"] == "competitor_job" else 4, str(s.get("posted_at") or s.get("first_seen_at") or "")), reverse=False)
-    research = await _db().radar_research.find({"company_id": company_id}, {"_id": 0}).sort("created_at", -1).to_list(10)
-    leads = await _db().leads.find({"$or": [{"company_id": company_id}, {"id": {"$in": c.get("lead_ids") or []}}]}, {"_id": 0, "id": 1, "email": 1, "name": 1, "job_title": 1, "stage": 1, "score": 1, "primary_line": 1, "last_activity_at": 1, "owner": 1, "channel": 1}).to_list(100)
-    contacts = await _db().contacts.find({"company_id": company_id}, {"_id": 0}).sort("created_at", 1).to_list(200)
-    enrollments = await _db().enrollments.find({"company_id": company_id}, {"_id": 0}).sort("created_at", -1).to_list(100)
     for e in enrollments:  # the rendered copy stays out of the drawer payload; only its length is shown
         e["steps_total"] = len(e.pop("steps", None) or [])
-    seen = await rs.seen_map(user["id"])
     return {"account": _card(c, rs.freshness(c, seen)), "signals": signals, "research": research, "leads": leads, "contacts": contacts, "enrollments": enrollments}
 
 

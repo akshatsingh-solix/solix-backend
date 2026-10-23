@@ -199,29 +199,28 @@ async def watchdog() -> list:
         if not ok:
             await alert(code, f"{label}: {detail}", severity=severity)
 
-    collect = await last_run("radar_daily", None)
+    collect, good, out, tick_run, unrouted, conflicts, failed = await asyncio.gather(
+        last_run("radar_daily", None), last_run("radar_daily"), db.settings.find_one({"key": "outbound"}, {"_id": 0}), last_run("outbound_tick"),
+        db.companies.count_documents({"strength": "Strong", "owner": {"$in": [None, ""]}, "created_at": {"$lte": _ago(24)}, "excluded_reason": None}),
+        db.companies.count_documents({"route_basis": "needs_routing", "strength": {"$in": ["Strong", "Medium"]}}),
+        db.ops_outbox.count_documents({"status": "failed", "done_at": {"$gte": _ago(24)}}))
+    out = out or {}
     if collect:
-        good = await last_run("radar_daily")
         fresh = bool(good and good["started_at"] >= _ago(26))
         await check("radar_stale", fresh, "Radar daily run", f"last successful run {good['started_at'][:16] if good else 'never'} UTC" + ("" if fresh else " (over 26 hours ago)"))
     else:
         checks.append({"code": "radar_stale", "ok": True, "label": "Radar daily run", "detail": "not scheduled yet", "severity": "ok"})
 
-    out = await db.settings.find_one({"key": "outbound"}, {"_id": 0}) or {}
     if out.get("sending_enabled") and not out.get("paused"):
-        tick = await last_run("outbound_tick")
-        fresh = bool(tick and tick["started_at"] >= _ago(0.75))
-        await check("outbound_stale", fresh, "Outbound sender", f"last tick {tick['started_at'][:16] if tick else 'never'} UTC" + ("" if fresh else " (sending is on but the sender has gone quiet)"), "fail")
+        fresh = bool(tick_run and tick_run["started_at"] >= _ago(0.75))
+        await check("outbound_stale", fresh, "Outbound sender", f"last tick {tick_run['started_at'][:16] if tick_run else 'never'} UTC" + ("" if fresh else " (sending is on but the sender has gone quiet)"), "fail")
     else:
         checks.append({"code": "outbound_stale", "ok": True, "label": "Outbound sender", "detail": "paused" if out.get("paused") else "sending is off", "severity": "ok"})
     if out.get("paused") and out.get("pause_reason"):
         await check("outbound_paused", False, "Outbound paused", out["pause_reason"], "fail")
 
-    unrouted = await db.companies.count_documents({"strength": "Strong", "owner": {"$in": [None, ""]}, "created_at": {"$lte": _ago(24)}, "excluded_reason": None})
     await check("unassigned", unrouted == 0, "Unassigned strong accounts", f"{unrouted} strong account(s) without an owner for over 24h")
-    conflicts = await db.companies.count_documents({"route_basis": "needs_routing", "strength": {"$in": ["Strong", "Medium"]}})
     await check("needs_routing", conflicts == 0, "Accounts needing routing", f"{conflicts} account(s) the territory rules couldn't place")
-    failed = await db.ops_outbox.count_documents({"status": "failed", "done_at": {"$gte": _ago(24)}})
     await check("outbox_failed", failed == 0, "Deliveries", f"{failed} Slack/Digiprise/email deliveries failed in the last 24h")
     return checks
 
@@ -246,11 +245,27 @@ async def tick(jobs: tuple = ("outbox", "outbound", "watchdog")) -> dict:
     return out
 
 
+async def keep_awake() -> None:
+    """Render's free tier sleeps after 15 idle minutes and takes up to a minute to wake. A request to our own public
+    address goes through Render's router like any visitor's, so pinging it every 10 minutes keeps the API awake.
+    KEEP_AWAKE=0 turns it off (for example on a paid instance)."""
+    base = (os.environ.get("PUBLIC_API_URL") or "").rstrip("/")
+    if not base.startswith("https://") or os.environ.get("KEEP_AWAKE", "1") == "0":
+        return
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            await client.get(f"{base}/api/")
+    except httpx.HTTPError:
+        pass
+
+
 async def background_loop() -> None:
-    """Outbox every minute, sender every 10 minutes, watchdog every 30 minutes."""
+    """Outbox every minute, sender every 10 minutes, watchdog every 30 minutes, keep-awake ping every 10 minutes."""
     n = 0
     await asyncio.sleep(20)
     while True:
+        if n % 10 == 0:
+            await keep_awake()
         try:
             jobs = ["outbox"]
             if n % 10 == 0:
@@ -274,12 +289,11 @@ def start_background() -> None:
 
 @router.get("/health")
 async def health():
-    checks = await watchdog()
-    runs = await _db().ops_runs.find({}, {"_id": 0, "notes": 0}).sort("started_at", -1).to_list(40)
-    pending = await _db().ops_outbox.count_documents({"status": "pending"})
-    failed = await _db().ops_outbox.count_documents({"status": "failed"})
-    alerts = await _db().ops_alerts.find({}, {"_id": 0}).sort("created_at", -1).to_list(20)
-    return {"checks": checks, "runs": runs, "outbox": {"pending": pending, "failed": failed}, "alerts": alerts, "integrations": await integrations()}
+    db = _db()
+    checks, runs, pending, failed, alerts, links = await asyncio.gather(
+        watchdog(), db.ops_runs.find({}, {"_id": 0, "notes": 0}).sort("started_at", -1).to_list(40), db.ops_outbox.count_documents({"status": "pending"}),
+        db.ops_outbox.count_documents({"status": "failed"}), db.ops_alerts.find({}, {"_id": 0}).sort("created_at", -1).to_list(20), integrations())
+    return {"checks": checks, "runs": runs, "outbox": {"pending": pending, "failed": failed}, "alerts": alerts, "integrations": links}
 
 
 @router.get("/runs")
