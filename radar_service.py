@@ -13,7 +13,7 @@ import json
 import re
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable, List, Optional
 
 from pymongo import UpdateMany, UpdateOne
@@ -84,6 +84,25 @@ async def team_members() -> list:
         if u["email"] not in known:
             members.append({"name": u.get("name") or u["email"], "email": u["email"]})
     return members
+
+
+async def sales_team() -> list:
+    """Settings → Sales team: the people accounts and leads are assigned to (staff logins aren't listed)."""
+    return list((await _db().settings.find_one({"key": "team"}, {"_id": 0}) or {}).get("members") or [])
+
+
+async def ensure_sales_team() -> bool:
+    """Once per database: Settings → Sales team becomes the Leads Radar's reps, replacing earlier names. The old
+    list is kept in the migration record; edits made afterwards in Settings are never overwritten."""
+    db = _db()
+    if await db.settings.find_one({"key": "migrations", "sales_team_radar_v1": {"$exists": True}}, {"_id": 1}):
+        return False
+    previous = await sales_team()
+    members = [{"name": name, "email": rm.rep_email_guess(name)} for name, _ in rm.SALES_REPS]
+    await db.settings.update_one({"key": "team"}, {"$set": {"members": members, "updated_at": now_iso()}}, upsert=True)
+    await db.settings.update_one({"key": "migrations"}, {"$set": {"sales_team_radar_v1": {"at": now_iso(), "previous_members": previous}}}, upsert=True)
+    cache.bump("radar_ctx")
+    return True
 
 
 def rep_email(rep: Optional[str], terr: dict, members: list) -> Optional[str]:
@@ -267,6 +286,7 @@ async def upsert_signal(company: dict, sig: dict, run_id: Optional[str] = None) 
 # all its accounts need in a handful of queries and writes them back in one bulk call. One
 # account or all of them go through the same path.
 
+SEARCH_FIELDS = ("title", "role_title", "person", "person_title", "location", "state", "country", "competitor_product", "problem_term", "buyer", "domain")
 RESEARCH_FIELDS = {"_id": 0, "id": 1, "company_id": 1, "status": 1, "score": 1, "verdict": 1, "created_at": 1}
 LEAD_FIELDS = {"_id": 0, "id": 1, "score": 1, "product_scores": 1, "stage": 1, "email": 1, "owner": 1, "company_id": 1}
 BATCH = 200
@@ -330,6 +350,8 @@ def _compute(company: dict, signals: list, research: Optional[dict], pending: bo
             status = target
     update["status"] = status
     update["stamp"] = rm.freshness_stamp({**company, **update})
+    words = {str(sig.get(k)).strip().lower() for sig in signals for k in SEARCH_FIELDS if sig.get(k)}
+    update["search_text"] = " | ".join(sorted(words))[:6000]
     return update
 
 
@@ -364,9 +386,17 @@ async def _recompute_batch(ids: List[str], ctx: tuple) -> List[dict]:
             for cid in ({lead.get("company_id")} & set(with_leads)) | listed.get(lead["id"], set()):
                 if len(leads[cid]) < 200:
                     leads[cid].append(lead)
+    reachable: dict = defaultdict(int)
+    async for p in db.contacts.find({"company_id": {"$in": ids}}, {"_id": 0, "company_id": 1, "email": 1, "email_status": 1, "suppressed": 1}):
+        if p.get("email") and not p.get("suppressed") and p.get("email_status") != "invalid":
+            reachable[p["company_id"]] += 1
+    enrolled = {e["company_id"] async for e in db.enrollments.find({"company_id": {"$in": ids}}, {"_id": 0, "company_id": 1})}
+    refresh = int(settings.get("refresh_days") or 30)
     out, writes = [], []
     for c in companies:
         update = _compute(c, signals[c["id"]], latest.get(c["id"]), c["id"] in pending, leads[c["id"]], terr, members, settings, half_life)
+        update["next_action"] = rm.next_action({**c, **update}, reachable=reachable[c["id"]], enrolled=c["id"] in enrolled, research=latest.get(c["id"]),
+                                               signals=signals[c["id"]], refresh_days=refresh)
         writes.append(UpdateOne({"id": c["id"]}, {"$set": update}))
         out.append({**c, **update})
     await db.companies.bulk_write(writes, ordered=False)
@@ -414,6 +444,46 @@ async def recompute_many(ids: Iterable[str]) -> int:
 async def recompute_all() -> int:
     ids = [c["id"] async for c in _db().companies.find({}, {"_id": 0, "id": 1})]
     return await recompute_many(ids)
+
+
+# --- Rep scorecard ------------------------------------------------------------------------
+
+FUNNEL = {"contacted": {"contacted", "replied", "meeting_booked", "opportunity", "won"}, "replied": {"replied", "meeting_booked", "opportunity", "won"},
+          "meetings": {"meeting_booked", "opportunity", "won"}, "won": {"won"}}
+
+
+async def rep_scorecard(days: int = 30) -> list:
+    """Per rep: their accounts, what's hot, what's waiting on them, how far accounts got, and outbound activity."""
+    db = _db()
+    now = datetime.now(timezone.utc)
+    since, week = (now - timedelta(days=days)).isoformat(), (now - timedelta(days=7)).isoformat()
+
+    def blank(name: str, email: Optional[str]) -> dict:
+        return {"rep": name, "owner": email, "patch": rm.REP_PATCH.get(name), "accounts": 0, "strong": 0, "surging": 0, "ready": 0, "new_7d": 0, "to_do": 0,
+                "website_leads": 0, **{k: 0 for k in FUNNEL}, "sends": 0, "positive_replies": 0}
+    rows = {m["email"]: blank(m["name"], m["email"]) for m in await sales_team()}
+    owner_of = {}
+    async for c in db.companies.find({"signal_count": {"$gt": 0}}, {"_id": 0, "id": 1, "owner": 1, "owner_name": 1, "strength": 1, "surge": 1, "status": 1,
+                                                                   "next_action": 1, "first_seen_at": 1, "lead_ids": 1}):
+        key = c.get("owner") or "unassigned"
+        owner_of[c["id"]] = key
+        r = rows.setdefault(key, blank("Unassigned" if key == "unassigned" else c.get("owner_name") or key, c.get("owner")))
+        r["accounts"] += 1
+        r["strong"] += c.get("strength") == "Strong"
+        r["surging"] += bool(c.get("surge"))
+        r["ready"] += c.get("status") == "ready"
+        r["new_7d"] += str(c.get("first_seen_at") or "") >= week
+        r["to_do"] += bool(c.get("next_action"))
+        r["website_leads"] += len(c.get("lead_ids") or [])
+        for k, statuses in FUNNEL.items():
+            r[k] += c.get("status") in statuses
+    async for x in db.sends.find({"sent_at": {"$gte": since}}, {"_id": 0, "company_id": 1}):
+        if owner_of.get(x.get("company_id")) in rows:
+            rows[owner_of[x["company_id"]]]["sends"] += 1
+    async for x in db.reply_log.find({"received_at": {"$gte": since}, "label": {"$in": ["interested", "meeting"]}}, {"_id": 0, "company_id": 1}):
+        if owner_of.get(x.get("company_id")) in rows:
+            rows[owner_of[x["company_id"]]]["positive_replies"] += 1
+    return sorted(rows.values(), key=lambda r: (r["owner"] is None, -r["accounts"]))
 
 
 # --- People edits --------------------------------------------------------------------------

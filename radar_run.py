@@ -18,6 +18,7 @@ from html import escape
 from typing import Iterable, Optional
 
 import httpx
+from pymongo import UpdateOne
 
 import database
 import ops
@@ -31,6 +32,12 @@ logger = logging.getLogger("solix.radar.run")
 
 def _db():
     return database.db
+
+
+async def _as_list(coro) -> list:
+    """A lookup's result as a one-item list, so `guarded` can count it and swallow its errors."""
+    result = await coro
+    return [result] if result else []
 
 
 async def collect(run: dict) -> set:
@@ -65,12 +72,25 @@ async def collect(run: dict) -> set:
                     owners[d] = c["name"]
                     domains.add(d)
             sem = asyncio.Semaphore(8)
+            scan = sorted(domains)[:800]
+            # Each scan is compared with the last one, so a fingerprint that appears or disappears is a signal of its own.
+            snaps = {x["domain"]: x.get("records") or {} async for x in _db().radar_dns.find({"domain": {"$in": scan}}, {"_id": 0})}
+            snap_ops = []
 
             async def one(d):
                 async with sem:
-                    return await guarded("dns", rc.dns_signals(client, owners.get(d) or d.split(".")[0].title(), d, use_crtsh=len(domains) <= 200))
-            for got in await asyncio.gather(*(one(d) for d in sorted(domains)[:800])):
+                    records = await guarded("dns_lookup", _as_list(rc.dns_records(client, d, use_crtsh=len(domains) <= 200)))
+                    if not records:
+                        return []
+                    found = rc.dns_signals_from(owners.get(d) or d.split(".")[0].title(), d, records[0], snaps.get(d))
+                    snap_ops.append(UpdateOne({"domain": d}, {"$set": {**{f"records.{t}": v for t, v in records[0].items()}, "scanned_at": now_iso()}}, upsert=True))
+                    counts["dns_found"] = counts.get("dns_found", 0) + len(found)
+                    counts["dns_changes"] = counts.get("dns_changes", 0) + sum(1 for x in found if x.get("action") in ("added", "removed"))
+                    return found
+            for got in await asyncio.gather(*(one(d) for d in scan)):
                 signals += got
+            if snap_ops:
+                await _db().radar_dns.bulk_write(snap_ops, ordered=False)
         if on.get("news"):
             hot = await _db().companies.find({"strength": "Strong", "excluded_reason": None}, {"_id": 0, "name": 1, "domains": 1}).sort("score", -1).to_list(15)
             for c in hot:

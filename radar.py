@@ -69,7 +69,8 @@ async def _visible(user: dict) -> dict:
 def _passes(c: dict, f: RadarFilters, fresh: str, *, with_tab: bool = True) -> bool:
     if f.q:
         q = f.q.strip().lower()
-        hay = " ".join([c.get("name") or "", " ".join(c.get("aliases") or []), " ".join(c.get("domains") or []), " ".join(c.get("competitors") or []), c.get("owner_name") or ""]).lower()
+        hay = " ".join([c.get("name") or "", " ".join(c.get("aliases") or []), " ".join(c.get("domains") or []), " ".join(c.get("competitors") or []), c.get("owner_name") or "",
+                        c.get("search_text") or ""]).lower()
         if q not in hay:
             return False
     if f.competitor and f.competitor not in (c.get("competitor_keys") or []):
@@ -97,6 +98,8 @@ def _passes(c: dict, f: RadarFilters, fresh: str, *, with_tab: bool = True) -> b
         return True
     if f.tab == "new":
         return fresh != "seen"
+    if f.tab == "todo":
+        return bool(c.get("next_action"))
     if f.tab == "dives":
         return bool(c.get("research_id"))
     if f.tab == "ready":
@@ -127,6 +130,7 @@ async def _base(user: dict) -> list:
 
 
 def _card(c: dict, fresh: str) -> dict:
+    c = {k: v for k, v in c.items() if k != "search_text"}
     return {**c, "fresh": fresh, "verdict_class": rm.verdict_class({"score": c.get("research_score"), "verdict": c.get("research_verdict")}) if c.get("research_id") else None,
             "status_label": rm.STATUS_LABELS.get(c.get("status"), c.get("status"))}
 
@@ -140,7 +144,8 @@ async def meta():
     return {
         "strengths": rm.STRENGTHS, "statuses": [{"key": s, "label": rm.STATUS_LABELS[s]} for s in rm.STATUSES], "territories": rm.TERRITORY_ORDER,
         "competitors": [{"key": c["key"], "product": c["product"], "vendor": c["vendor"]} for c in rm.COMPETITORS], "highlight": rm.highlight_terms(),
-        "signal_types": rm.SIGNAL_TYPES, "team": await rs.team_members(), "reps": sorted({na["rep"] for na in terr.get("named_accounts", [])} | set((terr.get("us_states") or {}).values()) | set((terr.get("territory_owners") or {}).values())),
+        "signal_types": rm.SIGNAL_TYPES, "team": await rs.sales_team(), "rep_patch": rm.REP_PATCH,
+        "countries": sorted(c for c in await _db().companies.distinct("countries") if c), "states": sorted(x for x in await _db().companies.distinct("states") if x), "reps": sorted({na["rep"] for na in terr.get("named_accounts", [])} | set((terr.get("us_states") or {}).values()) | set((terr.get("territory_owners") or {}).values())),
         "settings": {k: settings[k] for k in ("research_per_run", "refresh_days", "collectors")}, "ready_score": rm.READY_SCORE,
     }
 
@@ -156,8 +161,22 @@ async def summary(f: RadarFilters = Depends(filters_dep), user: dict = Depends(g
     comp_counts: Dict[str, int] = {}
     new_today = 0
     total_signals = 0
+    now = datetime.now(timezone.utc)
+    monday = (now - timedelta(days=now.weekday())).date()
+    weeks = [(monday - timedelta(weeks=w)).isoformat() for w in range(11, -1, -1)]
+    trend: Dict[str, Dict[str, int]] = {}
     async for s in _db().company_signals.find({"company_id": {"$in": ids}}, {"_id": 0, "competitor_product": 1, "competitor_key": 1, "first_seen_at": 1}):
         total_signals += 1
+        seen_on = str(s.get("first_seen_at") or "")[:10]
+        if s.get("competitor_key") and seen_on >= weeks[0]:
+            try:
+                d = datetime.fromisoformat(seen_on).date()
+                wk = (d - timedelta(days=d.weekday())).isoformat()
+            except ValueError:
+                wk = None
+            if wk in weeks:
+                row = trend.setdefault(s["competitor_key"], {})
+                row[wk] = row.get(wk, 0) + 1
         if s.get("competitor_key"):
             label = (rm.COMPETITOR_BY_KEY.get(s["competitor_key"]) or {}).get("product") or s.get("competitor_product")
             comp_counts[label] = comp_counts.get(label, 0) + 1
@@ -187,9 +206,16 @@ async def summary(f: RadarFilters = Depends(filters_dep), user: dict = Depends(g
         "competitors": [{"product": k, "signals": v} for k, v in sorted(comp_counts.items(), key=lambda kv: -kv[1])[:8]],
         "scope": [{"id": c["id"], "name": c["name"], "strength": c.get("strength"), "signals": c.get("signal_count") or 0, "dive": c.get("research_score"), "surge": c.get("surge"), "fresh": fresh[c["id"]]} for c in base],
         "territories": [{**t, "reps": sorted(t["reps"].values(), key=lambda r: -r["accounts"])} for t in sorted(terr.values(), key=lambda t: rm.TERRITORY_ORDER.index(t["territory"]) if t["territory"] in rm.TERRITORY_ORDER else 99)],
-        "tabs": {tab: sum(1 for c in base if _passes(c, RadarFilters(tab=tab), fresh[c["id"]])) for tab in ("new", "dives", "jobs", "problems", "linkedin", "dns", "news", "tenders", "website", "ready", "surge", "excluded")},
+        "tabs": {tab: sum(1 for c in base if _passes(c, RadarFilters(tab=tab), fresh[c["id"]])) for tab in ("new", "todo", "dives", "jobs", "problems", "linkedin", "dns", "news", "tenders", "website", "ready", "surge", "excluded")},
+        "trend": {"weeks": weeks, "series": [{"key": k, "product": (rm.COMPETITOR_BY_KEY.get(k) or {}).get("product", k), "counts": [v.get(w, 0) for w in weeks]}
+                                             for k, v in sorted(trend.items(), key=lambda kv: -sum(kv[1].values()))[:6]]},
         "last_run": last,
     }
+
+
+@router.get("/reps")
+async def reps(days: int = Query(30, ge=7, le=365)):
+    return {"days": days, "reps": await rs.rep_scorecard(days)}
 
 
 @router.get("/accounts")

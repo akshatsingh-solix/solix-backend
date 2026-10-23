@@ -211,6 +211,30 @@ ISO2 = {"united states": "US", "canada": "CA", "united kingdom": "GB", "germany"
         "india": "IN", "singapore": "SG", "australia": "AU", "united arab emirates": "AE", "japan": "JP", "liechtenstein": "LI", "luxembourg": "LU", "portugal": "PT"}
 
 # The routing table the original Leads Radar used, as the editable default.
+SALES_REPS = [
+    ("Andy Hebert", "CT, MA, RI, NH, VT, ME"),
+    ("Tracy Blackburn", "OH, KY, TN, GA, AL, MS, NJ"),
+    ("Bo Deas", "NC, SC, VA, WV, DE, DC, FL, MD"),
+    ("Hameed Hemmat", "N. CA, NV, WA, WY, ID, AK, HI, MT, OR, MO"),
+    ("Keith Lee", "CO, TX, IN"),
+    ("Brenda Goldstein", "S. CA, AZ, UT, NM, IL"),
+    ("Steve Morris", "WI, MI, LA, ND, SD, NE, KS, OK, MN, AR, IA"),
+    ("Jason Russo", "NY, PA, LATAM, and anything needing routing"),
+    ("Alan Schneider", "Named accounts"),
+    ("Robert Hicks", "Strategic named accounts"),
+    ("Bob Wright", "Canada"),
+    ("Matt Long", "Europe and UK"),
+    ("Anil Kumar", "Middle East and Africa"),
+    ("Samit Mandal", "APAC, India, Japan"),
+]
+REP_PATCH = dict(SALES_REPS)
+
+
+def rep_email_guess(name: str) -> str:
+    """Solix addresses follow first.last@solix.com; a rep's real address can be set in Settings → Sales team."""
+    return ".".join(re.sub(r"[^a-z]", "", part) for part in name.lower().split()) + "@solix.com"
+
+
 DEFAULT_TERRITORIES: dict = {
     "territory_owners": {"USA": "Jason Russo", "LATAM": "Jason Russo", "Canada": "Bob Wright", "Europe & UK": "Matt Long", "MEA": "Anil Kumar", "APAC": "Samit Mandal", "Unrouted": "Jason Russo"},
     "us_states": {
@@ -398,6 +422,7 @@ def rollup(signals: List[dict], *, half_life_days: float = 30, weights: Optional
     slugs: Dict[str, float] = {}
     types = set()
     score = 0.0
+    parts: Dict[str, float] = {}
     latest = None
     first = None
     recent = 0
@@ -407,6 +432,7 @@ def rollup(signals: List[dict], *, half_life_days: float = 30, weights: Optional
             strength = s.get("role_strength") or "Unrated"
         pts = signal_points(s, half_life_days, weights, now)
         score += pts
+        parts[s.get("type") or "other"] = parts.get(s.get("type") or "other", 0) + pts
         types.add(s.get("type"))
         key = s.get("competitor_key")
         if key:
@@ -426,18 +452,23 @@ def rollup(signals: List[dict], *, half_life_days: float = 30, weights: Optional
                 last_30 += 1
     if website and website.get("score"):
         types.add("website")
-        score += float(website["score"]) * TYPE_WEIGHTS["website"] * (weights or {}).get("website", 1) / max(TYPE_WEIGHTS["website"], 0.01)
+        web = float(website["score"]) * TYPE_WEIGHTS["website"] * (weights or {}).get("website", 1) / max(TYPE_WEIGHTS["website"], 0.01)
+        score += web
+        parts["website"] = parts.get("website", 0) + web
         for slug, v in (website.get("product_scores") or {}).items():
             slugs[slug] = slugs.get(slug, 0) + v * 0.5
     if research and research.get("status") in ("approved", "draft") and research.get("score") is not None:
         # An approved 6+ deep dive alone lifts an account over the outreach floor of 30.
-        score += max(0, float(research["score"]) - 3) * 6
+        dive = max(0, float(research["score"]) - 3) * 6
+        score += dive
+        parts["deep_dive"] = dive
     lines = scoring.line_scores(slugs)
     primary_line = max(lines, key=lines.get) if lines else None
     primary_product = max((p for p in slugs if scoring.PRODUCT_TO_LINE.get(p) == primary_line), key=lambda p: slugs[p], default=None) if primary_line else None
     return {
         "strength": strength,
         "score": round(score, 1),
+        "score_parts": {k: round(v, 1) for k, v in sorted(parts.items(), key=lambda kv: -kv[1]) if round(v, 1)},
         "surge": recent >= SURGE_COUNT,
         "signals_7d": recent,
         "signals_30d": last_30,
@@ -450,6 +481,40 @@ def rollup(signals: List[dict], *, half_life_days: float = 30, weights: Optional
         "latest_signal_at": latest,
         "first_seen_at": first.isoformat() if first else None,
     }
+
+
+def next_action(c: dict, *, reachable: int, enrolled: bool, research: Optional[dict], signals: List[dict], refresh_days: int = 30,
+                now: Optional[datetime] = None) -> Optional[dict]:
+    """The one thing to do next on an account and why, or None when nothing is waiting. Checked in order."""
+    now = now or datetime.now(timezone.utc)
+    status = c.get("status")
+    if c.get("excluded_reason") or status in ("meeting_booked", "opportunity", "won", "lost", "not_a_fit"):
+        return None
+
+    def act(code: str, label: str, why: str) -> dict:
+        return {"code": code, "label": label, "why": why}
+    if status == "replied":
+        return act("book_meeting", "Book the meeting", "They replied to outreach. Offer two times today.")
+    hot = c.get("strength") == "Strong" or c.get("surge") or (c.get("score") or 0) >= 30
+    if not c.get("owner") and hot:
+        return act("assign", "Assign an owner", "A hot account with no rep. Pick one, or add a named account or state to the territory table.")
+    if research and research.get("status") == "draft":
+        return act("review_dive", "Review the deep dive", "A drafted deep dive is waiting for approval. Check the sources, then approve or reject.")
+    if c.get("surge"):
+        return act("act_now", "Act this week", f"{c.get('signals_7d') or 3} new signals in the last 7 days.")
+    if status == "ready":
+        if not reachable:
+            return act("add_people", "Add people to contact", "Ready for outreach, but nobody with an email yet. Start from the deep dive's people.")
+        if not enrolled:
+            return act("start_outreach", "Start outreach", f"{reachable} contact(s) ready and none in a sequence yet.")
+    if not research and (c.get("strength") == "Strong" or len(c.get("signal_types") or []) >= 2):
+        return act("deep_dive", "Request a deep dive", "Strong or multi-signal account with no research yet.")
+    if research and research.get("status") == "approved":
+        done = _parse(research.get("created_at"))
+        newer = sum(1 for s in signals if done and (_parse(s.get("first_seen_at")) or done) > done)
+        if done and newer and now - done > timedelta(days=refresh_days):
+            return act("refresh_dive", "Refresh the deep dive", f"{newer} new signal(s) since the deep dive {(now - done).days} days ago.")
+    return None
 
 
 def verdict_class(research: Optional[dict]) -> Optional[str]:

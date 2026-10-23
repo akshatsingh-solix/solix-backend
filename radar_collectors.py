@@ -24,7 +24,7 @@ import logging
 import os
 import re
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -256,17 +256,20 @@ def _fingerprint(value: str) -> Optional[str]:
     return None
 
 
-async def dns_signals(client: httpx.AsyncClient, company: str, domain: str, use_crtsh: bool = True) -> List[dict]:
+async def dns_records(client: httpx.AsyncClient, domain: str, use_crtsh: bool = True) -> Dict[str, List[str]]:
+    """Current MX and TXT records (and certificate names from crt.sh) by type. A type whose lookup failed is
+    left out, so a failed lookup never reads as "records removed" when compared with the last scan."""
     import dns.asyncresolver
     import dns.exception
+    import dns.resolver
     resolver = dns.asyncresolver.Resolver()
     resolver.lifetime = 8
-    out = []
-    records = []
+    out: Dict[str, List[str]] = {}
     for rtype in ("MX", "TXT"):
         try:
-            for ans in await resolver.resolve(domain, rtype):
-                records.append((rtype, ans.to_text().strip('"')))
+            out[rtype] = sorted({ans.to_text().strip('"') for ans in await resolver.resolve(domain, rtype)})
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+            out[rtype] = []
         except (dns.exception.DNSException, OSError):
             continue
     if use_crtsh:
@@ -274,19 +277,44 @@ async def dns_signals(client: httpx.AsyncClient, company: str, domain: str, use_
             r = await client.get("https://crt.sh/", params={"q": f"%.{domain}", "output": "json", "exclude": "expired"}, timeout=25)
             if r.status_code == 200 and r.text.startswith("["):
                 names = {n.strip().lower() for row in r.json()[:2000] for n in (row.get("name_value") or "").split("\n")}
-                records += [("CERT", n) for n in sorted(names) if n.endswith(domain)]
+                out["CERT"] = sorted(n for n in names if n.endswith(domain))
         except (httpx.HTTPError, ValueError):
             pass
-    for rtype, value in records:
+    return out
+
+
+def dns_signals_from(company: str, domain: str, records: Dict[str, List[str]], previous: Optional[Dict[str, List[str]]] = None) -> List[dict]:
+    """Competitor fingerprints in a scan. Against the previous scan (the Leads Radar's mechanism) a fingerprint is
+    "added" when it appeared since then and "removed" when it disappeared; otherwise, or on a first scan, "present"."""
+    out = []
+
+    def signal(rtype: str, value: str, action: str) -> Optional[dict]:
         key = _fingerprint(value if rtype != "CERT" else value.split("." + domain)[0] + ".")
         if not key:
-            continue
+            return None
         comp = rm.COMPETITOR_BY_KEY[key]
-        out.append({"company": company, "domain": domain, "type": "cert" if rtype == "CERT" else "dns", "source": "crtsh" if rtype == "CERT" else "dns",
-                    "source_ref": f"{domain}|{rtype}|{value}", "record_type": rtype, "record_value": value[:300], "competitor_key": key, "competitor_product": comp["product"],
-                    "title": f"{rtype} record points to {comp['vendor']}", "evidence_text": f"{rtype} {value[:200]}",
-                    "evidence_url": f"https://crt.sh/?q={value}" if rtype == "CERT" else f"https://dns.google/query?name={domain}&type={rtype}"})
+        verb = {"present": "points to", "added": "now points to", "removed": "no longer points to"}[action]
+        return {"company": company, "domain": domain, "type": "cert" if rtype == "CERT" else "dns", "source": "crtsh" if rtype == "CERT" else "dns",
+                "source_ref": f"{domain}|{rtype}|{value}" + ("" if action == "present" else f"|{action}"), "record_type": rtype, "record_value": value[:300],
+                "competitor_key": key, "competitor_product": comp["product"], "action": action,
+                "title": f"{rtype} record {verb} {comp['vendor']}" + (" (new since the last scan)" if action == "added" else ""),
+                "evidence_text": f"{rtype} {value[:200]}",
+                "evidence_url": f"https://crt.sh/?q={value}" if rtype == "CERT" else f"https://dns.google/query?name={domain}&type={rtype}"}
+    for rtype, values in records.items():
+        before = set(previous[rtype]) if previous and rtype in previous else None
+        for value in values:
+            sig = signal(rtype, value, "present" if before is None or value in before else "added")
+            if sig:
+                out.append(sig)
+        for value in sorted((before or set()) - set(values)):
+            sig = signal(rtype, value, "removed")
+            if sig:
+                out.append(sig)
     return out
+
+
+async def dns_signals(client: httpx.AsyncClient, company: str, domain: str, use_crtsh: bool = True) -> List[dict]:
+    return dns_signals_from(company, domain, await dns_records(client, domain, use_crtsh))
 
 
 # --- News, filings, tenders ---------------------------------------------------------------------
