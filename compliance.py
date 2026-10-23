@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -292,6 +293,8 @@ async def erase(email: str, by: str) -> dict:
             res = await db.companies.update_one({"id": c["company_id"]}, {"$pull": {"history": {"detail": {"$regex": re.escape(c["name"])}}}})
             scrubbed += res.modified_count
     counts["account_history"] = scrubbed
+    import radar_service
+    radar_service.companies_changed()
     res = await db.ops_outbox.delete_many({"$or": [{"payload.email": email}, {"payload.reply_to": email}, {"payload.text": rx}, {"payload.excerpt": rx}],
                                            "target": {"$nin": ["instantly_delete", "instantly_block"]}})
     counts["queued_messages"] = res.deleted_count
@@ -359,8 +362,8 @@ async def list_suppression(q: Optional[str] = None, reason: Optional[str] = None
         query["$or"] = [{"email": {"$regex": re.escape(q.strip().lower())}}, {"email_hash": email_hash(q)}]
     if reason:
         query["reason"] = reason
-    total = await _db().suppression.count_documents(query)
-    items = await _db().suppression.find(query, {"_id": 0}).sort("added_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
+    total, items = await asyncio.gather(_db().suppression.count_documents(query),
+                                        _db().suppression.find(query, {"_id": 0}).sort("added_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size))
     return {"items": items, "total": total}
 
 

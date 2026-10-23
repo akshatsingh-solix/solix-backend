@@ -80,6 +80,9 @@ services:
         generateValue: true
       - key: REACHER_URL
         sync: false
+      # Optional: business emails and decision makers for Radar accounts (25 free searches a month).
+      - key: HUNTER_API_KEY
+        sync: false
       - key: DIGIPRISE_URL
         sync: false
       - key: DIGIPRISE_TOKEN

@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import List, Optional, Literal
 
-from fastapi import FastAPI, APIRouter, Depends, Query, Request
+from fastapi import FastAPI, APIRouter, BackgroundTasks, Depends, Query, Request
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -72,7 +72,7 @@ async def root():
 
 
 @api_router.post("/submissions", response_model=Submission, status_code=201)
-async def create_submission(payload: SubmissionCreate, request: Request):
+async def create_submission(payload: SubmissionCreate, request: Request, background: BackgroundTasks):
     doc = payload.model_dump(exclude={"visitor_id", "topics"})
     doc["id"] = str(uuid.uuid4())
     doc["created_at"] = now_iso()
@@ -80,12 +80,17 @@ async def create_submission(payload: SubmissionCreate, request: Request):
     await db.submissions.insert_one(dict(doc))
     asyncio.create_task(notify_lead(doc))
     asyncio.create_task(deliver_for_submission(doc, api_base(request)))
-    try:
-        await record_submission(doc, visitor_id=payload.visitor_id, topics=payload.topics)
-    except Exception:  # scoring must never lose a lead
-        logger.exception("lead scoring failed for submission %s", doc["id"])
+    # The visitor gets their answer now; scoring, account linking and the outbound hand-off follow it.
+    background.add_task(_score_submission, doc, payload.visitor_id, payload.topics)
     logger.info("submission %s from %s", doc["type"], doc["email"])
     return Submission(**doc)
+
+
+async def _score_submission(doc: dict, visitor_id: Optional[str], topics: Optional[List[str]]) -> None:
+    try:
+        await record_submission(doc, visitor_id=visitor_id, topics=topics)
+    except Exception:  # scoring must never lose a lead
+        logger.exception("lead scoring failed for submission %s", doc["id"])
 
 
 # Staff only: these are people's names, emails and phone numbers. The admin uses

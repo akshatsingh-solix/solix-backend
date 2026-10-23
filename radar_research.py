@@ -22,16 +22,17 @@ import radar_service as rs
 from database import now_iso
 
 logger = logging.getLogger("solix.radar.research")
-MAX_SOURCES = 14
+MAX_SOURCES = 20
 
 SYSTEM = """You are Master Prospector, a B2B research analyst for Solix Technologies (enterprise data archiving, application retirement and legacy decommissioning, data governance, enterprise AI readiness, enterprise content services).
 You write an account deep dive for a sales rep from ONLY the numbered sources given. Rules:
 - Cite every factual claim with its source number in square brackets, e.g. [3]. Never invent facts, people, numbers or dates.
-- Contacts: only people named in the sources, with the title the source gives. If none are named, return an empty list.
+- Contacts: only people named in the sources, with the exact name and title the source gives and the source number. Prefer people who own IT, data,
+  enterprise architecture, records, information governance or content platforms. Never guess, complete or invent a name. If none are named, return [].
 - The first-touch email must NOT name any competitor or competitor product, must not mention pricing or discounts, must be under 120 words, plain text, start with "Hi {first name}," and end with "Best,\\n{rep name}". Talk about the problem the evidence points to.
 - "Why Solix wins" may use the Solix knowledge excerpts (cite them as [K1], [K2]...) for Solix facts.
 - score: 0-10 confidence that this account has a real, current need Solix solves. 6 or more means "Ready for Outreach", 4-5 "Research More", under 4 "Not a Fit".
-Reply with one JSON object only, no prose, with keys: score (int), verdict, headline, summary, trigger, why_solix_wins, contacts ([{name, title}]), first_touch ({subject, body}), gaps."""
+Reply with one JSON object only, no prose, with keys: score (int), verdict, headline, summary, trigger, why_solix_wins, contacts ([{name, title, source}]), first_touch ({subject, body}), gaps."""
 
 
 def _db():
@@ -89,7 +90,15 @@ async def gather(client: httpx.AsyncClient, company: dict) -> List[dict]:
                  "news": "News", "filing": "SEC filing", "tender": "Public tender"}.get(s["type"], s["type"])
         sources.append({"title": f"{label}: {s.get('title') or s.get('role_title') or ''}".strip(), "url": url, "date": str(s.get("posted_at") or "")[:10],
                         "text": s.get("evidence_text") or "", "kind": s["type"]})
-        if len(sources) >= 8:
+        if len(sources) >= 6:
+            break
+    import radar_intel
+    for w in await radar_intel.research_sources(client, company):
+        if w["url"] in seen_urls:
+            continue
+        seen_urls.add(w["url"])
+        sources.append({"title": w["title"], "url": w["url"], "date": w.get("date") or "", "text": w.get("text") or "", "kind": w["kind"]})
+        if len(sources) >= MAX_SOURCES - 4:
             break
     try:
         import seo
@@ -151,7 +160,8 @@ async def research(client: httpx.AsyncClient, company: dict) -> dict:
     facts = (f"Account: {company['name']}\nDomains: {', '.join(company.get('domains') or []) or 'unknown'}\nTerritory: {company.get('territory')}\n"
              f"Competitor products seen: {', '.join(company.get('competitors') or []) or 'none named'}\nSignal types: {', '.join(company.get('signal_types') or [])}\n"
              f"Primary Solix product fit: {company.get('primary_product') or 'unknown'}")
-    src_block = "\n\n".join(f"[{s['n']}] {s['title']} ({s.get('date') or 'undated'}) {s.get('url') or ''}\n{(s.get('text') or '')[:700]}" for s in sources)
+    src_block = "\n\n".join(f"[{s['n']}] {s['title']} ({s.get('date') or 'undated'}) {s.get('url') or ''}\n{(s.get('text') or '')[:1400 if s['kind'].startswith('web') else 700]}"
+                              for s in sources)
     user = f"{facts}\n\nSOURCES\n{src_block or '(no sources)'}\n\nSOLIX KNOWLEDGE\n{kb or '(none)'}\n\nReturn the JSON object now."
     text, provider, model = await _complete(SYSTEM, user)
     data = _parse_json(text or "") if text else None
@@ -163,13 +173,26 @@ async def research(client: httpx.AsyncClient, company: dict) -> dict:
         score = 0
     verdict = data.get("verdict") or ("Ready for Outreach" if score >= rm.READY_SCORE else "Research More" if score >= 4 else "Not a Fit")
     ft = data.get("first_touch") or {}
-    return {
+    return {**_people_and_evidence(data.get("contacts"), sources),
         "score": score, "verdict": verdict, "headline": str(data.get("headline") or "")[:500], "summary": str(data.get("summary") or "")[:6000],
         "trigger": str(data.get("trigger") or "")[:3000], "why_solix_wins": str(data.get("why_solix_wins") or "")[:4000],
-        "contacts": [{"name": str(c.get("name"))[:120], "title": str(c.get("title") or "")[:200], "linkedin_url": None} for c in (data.get("contacts") or []) if isinstance(c, dict) and c.get("name")][:5],
-        "first_touch": {"subject": str(ft.get("subject") or "")[:200], "body": str(ft.get("body") or "")[:3000]}, "gaps": str(data.get("gaps") or "")[:3000],
-        "evidence": [{"n": s["n"], "title": s["title"], "url": s.get("url"), "date": s.get("date")} for s in sources], "provider": provider, "model": model,
+        "first_touch": {"subject": str(ft.get("subject") or "")[:200], "body": str(ft.get("body") or "")[:3000]}, "gaps": str(data.get("gaps") or "")[:3000], "provider": provider, "model": model,
     }
+
+
+def _people_and_evidence(contacts, sources: List[dict]) -> dict:
+    """Contacts survive only if their exact name is in a fetched source, and carry that source's link. Evidence keeps a short excerpt."""
+    import radar_intel
+    proposed = []
+    for c in contacts or []:
+        if isinstance(c, dict) and c.get("name"):
+            n = c.get("source")
+            src = next((s for s in sources if s["n"] == n), None) if isinstance(n, int) else None
+            proposed.append({"name": str(c["name"])[:120], "title": str(c.get("title") or "")[:200], "source_url": (src or {}).get("url"), "source_title": (src or {}).get("title")})
+    kept = radar_intel.named_in_sources(proposed, sources)[:6]
+    return {"contacts": [{**c, "linkedin_url": None} for c in kept],
+            "evidence": [{"n": s["n"], "title": s["title"], "url": s.get("url"), "date": s.get("date"), "kind": s.get("kind"),
+                          "excerpt": radar_intel.evidence_excerpt(s.get("text"))} for s in sources]}
 
 
 def rules_brief(company: dict, sources: List[dict]) -> dict:
@@ -186,14 +209,19 @@ def rules_brief(company: dict, sources: List[dict]) -> dict:
                    (" Recent coverage: " + "; ".join(f"{s['title']} [{s['n']}]" for s in sources if s["kind"] == "news")[:600] if any(s["kind"] == "news" for s in sources) else ""),
         "trigger": f"Active hiring around {problem} {cites}".strip(),
         "why_solix_wins": "Solix retires legacy applications into one compliant, searchable archive with retention and legal hold, removing license and infrastructure cost.",
-        "contacts": [],
+        "contacts": _rules_people(sources),
         "first_touch": {"subject": "Keeping retired systems' records without keeping the systems",
                         "body": "Hi {first name},\n\nTeams like yours often keep older applications running only because the records inside them must be retained. "
                                 "Solix moves that data into one compliant, searchable archive with retention and legal hold, so the old platforms can be switched off.\n\n"
                                 "Would a 20-minute conversation in the next two weeks be useful?\n\nBest,\n{rep name}"},
         "gaps": "Drafted without an AI model (no provider key, or every free tier was busy). Confirm the decision makers and the current initiative before outreach.",
-        "evidence": [{"n": s["n"], "title": s["title"], "url": s.get("url"), "date": s.get("date")} for s in sources], "provider": "rules", "model": None,
+        "evidence": _people_and_evidence([], sources)["evidence"], "provider": "rules", "model": None,
     }
+
+
+def _rules_people(sources: List[dict]) -> List[dict]:
+    import radar_intel
+    return [{**p, "linkedin_url": None} for p in radar_intel.named_in_sources(radar_intel.people_from_text(sources), sources)[:6]]
 
 
 _PRICE = re.compile(r"(\$\s?\d|€\s?\d|£\s?\d|\bprice\b|\bpricing\b|\bdiscount\b|\bcost[s]? (?:only|just)\b)", re.I)
