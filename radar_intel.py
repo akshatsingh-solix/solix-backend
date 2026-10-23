@@ -174,9 +174,10 @@ async def extract_people(company: dict, sources: List[dict]) -> List[dict]:
     return people if data else people_from_text(sources)
 
 
-async def hunter_people(client: httpx.AsyncClient, domain: Optional[str], limit: int = 15, company: Optional[str] = None) -> dict:
+async def hunter_people(client: httpx.AsyncClient, domain: Optional[str], limit: int = 10, company: Optional[str] = None) -> dict:
     """Hunter Domain Search: decision makers in IT, executive and management, with work emails and where they were seen.
-    Without a domain on the account, Hunter is asked by company name and says which domain it matched."""
+    Without a domain on the account, Hunter is asked by company name and says which domain it matched.
+    10 results is the most the free plan returns (more is a 400), and enough once filtered to senior IT and executives."""
     if not os.environ.get("HUNTER_API_KEY") or not (domain or company):
         return {"people": [], "pattern": None, "domain": None}
     r = await client.get(f"{HUNTER_URL}/domain-search", timeout=30, params={
