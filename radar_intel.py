@@ -19,6 +19,7 @@ import asyncio
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import httpx
@@ -34,6 +35,38 @@ def sources_available() -> Dict[str, bool]:
     return {"web_search": bool(os.environ.get("PARALLEL_API_KEY")), "hunter": bool(os.environ.get("HUNTER_API_KEY"))}
 
 
+def why(exc: Exception) -> str:
+    """The provider's own reason for a failed call, for the screen ("Parallel returned 401: Invalid API key"). Never includes the key."""
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return f"{exc.__class__.__name__} (no response)"
+    r = exc.response
+    msg = ""
+    try:
+        body = r.json()
+        err = body.get("error")
+        msg = body.get("message") or (err.get("message") if isinstance(err, dict) else err) or ((body.get("errors") or [{}])[0].get("details")) or ""
+    except (ValueError, AttributeError, IndexError):
+        pass
+    host = {"api.parallel.ai": "Parallel", "api.hunter.io": "Hunter"}.get(r.request.url.host, r.request.url.host)
+    return f"{host} returned {r.status_code}" + (f": {str(msg)[:160]}" if msg else "")
+
+
+def _note(problems: Optional[List[str]], text: str) -> None:
+    if problems is not None and text not in problems:
+        problems.append(text)
+
+
+_LEGAL = re.compile(r"(?:\s*/[A-Za-z]{2,3}/?)$|,?\s+(?:inc|incorporated|corp|corporation|co|ltd|limited|llc|plc|lp|sa|ag|nv|se|gmbh)\.?$", re.I)
+
+
+def search_name(name: str) -> str:
+    """"8X8 Inc /De/" -> "8X8", "Varonis Systems Inc" -> "Varonis Systems": filing-style suffixes only add noise to a search."""
+    prev, out = None, name.strip()
+    while prev != out:
+        prev, out = out, _LEGAL.sub("", out).strip(" ,")
+    return out or name
+
+
 # --- Web search --------------------------------------------------------------------------------
 
 async def web_search(client: httpx.AsyncClient, objective: str, queries: List[str], max_chars: int = 9000) -> List[dict]:
@@ -46,24 +79,27 @@ async def web_search(client: httpx.AsyncClient, objective: str, queries: List[st
 
 
 def _angles(company: dict) -> Dict[str, tuple]:
-    name = company["name"]
+    name, short = company["name"], search_name(company["name"])
     comps = company.get("competitors") or []
     site = f" Prefer {company['domains'][0]}, press releases, filings and conference talks." if company.get("domains") else ""
+    year = datetime.now(timezone.utc).year
+    # Objectives carry the full name; the keyword queries stay short (Parallel asks for 3 to 6 words each).
     return {
         "programs": (f"Find recent, specific evidence that {name} is modernising, migrating, consolidating or retiring legacy applications, content management, "
                      f"records or data archive platforms{', including ' + ', '.join(comps[:3]) if comps else ''}, and why.{site}",
-                     [f"{name} legacy system modernization", f"{name} {comps[0]} migration" if comps else f"{name} application retirement",
-                      f"{name} records retention archive"]),
+                     [f"{short} legacy system modernization", f"{short} {comps[0]} migration" if comps else f"{short} application retirement",
+                      f"{short} records retention archive"]),
         "people": (f"Identify the named people at {name} who lead IT, data, enterprise architecture, records management, information governance or content "
                    f"platforms, with their exact current job titles.{site}",
-                   [f"{name} chief information officer", f"{name} vice president enterprise architecture", f"{name} director records management"]),
+                   [f"{short} chief information officer", f"{short} VP enterprise architecture", f"{short} records management director"]),
         "news": (f"Material news about {name} in the last 12 months: acquisitions, divestitures, restructuring, regulatory actions, technology partnerships "
-                 f"and IT investments.", [f"{name} acquisition", f"{name} technology partnership", f"{name} press release 2026"]),
+                 f"and IT investments.", [f"{short} acquisition", f"{short} technology partnership", f"{short} press release {year}"]),
     }
 
 
-async def research_sources(client: httpx.AsyncClient, company: dict, angles: Optional[List[str]] = None) -> List[dict]:
-    """The account's live web sources, every angle searched at once. Empty without PARALLEL_API_KEY."""
+async def research_sources(client: httpx.AsyncClient, company: dict, angles: Optional[List[str]] = None, problems: Optional[List[str]] = None) -> List[dict]:
+    """The account's live web sources, every angle searched at once. Empty without PARALLEL_API_KEY.
+    Why a search failed goes into `problems`, so the screen can say so instead of showing an empty list."""
     if not os.environ.get("PARALLEL_API_KEY"):
         return []
     plan = {k: v for k, v in _angles(company).items() if not angles or k in angles}
@@ -72,7 +108,8 @@ async def research_sources(client: httpx.AsyncClient, company: dict, angles: Opt
         try:
             return [{**x, "kind": f"web:{kind}"} for x in await web_search(client, objective, queries)]
         except (httpx.HTTPError, KeyError, ValueError) as exc:
-            logger.warning("web search (%s) failed for %s: %s", kind, company["name"], exc)
+            logger.warning("web search (%s) failed for %s: %s", kind, company["name"], why(exc))
+            _note(problems, f"Web search failed: {why(exc)}")
             return []
     found = await asyncio.gather(*(one(k, o, q) for k, (o, q) in plan.items()))
     out, seen = [], set()
@@ -137,15 +174,17 @@ async def extract_people(company: dict, sources: List[dict]) -> List[dict]:
     return people if data else people_from_text(sources)
 
 
-async def hunter_people(client: httpx.AsyncClient, domain: str, limit: int = 15) -> dict:
-    """Hunter Domain Search: decision makers in IT, executive and management, with work emails and where they were seen."""
-    if not os.environ.get("HUNTER_API_KEY") or not domain:
-        return {"people": [], "pattern": None}
+async def hunter_people(client: httpx.AsyncClient, domain: Optional[str], limit: int = 15, company: Optional[str] = None) -> dict:
+    """Hunter Domain Search: decision makers in IT, executive and management, with work emails and where they were seen.
+    Without a domain on the account, Hunter is asked by company name and says which domain it matched."""
+    if not os.environ.get("HUNTER_API_KEY") or not (domain or company):
+        return {"people": [], "pattern": None, "domain": None}
     r = await client.get(f"{HUNTER_URL}/domain-search", timeout=30, params={
-        "domain": domain, "api_key": os.environ["HUNTER_API_KEY"], "type": "personal", "limit": limit,
+        **({"domain": domain} if domain else {"company": company}), "api_key": os.environ["HUNTER_API_KEY"], "type": "personal", "limit": limit,
         "department": "it,executive,management,legal,operations", "seniority": "senior,executive"})
     r.raise_for_status()
     data = r.json().get("data") or {}
+    domain = domain or data.get("domain")
     people = []
     for e in data.get("emails") or []:
         if not (e.get("first_name") and e.get("last_name")):
@@ -155,7 +194,7 @@ async def hunter_people(client: httpx.AsyncClient, domain: str, limit: int = 15)
                        "email_confidence": e.get("confidence"), "email_status": ((e.get("verification") or {}).get("status")),
                        "linkedin_url": e.get("linkedin"), "source_url": src.get("uri") or f"https://hunter.io/search/{domain}", "source_title": src.get("domain") or "Hunter",
                        "via": "hunter"})
-    return {"people": people, "pattern": data.get("pattern")}
+    return {"people": people, "pattern": data.get("pattern"), "domain": domain}
 
 
 async def hunter_email(client: httpx.AsyncClient, domain: str, first: str, last: str) -> Optional[dict]:
@@ -177,8 +216,9 @@ async def hunter_email(client: httpx.AsyncClient, domain: str, first: str, last:
 async def find_people(client: httpx.AsyncClient, company: dict, known_names: Optional[set] = None) -> dict:
     """Live candidates for an account: named in fetched web sources and/or found by Hunter, never invented."""
     known = {n.lower() for n in known_names or set()}
-    web, hunter = await asyncio.gather(research_sources(client, company, ["people"]),
-                                       _safe_hunter(client, (company.get("domains") or [None])[0]))
+    problems: List[str] = []
+    web, hunter = await asyncio.gather(research_sources(client, company, ["people"], problems),
+                                       _safe_hunter(client, (company.get("domains") or [None])[0], search_name(company["name"]), problems))
     people = named_in_sources(await extract_people(company, web), web) + hunter["people"]
     out, seen = [], set()
     for p in people:
@@ -192,15 +232,16 @@ async def find_people(client: httpx.AsyncClient, company: dict, known_names: Opt
                                                title, re.I))})
     out.sort(key=lambda p: (not p["relevant"], p["persona"] != "target", p["name"]))
     return {"people": out[:25], "sources_used": {"web_pages": len(web), "hunter": len(hunter["people"])}, "email_pattern": hunter.get("pattern"),
-            "available": sources_available()}
+            "hunter_domain": hunter.get("domain"), "problems": problems, "available": sources_available()}
 
 
-async def _safe_hunter(client: httpx.AsyncClient, domain: Optional[str]) -> dict:
+async def _safe_hunter(client: httpx.AsyncClient, domain: Optional[str], company: Optional[str] = None, problems: Optional[List[str]] = None) -> dict:
     try:
-        return await hunter_people(client, domain)
+        return await hunter_people(client, domain, company=company)
     except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("hunter lookup failed for %s: %s", domain, exc)
-        return {"people": [], "pattern": None}
+        logger.warning("hunter lookup failed for %s: %s", domain or company, why(exc))
+        _note(problems, f"Hunter failed: {why(exc)}")
+        return {"people": [], "pattern": None, "domain": None}
 
 
 def evidence_excerpt(text: str, limit: int = 400) -> str:

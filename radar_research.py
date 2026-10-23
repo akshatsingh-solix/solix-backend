@@ -75,7 +75,7 @@ async def run_queue(limit: int = 5, only: Optional[str] = None) -> dict:
     return counts
 
 
-async def gather(client: httpx.AsyncClient, company: dict) -> List[dict]:
+async def gather(client: httpx.AsyncClient, company: dict, problems: Optional[List[str]] = None) -> List[dict]:
     """Numbered sources: the account's strongest signals first, then recent news."""
     sources: List[dict] = []
     signals = await _db().company_signals.find({"company_id": company["id"]}, {"_id": 0}).to_list(500)
@@ -93,7 +93,7 @@ async def gather(client: httpx.AsyncClient, company: dict) -> List[dict]:
         if len(sources) >= 6:
             break
     import radar_intel
-    for w in await radar_intel.research_sources(client, company):
+    for w in await radar_intel.research_sources(client, company, problems=problems):
         if w["url"] in seen_urls:
             continue
         seen_urls.add(w["url"])
@@ -155,7 +155,12 @@ def _parse_json(text: str) -> Optional[dict]:
 
 
 async def research(client: httpx.AsyncClient, company: dict) -> dict:
-    sources = await gather(client, company)
+    problems: List[str] = []
+    sources = await gather(client, company, problems)
+    return {**await _draft(company, sources), "source_notes": problems}
+
+
+async def _draft(company: dict, sources: List[dict]) -> dict:
     kb = _kb(company)
     facts = (f"Account: {company['name']}\nDomains: {', '.join(company.get('domains') or []) or 'unknown'}\nTerritory: {company.get('territory')}\n"
              f"Competitor products seen: {', '.join(company.get('competitors') or []) or 'none named'}\nSignal types: {', '.join(company.get('signal_types') or [])}\n"

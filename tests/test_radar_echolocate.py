@@ -672,6 +672,7 @@ def test_deep_dive_uses_live_web_sources_and_keeps_only_named_people(client, mon
     assert r["contacts"][0]["source_url"] == "https://www.acmemutual.example/about/leadership"
     kinds = {e["kind"] for e in r["evidence"]}
     assert {"web:programs", "web:people", "web:news"} <= kinds and all("excerpt" in e for e in r["evidence"])
+    assert r["source_notes"] == []
     # Approving it puts the verified people on the account, with the page that named them.
     before = run(_mock_db.contacts.count_documents({"company_id": acme["id"]}))
     client.patch(f"/api/admin/radar/research/{r['id']}", json={"action": "approve"})
@@ -694,7 +695,7 @@ def test_find_people_merges_web_and_hunter_and_skips_known(client, monkeypatch):
         return None, None, None
     monkeypatch.setattr(radar_research, "_complete", no_model)  # the "Name, Title" rules still find people
 
-    async def hunter(client_, domain, limit=15):
+    async def hunter(client_, domain, limit=15, company=None):
         return {"people": [{"name": "Priya Nair", "title": "VP Enterprise Architecture", "email": "priya.nair@acmemutual.example", "email_confidence": 94,
                             "email_status": "valid", "linkedin_url": None, "source_url": "https://www.acmemutual.example/blog/archive", "source_title": "acmemutual.example",
                             "via": "hunter"}], "pattern": "{first}.{last}"}
@@ -705,6 +706,38 @@ def test_find_people_merges_web_and_hunter_and_skips_known(client, monkeypatch):
     assert out["email_pattern"] == "{first}.{last}" and out["sources_used"]["web_pages"] >= 1
     assert all(p["source_url"] for p in out["people"])
     assert next(p for p in out["people"] if p["name"] == "Priya Nair")["email"] == "priya.nair@acmemutual.example"
+
+
+def test_search_names_drop_filing_suffixes():
+    import radar_intel
+    assert [radar_intel.search_name(n) for n in ("8X8 Inc /De/", "Cyabra, Inc.", "Varonis Systems Inc", "Data443 Risk Mitigation, Inc.", "Proofpoint")] == \
+        ["8X8", "Cyabra", "Varonis Systems", "Data443 Risk Mitigation", "Proofpoint"]
+
+
+def test_live_source_failures_are_explained_and_hunter_works_without_a_domain(monkeypatch):
+    import httpx
+    import radar_intel
+    monkeypatch.setenv("PARALLEL_API_KEY", "test-key")
+    monkeypatch.setenv("HUNTER_API_KEY", "test-key")
+    seen = {}
+
+    def handler(request):
+        if request.url.host == "api.parallel.ai":
+            seen["queries"] = json.loads(request.content)["search_queries"]
+            return httpx.Response(401, json={"code": 16, "message": "Invalid API key (C.1)"})
+        seen["hunter"] = dict(request.url.params)
+        return httpx.Response(200, json={"data": {"domain": "varonis.example", "pattern": "{f}{last}", "emails": [
+            {"value": "jdoe@varonis.example", "first_name": "Jane", "last_name": "Doe", "position": "Chief Information Officer", "confidence": 96,
+             "sources": [{"uri": "https://varonis.example/about", "domain": "varonis.example"}], "verification": {"status": "valid"}}]}})
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            return await radar_intel.find_people(c, {"name": "Varonis Systems Inc /De/", "domains": []})
+    out = run(go())
+    assert out["problems"] == ["Web search failed: Parallel returned 401: Invalid API key (C.1)"]
+    assert all(len(q.split()) <= 6 and "Inc" not in q for q in seen["queries"])
+    assert seen["hunter"]["company"] == "Varonis Systems" and "domain" not in seen["hunter"]
+    assert out["hunter_domain"] == "varonis.example" and [p["name"] for p in out["people"]] == ["Jane Doe"]
 
 
 def test_find_email_tries_hunter_first(client, monkeypatch):
