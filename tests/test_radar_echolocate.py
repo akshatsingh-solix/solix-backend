@@ -650,6 +650,7 @@ def test_people_must_be_named_in_a_source():
     found = radar_intel.people_from_text(WEB["people"])
     assert {p["name"] for p in found} == {"Dana Whitfield", "Omar Haddad"}
     assert next(p for p in found if p["name"] == "Omar Haddad")["title"].startswith("Director of Records Management")
+    assert next(p for p in found if p["name"] == "Dana Whitfield")["title"] == "Executive Vice President and Chief Information Officer"
 
 
 def test_deep_dive_uses_live_web_sources_and_keeps_only_named_people(client, monkeypatch):

@@ -95,6 +95,7 @@ def people_from_text(sources: List[dict]) -> List[dict]:
     out = []
     for s in sources:
         for name, title in _PERSON.findall(s.get("text") or ""):
+            title = re.split(r",\s+(?=[a-z])", title)[0]  # "CIO, leads technology" -> "CIO"
             out.append({"name": name.strip(), "title": title.strip(" ,"), "source_url": s.get("url"), "source_title": s.get("title")})
     return out
 
