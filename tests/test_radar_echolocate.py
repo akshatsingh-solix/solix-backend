@@ -620,6 +620,42 @@ def test_keep_awake_pings_the_public_address(monkeypatch):
     assert calls == ["https://api.example.test/api/"]
 
 
+def test_daily_radar_run_happens_inside_the_api(client, monkeypatch):
+    import asyncio
+    import ops
+    import radar_run
+    from datetime import datetime, timezone
+    run(_mock_db.ops_runs.delete_many({"job": "radar_daily"}))
+    monkeypatch.delenv("RADAR_DAILY_UTC", raising=False)
+
+    def at(day, hour, minute=0):
+        return datetime(2026, 10, day, hour, minute, tzinfo=timezone.utc)
+    assert run(ops.radar_due(at(24, 4)))  # before 05:00 with nothing since yesterday's 05:00: yesterday's was missed
+    assert run(ops.radar_due(at(24, 6)))
+    run(_mock_db.ops_runs.insert_one({"job": "radar_daily", "status": "ok", "started_at": at(24, 5, 30).isoformat()}))
+    assert not run(ops.radar_due(at(24, 6)))  # today's has run ("Run now" counts too)
+    assert run(ops.radar_due(at(25, 5, 1)))  # and tomorrow's is due
+    run(_mock_db.ops_runs.insert_one({"job": "radar_daily", "status": "running", "started_at": at(24, 6).isoformat()}))
+    assert not run(ops.radar_due(at(24, 7)))  # one is under way
+    assert run(ops.radar_due(at(24, 10)))  # still "running" 4 hours later: cut off by a restart, so retried
+    monkeypatch.setenv("RADAR_DAILY_UTC", "off")
+    assert not run(ops.radar_due(at(24, 10)))
+    monkeypatch.setenv("RADAR_DAILY_UTC", "05:00")
+    run(_mock_db.ops_runs.delete_many({"job": "radar_daily"}))
+    started = []
+
+    async def fake_daily(steps=("collect", "score", "research", "digest"), by="system"):
+        started.append(by)
+    monkeypatch.setattr(radar_run, "daily", fake_daily)
+    monkeypatch.setattr(ops, "_radar_task", None)
+
+    async def go():
+        first = await ops.radar_schedule()
+        await asyncio.sleep(0)
+        return first
+    assert run(go()) is True and started == ["schedule"]
+
+
 # --- Live intelligence: web research and people -----------------------------------------------
 
 WEB = {

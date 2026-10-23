@@ -259,13 +259,58 @@ async def keep_awake() -> None:
         pass
 
 
+RADAR_STALE = timedelta(hours=3)  # a run still "running" after this was cut off (a deploy or restart)
+_radar_task: Optional[asyncio.Task] = None
+
+
+async def radar_due(now: Optional[datetime] = None) -> bool:
+    """The Radar's daily run (collect, score, research, digest) is due once a day from RADAR_DAILY_UTC (default 05:00;
+    "off" turns it off), unless a run has started since then: "Run now" counts, and a run cut off by a restart is retried.
+    It runs inside the API, so the database credentials never have to be copied into GitHub."""
+    at = (os.environ.get("RADAR_DAILY_UTC") or "05:00").strip().lower()
+    if at in ("off", "0", "none"):
+        return False
+    hour, minute = (int(x) for x in at.split(":"))
+    now = now or datetime.now(timezone.utc)
+    slot = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if now < slot:
+        slot -= timedelta(days=1)  # before today's time, yesterday's run must have happened
+    last = await _db().ops_runs.find_one({"job": "radar_daily", "started_at": {"$gte": slot.isoformat()}}, {"_id": 0, "status": 1, "started_at": 1},
+                                         sort=[("started_at", -1)])
+    if not last:
+        return True
+    return last["status"] == "running" and last["started_at"] < (now - RADAR_STALE).isoformat()
+
+
+async def radar_schedule() -> bool:
+    """Start the daily Radar run in the background when it's due. True when one was started."""
+    global _radar_task
+    if (_radar_task and not _radar_task.done()) or not await radar_due():
+        return False
+    import radar_run
+
+    async def go():
+        try:
+            await radar_run.daily(by="schedule")
+        except Exception:  # noqa: BLE001 - recorded on the run by ops.run; the next day tries again
+            logger.exception("scheduled radar run failed")
+    _radar_task = asyncio.create_task(go())
+    return True
+
+
 async def background_loop() -> None:
-    """Outbox every minute, sender every 10 minutes, watchdog every 30 minutes, keep-awake ping every 10 minutes."""
+    """Outbox every minute, sender every 10 minutes, watchdog every 30 minutes, keep-awake ping every 10 minutes,
+    and the Radar's daily run when it's due (checked every 10 minutes)."""
     n = 0
     await asyncio.sleep(20)
     while True:
         if n % 10 == 0:
             await keep_awake()
+        if n % 10 == 5:
+            try:
+                await radar_schedule()
+            except Exception:  # noqa: BLE001
+                logger.exception("radar schedule check failed")
         try:
             jobs = ["outbox"]
             if n % 10 == 0:

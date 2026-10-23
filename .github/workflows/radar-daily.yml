@@ -1,16 +1,13 @@
 name: Radar daily run
 
-# Collects competitor signals, rescores and routes every account, drafts deep
-# dives for the hottest ones and emails each owner their digest. Runs here, not
-# in the API, because the free web instance is small and restarts on deploy.
-#
-# Needs repository secrets MONGO_URL and DB_NAME (the same values as the API),
-# plus any of GROQ_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY for research,
-# CRUSTDATA_API_KEY for the paid job index, and SMTP_* or RESEND_API_KEY with
-# EMAIL_FROM for digests. Logs print counts only: this repository's logs are public.
+# Manual only. The daily run now happens inside the API (ops.radar_schedule, at
+# RADAR_DAILY_UTC, 05:00 by default), so the database credentials never have to
+# be stored in this public repository. Use this only to run the Radar from GitHub
+# by hand, after adding repository secrets MONGO_URL and DB_NAME (the same values
+# as the API), plus any of GROQ_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY,
+# CRUSTDATA_API_KEY, and SMTP_* or RESEND_API_KEY with EMAIL_FROM for digests.
+# Logs print counts only: this repository's logs are public.
 on:
-  schedule:
-    - cron: "0 5 * * *"
   workflow_dispatch:
     inputs:
       steps:

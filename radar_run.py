@@ -1,9 +1,9 @@
 """The Radar's daily run: collect -> score -> research -> digest.
 
 Runs three ways, all writing the same `ops_runs` heartbeat:
-  * GitHub Actions on a schedule:  python radar_run.py daily
+  * Daily inside the API:  ops.radar_schedule, at RADAR_DAILY_UTC (05:00 by default)
   * Admin > Radar > "Run now" (in the API process)
-  * By hand:                       python radar_run.py collect|score|research|digest
+  * By hand:               python radar_run.py collect|score|research|digest (or the manual GitHub workflow)
 
 Logs print counts only - never company or person names - because workflow logs
 on a public repository are public.
