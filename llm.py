@@ -17,6 +17,9 @@ Configure with environment variables. Any provider whose key is set is used:
                       any other OpenAI-compatible endpoint (vLLM, Ollama,
                       Together, Cerebras, a model you host on Render, ...)
   SOL_PROVIDER_ORDER  comma-separated order, default gemini,groq,mistral,openrouter,openai,custom
+  LLM_PII_PROVIDERS   providers allowed to see prospect personal data (Radar
+                      deep dives, outbound openers, reply classification),
+                      default openai; "none" keeps those paths on rules only
 """
 import os
 import json
@@ -71,6 +74,17 @@ def configured_providers() -> List[Provider]:
     order = [p.strip() for p in os.environ.get("SOL_PROVIDER_ORDER", "gemini,groq,mistral,openrouter,openai,custom").split(",")]
     ordered = [known[p] for p in order if p in known]
     return ordered + [p for n, p in known.items() if n not in order]
+
+
+# Free tiers have no data processing agreement and may train on prompts, so prospect
+# personal data goes only to providers named here (Sol's public chat answers are unaffected).
+DEFAULT_PII_PROVIDERS = "openai"
+
+
+def pii_providers() -> List[Provider]:
+    """The configured providers allowed to process prospect personal data, in failover order."""
+    allowed = {p.strip().lower() for p in (os.environ.get("LLM_PII_PROVIDERS", "").strip() or DEFAULT_PII_PROVIDERS).split(",") if p.strip()}
+    return [p for p in configured_providers() if p.name in allowed]
 
 
 class ProviderError(Exception):

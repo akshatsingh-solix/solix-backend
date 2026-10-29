@@ -129,11 +129,13 @@ def _kb(company: dict) -> str:
 
 async def _complete(system: str, user: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
     import llm
-    if not llm.configured_providers():
+    # Sources include leadership pages with named people, so only providers cleared for personal data.
+    providers = llm.pii_providers()
+    if not providers:
         return None, None, None
     text, meta = [], {}
     try:
-        async for ev in llm.stream_completion([{"role": "system", "content": system}, {"role": "user", "content": user}], max_tokens=2200, temperature=0.3):
+        async for ev in llm.stream_completion([{"role": "system", "content": system}, {"role": "user", "content": user}], max_tokens=2200, temperature=0.3, providers=providers):
             if ev["type"] == "text":
                 text.append(ev["text"])
             elif ev["type"] == "meta":

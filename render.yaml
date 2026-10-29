@@ -72,6 +72,12 @@ services:
       - key: EMAIL_FROM
         sync: false
       # Radar + EchoLocate (optional). See .env.example.
+      # Leave unset until launch sign-off: SMTP and Instantly sends are held.
+      - key: OUTBOUND_LIVE_SENDING
+        sync: false
+      # Only these AI providers see prospect personal data (default openai).
+      - key: LLM_PII_PROVIDERS
+        value: openai
       - key: CRUSTDATA_API_KEY
         sync: false
       - key: INSTANTLY_API_KEY

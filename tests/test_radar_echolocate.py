@@ -432,6 +432,52 @@ def test_overlapping_runs_send_each_step_and_message_once(client):
     assert pending and sum(a.values()) + sum(b.values()) == pending  # every queued message handled exactly once
 
 
+def test_free_tier_models_never_see_prospect_data(client, monkeypatch):
+    import llm
+    monkeypatch.setenv("GEMINI_API_KEY", "free")
+    monkeypatch.delenv("LLM_PII_PROVIDERS", raising=False)
+
+    calls = []
+
+    async def must_not_run(*a, **k):
+        calls.append(a)  # classify() swallows every error, so record the call rather than raise past it
+        raise llm.ProviderError("prospect data reached a free-tier model")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(llm, "stream_completion", must_not_run)
+    assert run(outbound.classify("Hmm, perhaps."))["by"] == "rules"
+    assert run(radar_research._complete("system", "Jordan Example, CIO")) == (None, None, None)
+    run(_mock_db.company_signals.insert_one({"id": "pii-s", "company_id": "pii-co", "type": "job_posting", "title": "Records Manager", "evidence_text": "Retire legacy apps."}))
+    run(outbound.write_opener({"title": "CIO"}, {"id": "pii-co", "name": "Initech"}))
+    assert calls == []
+    assert client.get("/api/admin/compliance/settings").json()["transport"]["live_sending"] is False
+
+
+def test_live_email_needs_the_server_switch(client, monkeypatch):
+    import emailer
+    sent = []
+
+    async def fake_send(**kw):
+        sent.append(kw["to"])
+        return "msg-1"
+
+    monkeypatch.setattr(emailer, "send_email", fake_send)
+    run(_mock_db.contacts.insert_one({"id": "live-c", "email": "live@initech.example", "name": "Live Test"}))
+    steps = [{"subject": "s1", "body": "b1", "day": 0}, {"subject": "s2", "body": "b2", "day": 3}]
+    s = {**run(compliance.outbound_settings()), "provider": "smtp"}
+    monkeypatch.delenv("OUTBOUND_LIVE_SENDING", raising=False)
+    run(_mock_db.enrollments.insert_one({"id": "live-e", "contact_id": "live-c", "company_id": None, "sequence_id": "x", "variant": "A", "step_index": 0,
+                                         "status": "active", "provider": "smtp", "steps": steps, "history": []}))
+    assert run(outbound.send_step(run(_mock_db.enrollments.find_one({"id": "live-e"}, {"_id": 0})), s)) == "held"
+    # Held, not faked: nothing recorded as sent, no progress, and the claim is free for the next run.
+    e = run(_mock_db.enrollments.find_one({"id": "live-e"}))
+    assert not sent and e["step_index"] == 0 and e["provider"] == "smtp" and e.get("claim_until") is None
+    assert run(_mock_db.sends.count_documents({"enrollment_id": "live-e"})) == 0
+    monkeypatch.setenv("OUTBOUND_LIVE_SENDING", "1")
+    assert run(outbound.send_step(run(_mock_db.enrollments.find_one({"id": "live-e"}, {"_id": 0})), s)) == "sent"
+    assert sent == ["live@initech.example"]
+
+
 def test_collector_saves_in_bulk_links_and_is_idempotent(client, monkeypatch):
     # Atlas costs a round trip per call, so a run saves its postings in bulk, never one by one.
     import radar_run
