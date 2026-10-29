@@ -203,12 +203,13 @@ async def write_opener(contact: dict, company: Optional[dict]) -> dict:
     opener, provider = None, "rules"
     if evidence:
         import llm
-        if llm.configured_providers():
+        providers = llm.pii_providers()
+        if providers:
             text = []
             try:
                 async for ev in llm.stream_completion([{"role": "system", "content": OPENER_SYSTEM},
                                                        {"role": "user", "content": f"Prospect: {contact.get('title') or ''} at {company.get('name') or contact.get('company')}\n\n" + "\n\n".join(evidence)}],
-                                                      max_tokens=160, temperature=0.4):
+                                                      max_tokens=160, temperature=0.4, providers=providers):
                     if ev["type"] == "text":
                         text.append(ev["text"])
                     elif ev["type"] == "meta":
@@ -370,6 +371,10 @@ async def send_step(enr: dict, settings: dict) -> str:
         return "stopped"
     step = enr["steps"][enr["step_index"]]
     provider = enr.get("provider") or settings.get("provider") or "dry_run"
+    if provider != "dry_run" and not compliance.live_sending_allowed():
+        # Held, not simulated: a simulated send would mark the account contacted and count as delivered.
+        await _db().enrollments.update_one({"id": enr["id"]}, {"$set": {"claim_until": None}})
+        return "held"
     sequence = await _db().sequences.find_one({"id": enr["sequence_id"]}, {"_id": 0}) or {}
     send = {"id": str(uuid.uuid4()), "enrollment_id": enr["id"], "contact_id": contact["id"], "company_id": enr.get("company_id"), "sequence_id": enr["sequence_id"],
             "variant": enr["variant"], "step": enr["step_index"] + 1, "email": contact["email"], "subject": step["subject"], "provider": provider, "sent_at": now_iso()}
@@ -425,7 +430,7 @@ def _in_window(settings: dict, now: datetime) -> bool:
 async def tick() -> dict:
     """The sender: resumes paused enrollments that are due, then sends what's due within the cap."""
     settings = await compliance.outbound_settings()
-    counts = {"sent": 0, "stopped": 0, "errors": 0, "resumed": 0}
+    counts = {"sent": 0, "stopped": 0, "errors": 0, "resumed": 0, "held": 0}
     now = _now()
     async for e in _db().enrollments.find({"status": "paused", "resume_at": {"$lte": now.isoformat()}}, {"_id": 0, "id": 1}):
         await _set_status(e, "active", "system", "Resumed after pause", {"next_send_at": now.isoformat(), "resume_at": None})
@@ -459,7 +464,7 @@ async def tick() -> dict:
                 result = await send_step(e, settings)
                 if result == "skipped":  # another run has it
                     continue
-                counts["stopped" if result == "stopped" else "sent"] += 1
+                counts["stopped" if result == "stopped" else "held" if result == "held" else "sent"] += 1
             except Exception as exc:  # noqa: BLE001 - one bad address must not stop the batch
                 counts["errors"] += 1
                 await _set_status(e, e["status"], "system", f"Send failed: {str(exc)[:200]}", {"next_send_at": (now + timedelta(hours=2)).isoformat(), "last_error": str(exc)[:300], "claim_until": None})
@@ -497,10 +502,12 @@ async def classify(text: str) -> dict:
         if rx.search(t):
             return {"label": label, "reason": "Matched a clear phrase", "by": "rules"}
     import llm
-    if llm.configured_providers():
+    providers = llm.pii_providers()
+    if providers:
         out = []
         try:
-            async for ev in llm.stream_completion([{"role": "system", "content": CLASSIFY_SYSTEM}, {"role": "user", "content": t[:4000]}], max_tokens=150, temperature=0):
+            async for ev in llm.stream_completion([{"role": "system", "content": CLASSIFY_SYSTEM}, {"role": "user", "content": t[:4000]}], max_tokens=150, temperature=0,
+                                                  providers=providers):
                 if ev["type"] == "text":
                     out.append(ev["text"])
             raw = "".join(out)

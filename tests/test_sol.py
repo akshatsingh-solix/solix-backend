@@ -154,6 +154,26 @@ def test_openai_key_still_supported(monkeypatch):
     assert [(p.name, p.models) for p in llm.configured_providers()] == [("openai", ["gpt-4o-mini"])]
 
 
+def test_prospect_data_goes_only_to_cleared_providers(monkeypatch):
+    for k in ("MISTRAL_API_KEY", "OPENROUTER_API_KEY", "SOL_CUSTOM_BASE_URL", "SOL_PROVIDER_ORDER", "LLM_PII_PROVIDERS"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    monkeypatch.setenv("GROQ_API_KEY", "q")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert [p.name for p in llm.configured_providers()] == ["gemini", "groq"]
+    assert llm.pii_providers() == []  # free tiers alone: prospect paths stay on rules
+    monkeypatch.setenv("OPENAI_API_KEY", "sk")
+    assert [p.name for p in llm.pii_providers()] == ["openai"]
+    monkeypatch.setenv("LLM_PII_PROVIDERS", "none")
+    assert llm.pii_providers() == []
+    monkeypatch.setenv("LLM_PII_PROVIDERS", " OpenAI ")
+    assert [p.name for p in llm.pii_providers()] == ["openai"]
+    monkeypatch.setenv("LLM_PII_PROVIDERS", "  ")  # blank means the default, like unset
+    assert [p.name for p in llm.pii_providers()] == ["openai"]
+    monkeypatch.setenv("LLM_PII_PROVIDERS", "groq,openai")
+    assert [p.name for p in llm.pii_providers()] == ["groq", "openai"]
+
+
 def test_empty_reply_falls_through_to_next_model():
     llm._cooldown.clear()
 

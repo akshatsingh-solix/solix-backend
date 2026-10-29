@@ -153,7 +153,7 @@ async def meta():
 def _live_sources() -> dict:
     import llm
     import radar_intel
-    return {**radar_intel.sources_available(), "web_provider": radar_intel.web_provider(), "ai_model": bool(llm.configured_providers()),
+    return {**radar_intel.sources_available(), "web_provider": radar_intel.web_provider(), "ai_model": bool(llm.pii_providers()),
             "crustdata": bool(os.environ.get("CRUSTDATA_API_KEY"))}
 
 

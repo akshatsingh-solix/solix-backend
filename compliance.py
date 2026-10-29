@@ -55,6 +55,12 @@ def _db():
     return database.db
 
 
+def live_sending_allowed() -> bool:
+    """Real email leaves only when OUTBOUND_LIVE_SENDING is set on the server. Until the always-on
+    worker, warmed domains and launch sign-offs exist, SMTP and Instantly sends are held whatever the settings say."""
+    return os.environ.get("OUTBOUND_LIVE_SENDING", "").strip().lower() in ("1", "true", "yes")
+
+
 def email_hash(email: str) -> str:
     return hashlib.sha256((email or "").strip().lower().encode()).hexdigest()
 
@@ -336,7 +342,7 @@ async def get_settings():
     doc = await _db().settings.find_one({"key": "lia"}, {"_id": 0}) or {}
     return {**s, "lia_regions": sorted({r["region"] for r in doc.get("records") or [] if r.get("signed_at") and not r.get("revoked")}),
             "transport": {"smtp_or_resend": bool(os.environ.get("SMTP_HOST") or os.environ.get("RESEND_API_KEY")), "instantly": bool(os.environ.get("INSTANTLY_API_KEY")),
-                          "public_api_url": bool(os.environ.get("PUBLIC_API_URL"))}}
+                          "public_api_url": bool(os.environ.get("PUBLIC_API_URL")), "live_sending": live_sending_allowed()}}
 
 
 @router.put("/settings", dependencies=[Depends(require_roles("admin"))])
