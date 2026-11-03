@@ -184,9 +184,8 @@ Emails carry a one-click unsubscribe header and link. Log replies in
 
 - Make **solix-backend private**: its Action logs are public (the workflow only
   prints counts). The daily job fits well inside the private-repo free minutes.
-- Retire the old `Website/backend/` copy of the API (the live API is
-  solix-backend). First point `frontend/scripts/sol-knowledge.js` at
-  solix-backend's `sol_knowledge.json`: it still writes the copy in
-  `Website/backend/`, and the deploy workflow checks it.
+- ~~Retire the old `Website/backend/` copy of the API.~~ Done: the Website
+  repo no longer carries an API copy; the site publishes
+  `sol_knowledge.json` and this API pulls it via `SITE_KNOWLEDGE_URL`.
 - Have sales leadership confirm the territory table.
 - Export from HubSpot before retiring it.

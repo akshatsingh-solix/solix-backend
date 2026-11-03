@@ -1,8 +1,23 @@
 # Solix backend
 
-FastAPI + MongoDB API for the [Solix Technologies site](https://github.com/akshatsingh-solix/Website)
-(`frontend/` there). Deployed separately because GitHub Pages only serves
-static files — it cannot run this service.
+FastAPI + MongoDB API for the [Solix Technologies site](https://github.com/akshatsingh-solix/Website).
+This repository is the whole backend and deploys on its own; the Website
+repository holds every screen (the public site **and** the `/admin`
+dashboard) and deploys separately to GitHub Pages, which only serves static
+files. Neither repository needs the other's code: they meet over HTTPS.
+
+## How the website and this API connect
+
+| Direction | Setting | Where it is set |
+| --- | --- | --- |
+| Website → API | `BACKEND_URL` (this service's public URL, no trailing slash) | Website repo: Settings → Secrets and variables → Actions → **Variables**. The site build turns it into `REACT_APP_BACKEND_URL`. |
+| API accepts the website | `CORS_ORIGINS` (the site's origin, e.g. `https://akshatsingh-solix.github.io`) | This service's environment (`render.yaml`) |
+| API links back to the site | `SITE_URL` (e.g. `https://akshatsingh-solix.github.io/Website`) | This service's environment |
+| Sol learns the site | `SITE_KNOWLEDGE_URL` (`<SITE_URL>/sol_knowledge.json`, which every website deploy publishes) | This service's environment |
+| Publishing rebuilds the site (optional) | `GITHUB_DEPLOY_TOKEN` | This service's environment |
+
+All of it is plain HTTPS, so either side can move to another host by
+changing these values; nothing is copied between the repositories by hand.
 
 ## What works without extra setup
 
@@ -67,8 +82,10 @@ Sol answers visitors in the site's chat widget on free-tier models.
 - **Grounded answers.** `sol_knowledge.json` holds every product, solution,
   industry, article, press release, job, partner programme and service page
   of the site (~150 sections, each with its URL), generated in the Website
-  repo by `frontend/scripts/sol-knowledge.js`; copy the regenerated file here
-  after big site-content changes. Published CMS content is merged in
+  repo by `frontend/scripts/sol-knowledge.js` and published with every site
+  deploy. With `SITE_KNOWLEDGE_URL` set, the API pulls the live copy every
+  few hours; the file committed here is only the fallback for when the site
+  cannot be reached. Published CMS content is merged in
   automatically every 10 minutes (gated items: summary only). Each question
   is matched with BM25 keyword search in-process, and the best sections go
   into the prompt, so Sol quotes the site and links the page it drew on.

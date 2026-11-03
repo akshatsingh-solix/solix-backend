@@ -1,7 +1,10 @@
 """Retrieval over the site's own content for Sol.
 
 sol_knowledge.json is generated from the website repo's data files by
-frontend/scripts/sol-knowledge.js (copy it here after regenerating).
+frontend/scripts/sol-knowledge.js, and every website deploy publishes a fresh
+copy at <site>/sol_knowledge.json. Set SITE_KNOWLEDGE_URL to that address and
+the API keeps itself in sync with the live site (re-checked every few hours);
+the copy committed here is the fallback when the site cannot be reached.
 Published CMS content (the `content` collection) is merged in and refreshed
 every few minutes, so articles published in the admin are answerable without
 a redeploy; gated items contribute only their summary. Everything is ranked with BM25 (the keyword ranking
@@ -11,6 +14,7 @@ limit, no vector database, and it fits easily in a free instance's memory.
 import json
 import logging
 import math
+import os
 import re
 import time
 from datetime import datetime, timezone
@@ -20,6 +24,7 @@ from typing import List, Optional
 
 KNOWLEDGE_FILE = Path(__file__).parent / "sol_knowledge.json"
 CMS_REFRESH_SECONDS = 600
+SITE_REFRESH_SECONDS = 6 * 3600
 logger = logging.getLogger("solix.sol_search")
 
 STOP = set(
@@ -93,6 +98,7 @@ class Index:
 _index: Optional[Index] = None
 _bundled: Optional[List[dict]] = None
 _cms_checked: Optional[float] = None  # monotonic time of the last CMS load
+_site_checked: Optional[float] = None  # monotonic time of the last live-site fetch
 
 
 def bundled_chunks() -> List[dict]:
@@ -140,9 +146,38 @@ def cms_chunks(doc: dict) -> List[dict]:
     return out
 
 
+async def refresh_site(force: bool = False) -> bool:
+    """Swap in the knowledge file the live website publishes, if SITE_KNOWLEDGE_URL is set.
+
+    Returns True when new site knowledge was loaded. Any failure keeps what is
+    already loaded (the committed file at first), so Sol never goes blank.
+    """
+    global _bundled, _site_checked
+    url = os.environ.get("SITE_KNOWLEDGE_URL", "").strip()
+    if not url or (not force and _site_checked is not None and time.monotonic() - _site_checked < SITE_REFRESH_SECONDS):
+        return False
+    _site_checked = time.monotonic()
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            chunks = r.json()["chunks"]
+        if not isinstance(chunks, list) or not chunks or not all(isinstance(c, dict) and c.get("url") and c.get("text") for c in chunks):
+            raise ValueError("no usable chunks")
+    except Exception as e:  # network, HTTP, JSON or shape problems
+        logger.warning("Sol could not load site knowledge from %s (%s); keeping the current copy", url, e)
+        return False
+    _bundled = chunks
+    return True
+
+
 async def refresh_cms(db, force: bool = False) -> None:
     """Merge live CMS content into the index; cheap no-op between refreshes."""
     global _index, _cms_checked
+    if await refresh_site():
+        force = True
     if not force and _cms_checked is not None and time.monotonic() - _cms_checked < CMS_REFRESH_SECONDS:
         return
     _cms_checked = time.monotonic()

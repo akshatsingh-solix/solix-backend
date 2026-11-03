@@ -591,3 +591,34 @@ def test_offline_widget_capture_endpoint(chat_app):
         r = client.post("/api/chat/capture", json={"session_id": "sess-off", "message": "mail me at ravi@contoso.com", "page": "/contact"})
     assert r.json() == {"fields": ["company", "email"]}
     assert run_sync(fake_db.leads.find_one({"email": "ravi@contoso.com"}, {"_id": 0}))["company"] == "Contoso"
+
+
+def _patch_site(monkeypatch, handler):
+    """Route the site-knowledge fetch through a fake transport."""
+    real = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setenv("SITE_KNOWLEDGE_URL", "https://site.test/sol_knowledge.json")
+
+
+def test_site_knowledge_is_pulled_from_the_live_website(monkeypatch):
+    before = sol_search.bundled_chunks()
+    live = [{"id": "x", "kind": "page", "title": "Brand new page", "url": "/new", "text": "zebracorn archiving launch"}]
+    _patch_site(monkeypatch, lambda req: httpx.Response(200, json={"chunks": live}))
+    try:
+        assert run_sync(sol_search.refresh_site(force=True)) is True
+        assert sol_search.bundled_chunks() == live
+    finally:
+        sol_search._bundled = before
+
+
+def test_site_knowledge_failure_keeps_the_committed_copy(monkeypatch):
+    before = sol_search.bundled_chunks()
+    for handler in (lambda req: httpx.Response(503), lambda req: httpx.Response(200, json={"chunks": []}), lambda req: httpx.Response(200, text="<html>")):
+        _patch_site(monkeypatch, handler)
+        assert run_sync(sol_search.refresh_site(force=True)) is False
+        assert sol_search.bundled_chunks() == before
+
+
+def test_site_knowledge_is_off_without_a_url(monkeypatch):
+    monkeypatch.delenv("SITE_KNOWLEDGE_URL", raising=False)
+    assert run_sync(sol_search.refresh_site(force=True)) is False
