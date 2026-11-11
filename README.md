@@ -66,6 +66,15 @@ fully with just MongoDB configured.
   sequences with A/B variants and human approval, sending via SMTP or Instantly,
   reply classification, lead writeback, Slack/Digiprise pushes, bounce
   auto-pause, a watchdog and weekly learning.
+- **Free data sources with failover** (Admin → Radar → Setup → Data sources): every
+  Radar function (web search, page reading, news, job postings, company size and HQ,
+  people, email finding and verification, website-visitor companies, DNS history,
+  tenders and public spend) walks a chain of four to ten mostly free providers. A
+  provider that is rate limited or out of credits rests and the next one answers;
+  each is paced to its free allowance, counted in MongoDB. Accounts are segmented
+  enterprise / mid-market / small business. Sign-up list:
+  [`docs/radar-free-sources.md`](docs/radar-free-sources.md); step-by-step go-live:
+  [`docs/radar-sources-go-live.md`](docs/radar-sources-go-live.md).
 - Daily job: `.github/workflows/radar-daily.yml` (needs the `MONGO_URL` and
   `DB_NAME` secrets). Full method: [`docs/radar-echolocate.md`](docs/radar-echolocate.md).
 

@@ -13,10 +13,18 @@ Configure with environment variables. Any provider whose key is set is used:
   MISTRAL_API_KEY     Mistral "Experiment" plan (free)    SOL_MISTRAL_MODELS
   OPENROUTER_API_KEY  OpenRouter ":free" models           SOL_OPENROUTER_MODELS (falls back to CHAT_MODELS)
   OPENAI_API_KEY      OpenAI (paid)                       OPENAI_MODEL
+  CEREBRAS_API_KEY    Cerebras (free tier)                SOL_CEREBRAS_MODELS
+  SAMBANOVA_API_KEY   SambaNova Cloud (free tier)         SOL_SAMBANOVA_MODELS
+  GITHUB_MODELS_TOKEN GitHub Models (free, rate limited)  SOL_GITHUB_MODELS
+  NVIDIA_API_KEY      NVIDIA NIM (free developer access)  SOL_NVIDIA_MODELS
+  CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN
+                      Workers AI (daily free allowance)   SOL_CLOUDFLARE_MODELS
+  HF_TOKEN            Hugging Face inference router       SOL_HF_MODELS
   SOL_CUSTOM_BASE_URL + SOL_CUSTOM_API_KEY + SOL_CUSTOM_MODELS
                       any other OpenAI-compatible endpoint (vLLM, Ollama,
                       Together, Cerebras, a model you host on Render, ...)
   SOL_PROVIDER_ORDER  comma-separated order, default gemini,groq,mistral,openrouter,openai,custom
+                      (providers set up but not named are tried after these, in the order above)
   LLM_PII_PROVIDERS   providers allowed to see prospect personal data (Radar
                       deep dives, outbound openers, reply classification),
                       default openai; "none" keeps those paths on rules only
@@ -69,6 +77,24 @@ def configured_providers() -> List[Provider]:
                                        headers={"HTTP-Referer": site, "X-Title": "Solix Sol concierge"})
     if os.environ.get("OPENAI_API_KEY"):
         known["openai"] = Provider("openai", "https://api.openai.com/v1", os.environ["OPENAI_API_KEY"], _models("OPENAI_MODEL", "gpt-4o-mini"))
+    # More free tiers, so a busy one never leaves the Radar and Sol on rules. Model names change; override with the SOL_*_MODELS variables.
+    if os.environ.get("CEREBRAS_API_KEY"):
+        known["cerebras"] = Provider("cerebras", "https://api.cerebras.ai/v1", os.environ["CEREBRAS_API_KEY"], _models("SOL_CEREBRAS_MODELS", "gpt-oss-120b,llama-3.3-70b"))
+    if os.environ.get("SAMBANOVA_API_KEY"):
+        known["sambanova"] = Provider("sambanova", "https://api.sambanova.ai/v1", os.environ["SAMBANOVA_API_KEY"],
+                                      _models("SOL_SAMBANOVA_MODELS", "Meta-Llama-3.3-70B-Instruct,DeepSeek-V3-0324"))
+    if os.environ.get("GITHUB_MODELS_TOKEN"):
+        known["github"] = Provider("github", "https://models.github.ai/inference", os.environ["GITHUB_MODELS_TOKEN"],
+                                   _models("SOL_GITHUB_MODELS", "openai/gpt-4.1-mini,openai/gpt-4o-mini"))
+    if os.environ.get("NVIDIA_API_KEY"):
+        known["nvidia"] = Provider("nvidia", "https://integrate.api.nvidia.com/v1", os.environ["NVIDIA_API_KEY"],
+                                   _models("SOL_NVIDIA_MODELS", "meta/llama-3.3-70b-instruct,openai/gpt-oss-120b"))
+    if os.environ.get("CLOUDFLARE_ACCOUNT_ID") and os.environ.get("CLOUDFLARE_API_TOKEN"):
+        known["cloudflare"] = Provider("cloudflare", f"https://api.cloudflare.com/client/v4/accounts/{os.environ['CLOUDFLARE_ACCOUNT_ID']}/ai/v1",
+                                       os.environ["CLOUDFLARE_API_TOKEN"], _models("SOL_CLOUDFLARE_MODELS", "@cf/meta/llama-3.3-70b-instruct-fp8-fast,@cf/openai/gpt-oss-120b"))
+    if os.environ.get("HF_TOKEN"):
+        known["huggingface"] = Provider("huggingface", "https://router.huggingface.co/v1", os.environ["HF_TOKEN"],
+                                        _models("SOL_HF_MODELS", "openai/gpt-oss-120b,meta-llama/Llama-3.3-70B-Instruct"))
     if os.environ.get("SOL_CUSTOM_BASE_URL") and os.environ.get("SOL_CUSTOM_MODELS"):
         known["custom"] = Provider("custom", os.environ["SOL_CUSTOM_BASE_URL"].rstrip("/"), os.environ.get("SOL_CUSTOM_API_KEY", ""), _models("SOL_CUSTOM_MODELS", ""))
     order = [p.strip() for p in os.environ.get("SOL_PROVIDER_ORDER", "gemini,groq,mistral,openrouter,openai,custom").split(",")]

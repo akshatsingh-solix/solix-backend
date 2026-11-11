@@ -855,13 +855,14 @@ def test_firecrawl_reads_leadership_pages_and_caches(monkeypatch):
     async def no_model(system, user):
         return None, None, None
     monkeypatch.setattr(radar_research, "_complete", no_model)  # the name-line / title-line rule finds them
-    calls = []
+    calls, queries = [], []
 
     def handler(request):
         calls.append(request.url.path)
         assert request.headers["authorization"] == "Bearer fc-test"
         if request.url.path == "/v2/search":
             q = json.loads(request.content)["query"]
+            queries.append(q)
             assert "Inc" not in q
             return httpx.Response(200, json={"success": True, "data": {"web": [
                 {"url": "https://northwind.example/about/leadership", "title": "Leadership | Northwind", "description": "Meet our leaders."},
@@ -877,9 +878,11 @@ def test_firecrawl_reads_leadership_pages_and_caches(monkeypatch):
     assert set(people) == {"Grace Okafor", "Tomas Lindqvist"} and out["problems"] == []
     assert people["Grace Okafor"]["title"] == "Chief Information Officer"
     assert people["Grace Okafor"]["source_url"] == "https://northwind.example/about/leadership"
-    assert calls.count("/v2/search") == 2 and calls.count("/v2/scrape") == 1
-    run(go())  # the same search within a day comes from the cache: no new credits spent
-    assert calls.count("/v2/search") == 2 and calls.count("/v2/scrape") == 1
+    # Two leadership searches, plus one LinkedIn X-ray search for people whose public headline names the company.
+    assert calls.count("/v2/search") == 3 and calls.count("/v2/scrape") == 1
+    assert sum(q.startswith('site:linkedin.com/in "Northwind Data"') for q in queries) == 1
+    run(go())  # the same searches within a day come from the cache: no new credits spent
+    assert calls.count("/v2/search") == 3 and calls.count("/v2/scrape") == 1
 
 
 def test_company_domains_are_checked_against_the_name():

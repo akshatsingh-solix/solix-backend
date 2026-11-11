@@ -4,6 +4,10 @@ Everything below is set from the Render dashboard, the GitHub repository
 settings or the admin. No code changes are needed. Steps are in the order to do
 them; each says who does it and whether it costs anything.
 
+The Radar's free data sources (backup providers for search, jobs, people, emails,
+company size, website visitors, DNS and tenders) have their own step-by-step
+guide: [`radar-sources-go-live.md`](radar-sources-go-live.md).
+
 | | Free | Paid (optional) |
 |---|---|---|
 | Hosting, database, daily job | Render free, MongoDB Atlas free, GitHub Actions | |

@@ -48,16 +48,19 @@ class RadarFilters(BaseModel):
     owner: Optional[str] = None
     status: Optional[str] = None
     line: Optional[str] = None
+    segment: Optional[str] = None
     tab: str = "all"
     ready_only: bool = False
 
 
 def filters_dep(q: Optional[str] = None, competitor: Optional[str] = None, strength: Optional[str] = None, country: Optional[str] = None, state: Optional[str] = None,
-                territory: Optional[str] = None, owner: Optional[str] = None, status: Optional[str] = None, line: Optional[str] = None, tab: str = "all", ready_only: bool = False) -> RadarFilters:
+                territory: Optional[str] = None, owner: Optional[str] = None, status: Optional[str] = None, line: Optional[str] = None, segment: Optional[str] = None,
+                tab: str = "all", ready_only: bool = False) -> RadarFilters:
     return RadarFilters(**{k: v for k, v in locals().items()})
 
 
-TAB_TYPES = {"jobs": {"competitor_job"}, "problems": {"problem_job"}, "linkedin": {"linkedin"}, "dns": {"dns", "cert"}, "news": {"news", "filing"}, "tenders": {"tender"}, "website": {"website"}}
+TAB_TYPES = {"jobs": {"competitor_job"}, "problems": {"problem_job"}, "linkedin": {"linkedin"}, "dns": {"dns", "cert"}, "news": {"news", "filing"}, "tenders": {"tender", "spend"},
+             "website": {"website", "visit"}}
 LIST_FIELDS = {"_id": 0, "history": 0, "alias_keys": 0}
 
 
@@ -94,6 +97,13 @@ def _passes(c: dict, f: RadarFilters, fresh: str, *, with_tab: bool = True) -> b
         return False
     if f.line and c.get("primary_line") != f.line:
         return False
+    if f.segment:
+        if f.segment == "unknown" and c.get("segment"):
+            return False
+        if f.segment == "target" and c.get("segment") == "smb":
+            return False
+        if f.segment not in ("unknown", "target") and c.get("segment") != f.segment:
+            return False
     if f.ready_only and (not c.get("research_id") or rm.verdict_class({"score": c.get("research_score"), "verdict": c.get("research_verdict")}) != "ready"):
         return False
     if not with_tab or f.tab in ("all", "territory"):
@@ -152,9 +162,11 @@ async def meta():
 
 def _live_sources() -> dict:
     import llm
+    import providers as pv
     import radar_intel
+    chains = {cap: sum(1 for s in pv.SPECS if s.capability == cap and pv.configured(s)) for cap in pv.CAPABILITIES}
     return {**radar_intel.sources_available(), "web_provider": radar_intel.web_provider(), "ai_model": bool(llm.pii_providers()),
-            "crustdata": bool(os.environ.get("CRUSTDATA_API_KEY"))}
+            "crustdata": bool(os.environ.get("CRUSTDATA_API_KEY")), "chains": chains}
 
 
 async def _meta() -> dict:
@@ -165,7 +177,8 @@ async def _meta() -> dict:
         "competitors": [{"key": c["key"], "product": c["product"], "vendor": c["vendor"]} for c in rm.COMPETITORS], "highlight": rm.highlight_terms(),
         "signal_types": rm.SIGNAL_TYPES, "team": team, "rep_patch": rm.REP_PATCH, "live_sources": _live_sources(),
         "countries": sorted(c for c in countries if c), "states": sorted(x for x in states if x), "reps": sorted({na["rep"] for na in terr.get("named_accounts", [])} | set((terr.get("us_states") or {}).values()) | set((terr.get("territory_owners") or {}).values())),
-        "settings": {k: settings[k] for k in ("research_per_run", "refresh_days", "collectors")}, "ready_score": rm.READY_SCORE,
+        "settings": {k: settings[k] for k in ("research_per_run", "refresh_days", "collectors", "target_segments", "segments", "min_employees")}, "ready_score": rm.READY_SCORE,
+        "segments": [{"key": k, "label": rm.SEGMENT_LABELS[k]} for k in rm.SEGMENTS], "signal_labels": rm.SIGNAL_LABELS,
     }
 
 
@@ -205,6 +218,7 @@ async def summary(f: RadarFilters = Depends(filters_dep), user: dict = Depends(g
         if str(s.get("first_seen_at") or "")[:10] == today:
             new_today += 1
     by_strength = {s: sum(1 for c in base if c.get("strength") == s) for s in rm.STRENGTHS}
+    by_segment = {k: sum(1 for c in base if c.get("segment") == k) for k in rm.SEGMENTS + [None]}
     dives = [c for c in base if c.get("research_id")]
     ready = [c for c in dives if rm.verdict_class({"score": c.get("research_score"), "verdict": c.get("research_verdict")}) == "ready"]
     terr: Dict[str, dict] = {}
@@ -218,7 +232,8 @@ async def summary(f: RadarFilters = Depends(filters_dep), user: dict = Depends(g
         r["strong"] += c.get("strength") == "Strong"
     await _db().settings.update_one({"key": f"radar_visit:{user['id']}"}, {"$set": {"last_visit": now_iso(), "prev_visit": visit.get("last_visit")}}, upsert=True)
     return {
-        "accounts": len(base), "signals": total_signals, "by_strength": by_strength, "multi_signal": sum(1 for c in base if len(c.get("signal_types") or []) >= 2),
+        "accounts": len(base), "signals": total_signals, "by_strength": by_strength,
+        "by_segment": {("unknown" if k is None else k): v for k, v in by_segment.items()}, "multi_signal": sum(1 for c in base if len(c.get("signal_types") or []) >= 2),
         "new_today": new_today, "deep_dives": len(dives), "ready": len(ready), "surging": sum(1 for c in base if c.get("surge")),
         "unassigned": sum(1 for c in base if not c.get("owner")), "excluded": sum(1 for c in base if c.get("excluded_reason")),
         "fresh": {"new": sum(1 for c in base if fresh[c["id"]] == "new"), "updated": sum(1 for c in base if fresh[c["id"]] == "updated")},
@@ -322,7 +337,7 @@ async def create_account(body: AccountIn, user: dict = Depends(get_current_admin
 
 
 class SignalIn(BaseModel):
-    type: Literal["linkedin", "news", "filing", "tender", "competitor_job", "problem_job", "dns"]
+    type: Literal["linkedin", "news", "filing", "tender", "competitor_job", "problem_job", "dns", "spend"]
     title: str = Field(min_length=1, max_length=300)
     evidence_url: Optional[str] = Field(default=None, max_length=1000)
     evidence_text: Optional[str] = Field(default=None, max_length=2000)
@@ -502,6 +517,50 @@ async def find_people(company_id: str, user: dict = Depends(get_current_admin)):
     return out
 
 
+@router.post("/accounts/{company_id}/enrich", dependencies=[can_work])
+async def enrich_account(company_id: str, user: dict = Depends(get_current_admin)):
+    """Size, HQ and domain for one account now, from the firmographics chain (never overwrites what a person set)."""
+    import httpx
+    import radar_run
+    import radar_sources
+    c = await _db().companies.find_one({"id": company_id, **(await _visible(user))}, {"_id": 0, "history": 0})
+    if not c:
+        raise HTTPException(status_code=404, detail="Account not found")
+    problems: List[str] = []
+    async with httpx.AsyncClient(headers=radar_sources.UA, follow_redirects=True) as client:
+        sets = await radar_run.enrich_company(client, c, problems=problems)
+    await rs.add_history(company_id, user["email"], "enrich", "Company size and HQ looked up" + (f" ({sets['employees']} employees)" if sets.get("employees") else ""))
+    updated = await rs.recompute(company_id)
+    return {"account": updated, "firmographics": sets.get("firmographics"), "problems": problems}
+
+
+# --- Data sources (providers.py): every chain, what's set up, what's left ------------------------
+
+@router.get("/providers")
+async def providers_status():
+    import providers as pv
+    return await pv.status()
+
+
+class ProvidersIn(BaseModel):
+    order: Optional[Dict[str, List[str]]] = None
+    disabled: Optional[List[str]] = Field(default=None, max_length=200)
+    limits: Optional[Dict[str, Dict[str, Optional[int]]]] = None
+
+
+@router.put("/providers", dependencies=[admin_only])
+async def providers_save(body: ProvidersIn):
+    import providers as pv
+    await pv.save_config(body.model_dump(exclude_none=True))
+    return await pv.status()
+
+
+@router.post("/providers/{name}/test", dependencies=[admin_only])
+async def providers_test(name: str):
+    import radar_sources
+    return await radar_sources.probe(name)
+
+
 @router.get("/territories")
 async def get_territories():
     return await rs.territories()
@@ -535,6 +594,15 @@ class ConfigIn(BaseModel):
     countries: Optional[List[str]] = None
     tender_countries: Optional[List[str]] = None
     reps_see_own_only: Optional[bool] = None
+    segments: Optional[Dict[str, int]] = None
+    target_segments: Optional[List[Literal["enterprise", "mid_market", "smb"]]] = None
+    job_terms: Optional[List[str]] = Field(default=None, max_length=50)
+    jobs_per_term: Optional[int] = Field(default=None, ge=0, le=6)
+    xray_terms_per_run: Optional[int] = Field(default=None, ge=0, le=20)
+    auto_targets: Optional[bool] = None
+    enrich_per_run: Optional[int] = Field(default=None, ge=0, le=500)
+    subdomain_batch: Optional[int] = Field(default=None, ge=0, le=500)
+    visitor_days: Optional[int] = Field(default=None, ge=1, le=180)
 
 
 @router.get("/config")
@@ -551,6 +619,10 @@ async def put_config(body: ConfigIn):
         values["dns_domains"] = sorted({d for d in (rm.domain_of(x) for x in values["dns_domains"]) if d})
     if "targets" in values:
         values["targets"] = [t for t in values["targets"] if (t.get("company") or t.get("domain"))]
+    if "segments" in values:
+        values["segments"] = {k: int(v) for k, v in values["segments"].items() if k in rm.DEFAULT_SEGMENTS and v is not None and int(v) >= 0}
+    if "job_terms" in values:
+        values["job_terms"] = [t.strip()[:80] for t in values["job_terms"] if t and t.strip()]
     if "reps_see_own_only" in values:
         await _db().settings.update_one({"key": "radar"}, {"$set": {"reps_see_own_only": values.pop("reps_see_own_only")}}, upsert=True)
     await rs.save_radar_settings(values)
@@ -621,7 +693,7 @@ def _xl(v):
 
 
 class RunIn(BaseModel):
-    steps: List[Literal["collect", "score", "research", "digest"]] = Field(default_factory=lambda: ["collect", "score", "research"])
+    steps: List[Literal["collect", "enrich", "score", "research", "digest"]] = Field(default_factory=lambda: ["collect", "enrich", "score", "research"])
 
 
 @router.post("/run", dependencies=[admin_only])

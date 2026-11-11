@@ -11,16 +11,21 @@ how it turns them into compliant, personalised outreach and pipeline
 A signal is public evidence that a company runs, or is struggling with, a
 product Solix displaces. Every signal keeps a date and an evidence link.
 
+Every source below fails over across free providers, paced to each free allowance. The full list,
+sign-up links and the Data sources screen: [`radar-free-sources.md`](radar-free-sources.md).
+
 | Type | Source | Notes |
 |---|---|---|
-| Competitor job | Greenhouse, Lever, Ashby, Workday boards (free); Crustdata (paid, capped) | A posting that names a competitor product, with the matching sentence |
+| Competitor job | Greenhouse, Lever, Ashby, Workday, SmartRecruiters, Recruitee, Workable, Personio boards (free); TheirStack, Adzuna, JSearch, Jooble, Reed, USAJOBS (free tiers); ATS X-ray through search engines; Crustdata (paid, capped) | A posting that names a competitor product, with the matching sentence |
 | Problem job | Same | Archiving, retention, retirement or decommissioning work with no competitor named |
-| DNS / certificate | Public DNS (MX, SPF) and crt.sh | Records that fingerprint Mimecast, Proofpoint, Smarsh, Global Relay, Archive360 and others |
-| News | Google News RSS | For strong accounts only: acquisitions, migrations, decommissioning, fines |
+| DNS / certificate | Public DNS (MX, SPF; DNS-over-HTTPS backup), crt.sh and Cert Spotter, passive DNS (HackerTarget, OTX, urlscan) | Records, hosts and CNAMEs that fingerprint Mimecast, Proofpoint, Smarsh, Global Relay, Archive360 and others |
+| News | Google News, Bing News, GDELT, NewsData | For strong accounts only: acquisitions, migrations, decommissioning, fines |
 | Filing | SEC EDGAR full-text search (free) | 10-K, 10-Q, 8-K filings that name a competitor product |
-| Tender | EU TED (free) | Public tenders for archiving, retirement and records systems |
+| Tender | EU TED, SAM.gov, UK Contracts Finder (free) | Public tenders for archiving, retirement and records systems |
+| Public spend | USAspending.gov (free) | US agencies already paying a competitor |
 | LinkedIn | Logged by hand from an account | No lawful free feed exists |
 | Website | Your own `/api/track` intent | Leads whose email domain matches the account |
+| Website visits | Consenting visitors' networks (ipapi.is, IPinfo, Ipregistry, RDAP, reverse DNS) | Organisations browsing the site before anyone fills a form; addresses never stored |
 
 Signals are stored once per `dedupe_key`; later sightings only refresh
 `last_seen_at`. Staffing firms and consultancies are dropped.

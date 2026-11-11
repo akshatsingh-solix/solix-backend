@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       steps:
-        description: "daily, collect, score, research or digest"
+        description: "daily, collect, enrich, score, research, digest, or sources (lists which data-source keys are set)"
         default: daily
         required: false
 
@@ -45,6 +45,21 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           CRUSTDATA_API_KEY: ${{ secrets.CRUSTDATA_API_KEY }}
+          # Radar free data sources (docs/radar-free-sources.md); any that are set are used.
+          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+          PARALLEL_API_KEY: ${{ secrets.PARALLEL_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          THEIRSTACK_API_KEY: ${{ secrets.THEIRSTACK_API_KEY }}
+          ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
+          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+          HUNTER_API_KEY: ${{ secrets.HUNTER_API_KEY }}
+          PDL_API_KEY: ${{ secrets.PDL_API_KEY }}
+          COMPANIES_HOUSE_API_KEY: ${{ secrets.COMPANIES_HOUSE_API_KEY }}
+          SAM_GOV_API_KEY: ${{ secrets.SAM_GOV_API_KEY }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
@@ -52,9 +67,14 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           SITE_URL: ${{ vars.SITE_URL }}
+          STEPS: ${{ github.event.inputs.steps || 'daily' }}
         run: |
+          if [ "$STEPS" = "sources" ]; then
+            python providers.py
+            exit 0
+          fi
           if [ -z "$MONGO_URL" ]; then
             echo "::warning::The MONGO_URL and DB_NAME repository secrets aren't set yet, so there's nothing to run. See docs/GO-LIVE.md step 3."
             exit 0
           fi
-          python radar_run.py "${{ github.event.inputs.steps || 'daily' }}"
+          python radar_run.py "$STEPS"
