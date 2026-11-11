@@ -9,6 +9,8 @@ visitors never see a free tier running out.
 Configure with environment variables. Any provider whose key is set is used:
 
   GEMINI_API_KEY      Google AI Studio (free, no card)   SOL_GEMINI_MODELS
+                      (free use is "Unpaid Services": Google may use prompts to improve its products, so keep it
+                      out of LLM_PII_PROVIDERS unless the key's Cloud project has billing enabled)
   GROQ_API_KEY        Groq (free, very fast)              SOL_GROQ_MODELS
   MISTRAL_API_KEY     Mistral "Experiment" plan (free)    SOL_MISTRAL_MODELS
   OPENROUTER_API_KEY  OpenRouter ":free" models           SOL_OPENROUTER_MODELS (falls back to CHAT_MODELS)
@@ -65,7 +67,7 @@ def configured_providers() -> List[Provider]:
     known = {}
     if os.environ.get("GEMINI_API_KEY"):
         known["gemini"] = Provider("gemini", "https://generativelanguage.googleapis.com/v1beta/openai", os.environ["GEMINI_API_KEY"],
-                                   _models("SOL_GEMINI_MODELS", "gemini-2.5-flash,gemini-2.5-flash-lite"))
+                                   _models("SOL_GEMINI_MODELS", "gemini-3.8-flash,gemini-3.5-flash-lite,gemini-2.5-flash-lite"))
     if os.environ.get("GROQ_API_KEY"):
         known["groq"] = Provider("groq", "https://api.groq.com/openai/v1", os.environ["GROQ_API_KEY"],
                                  _models("SOL_GROQ_MODELS", "openai/gpt-oss-120b,openai/gpt-oss-20b"), {"reasoning_effort": "low"})

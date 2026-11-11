@@ -11,7 +11,7 @@ Sources (all free unless noted):
                Personio public job-board APIs; Workday career sites' JSON search.
                Configured per target in Admin > Radar, and added automatically by
                the ATS X-ray (radar_sources.ats_xray) as new boards are found.
-  Job market   TheirStack, Adzuna, JSearch, Jooble, Reed, USAJOBS (radar_sources),
+  Job market   TheirStack, JSearch, Jooble, Reed, USAJOBS (radar_sources),
                each paced to its free allowance. Crustdata (paid, capped) optional.
   DNS / certs  MX and SPF records (local resolver, then Google and Cloudflare
                DNS-over-HTTPS) plus certificate-transparency names (crt.sh, then

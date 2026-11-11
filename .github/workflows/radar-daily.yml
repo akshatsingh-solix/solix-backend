@@ -51,10 +51,7 @@ jobs:
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
           BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
-          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
           THEIRSTACK_API_KEY: ${{ secrets.THEIRSTACK_API_KEY }}
-          ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
-          ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
           RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
           HUNTER_API_KEY: ${{ secrets.HUNTER_API_KEY }}
           PDL_API_KEY: ${{ secrets.PDL_API_KEY }}

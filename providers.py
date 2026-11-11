@@ -8,6 +8,8 @@ tenders) has a chain of providers here, most of them free. A call walks its chai
 * one that was rate limited, ran out of credits or rejected its key rests for a while
   (60 seconds to 6 hours, by the kind of failure) and the next one answers;
 * one that has used its free allowance for the month is skipped until the month turns,
+  one whose one-time credits are used or past their expiry date is skipped for good (until a new
+  grant is entered), and one-time credits are spread over the days to their expiry,
   and scheduled (bulk) work spreads the month's allowance over the days left, so the
   daily run never spends a whole month of credits on day one. A person clicking a
   button is never paced, only capped.
@@ -30,7 +32,7 @@ import math
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from calendar import monthrange
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
@@ -48,6 +50,7 @@ class Spec:
     free: str = ""                 # what the free tier gives, in words
     monthly: Optional[int] = None  # soft cap on units a calendar month (None: no known cap; errors decide)
     daily: Optional[int] = None    # soft cap on units a UTC day
+    grant: Optional[int] = None    # one-time credits (not monthly); an expiry date can be set in Data sources
     signup: str = ""
     pool: str = ""                 # providers that share one allowance (Hunter searches) share a pool
     always: bool = False           # keyless and part of the original Radar: not affected by RADAR_KEYLESS_SOURCES
@@ -96,10 +99,9 @@ SPECS: List[Spec] = [
     # --- web search (keyword engines first: they accept site: and quoted phrases) ---
     Spec("firecrawl", "web_search", "Firecrawl", ("FIRECRAWL_API_KEY",), "Free credits each month (2 per search of up to 10 results)", signup=_H + "firecrawl.dev", pool="firecrawl"),
     Spec("tavily", "web_search", "Tavily", ("TAVILY_API_KEY",), "1,000 credits a month (1 per basic search)", monthly=1000, signup=_H + "tavily.com"),
-    Spec("serper", "web_search", "Serper (Google results)", ("SERPER_API_KEY",), "2,500 free queries on sign-up", monthly=2500, signup=_H + "serper.dev",
+    Spec("serper", "web_search", "Serper (Google results)", ("SERPER_API_KEY",), "2,500 free queries on sign-up (one-time)", grant=2500, signup=_H + "serper.dev",
          note="The free queries are a one-time grant; set its allowance in Data sources once you know your balance."),
     Spec("brave", "web_search", "Brave Search", ("BRAVE_API_KEY",), "$5 of credit a month (about 1,000 searches)", monthly=950, signup=_H + "brave.com/search/api/"),
-    Spec("exa", "web_search", "Exa", ("EXA_API_KEY",), "Monthly free credit (about 1,000 searches)", monthly=1000, signup=_H + "exa.ai"),
     Spec("google_cse", "web_search", "Google Programmable Search", ("GOOGLE_CSE_KEY", "GOOGLE_CSE_CX"), "100 queries a day", daily=100,
          signup=_H + "developers.google.com/custom-search/v1/overview", note="Closed to new sign-ups; works with an existing key."),
     Spec("serpapi", "web_search", "SerpApi", ("SERPAPI_API_KEY",), "250 searches a month", monthly=250, signup=_H + "serpapi.com"),
@@ -111,7 +113,8 @@ SPECS: List[Spec] = [
     Spec("firecrawl_read", "page_read", "Firecrawl", ("FIRECRAWL_API_KEY",), "1 credit a page", pool="firecrawl", signup=_H + "firecrawl.dev"),
     Spec("jina_reader", "page_read", "Jina Reader", (), "Keyless (20 pages a minute); JINA_API_KEY raises the limit", signup=_H + "jina.ai/reader"),
     Spec("tavily_extract", "page_read", "Tavily Extract", ("TAVILY_API_KEY",), "Shares Tavily's 1,000 credits", pool="tavily", signup=_H + "tavily.com"),
-    Spec("exa_contents", "page_read", "Exa Contents", ("EXA_API_KEY",), "Shares Exa's monthly credit", pool="exa", signup=_H + "exa.ai"),
+    Spec("parallel_extract", "page_read", "Parallel Extract", ("PARALLEL_API_KEY",), "Shares Parallel's monthly credit", pool="parallel", signup=_H + "parallel.ai"),
+    Spec("wayback", "page_read", "Wayback Machine copy", (), "Keyless: the latest archived copy, for pages that block direct reading"),
     Spec("direct_read", "page_read", "Direct fetch + text extraction", (), "Keyless: the page itself, read locally"),
     # --- news ---
     Spec("google_news", "news", "Google News RSS", (), "Keyless", always=True),
@@ -121,7 +124,6 @@ SPECS: List[Spec] = [
     Spec("web_news", "news", "Web search (past year)", (), "Uses the web-search chain's allowance", always=True),
     # --- job postings across the market ---
     Spec("theirstack", "jobs", "TheirStack", ("THEIRSTACK_API_KEY",), "200 API credits a month (1 per job returned)", monthly=200, signup=_H + "theirstack.com"),
-    Spec("adzuna", "jobs", "Adzuna", ("ADZUNA_APP_ID", "ADZUNA_APP_KEY"), "Free developer access (about 250 calls a day)", daily=240, signup=_H + "developer.adzuna.com"),
     Spec("jsearch", "jobs", "JSearch (Google for Jobs, LinkedIn, Indeed)", ("RAPIDAPI_KEY",), "About 200 requests a month on RapidAPI's free plan", monthly=150,
          signup=_H + "rapidapi.com/letscrawl/api/jsearch"),
     Spec("jooble", "jobs", "Jooble", ("JOOBLE_API_KEY",), "Free API key on request", signup=_H + "jooble.org/api/about"),
@@ -158,7 +160,8 @@ SPECS: List[Spec] = [
     Spec("pattern_verify", "email_find", "Address patterns + verification", (), "Keyless when a mailbox verifier is set up", always=True),
     # --- does the mailbox exist ---
     Spec("reacher", "email_verify", "Reacher (self-hosted)", ("REACHER_URL",), "Unlimited on your own server", signup=_H + "reacher.email"),
-    Spec("mailboxvalidator", "email_verify", "MailboxValidator", ("MAILBOXVALIDATOR_API_KEY",), "300 checks a month", monthly=290, signup=_H + "www.mailboxvalidator.com"),
+    Spec("mailboxvalidator", "email_verify", "MailboxValidator", ("MAILBOXVALIDATOR_API_KEY",), "300 API credits on the free plan, which can expire", grant=300,
+         signup=_H + "www.mailboxvalidator.com", note="Set the date your credits expire under Allowance."),
     Spec("zerobounce", "email_verify", "ZeroBounce", ("ZEROBOUNCE_API_KEY",), "100 checks a month (business domain sign-up)", monthly=95, signup=_H + "www.zerobounce.net"),
     Spec("abstract_email", "email_verify", "Abstract Email Validation", ("ABSTRACT_EMAIL_API_KEY",), "100 checks a month", monthly=95, signup=_H + "www.abstractapi.com"),
     Spec("hunter_verify", "email_verify", "Hunter Email Verifier", ("HUNTER_API_KEY",), "50 verifications a month", monthly=50, pool="hunter_verify", signup=_H + "hunter.io"),
@@ -167,7 +170,7 @@ SPECS: List[Spec] = [
     Spec("ipapi_is", "ip_company", "ipapi.is", ("IPAPI_IS_KEY",), "1,000 lookups a day; company name, domain and network type", daily=950, signup=_H + "ipapi.is"),
     Spec("ipinfo_lite", "ip_company", "IPinfo Lite", ("IPINFO_TOKEN",), "Unlimited (network owner and its domain)", signup=_H + "ipinfo.io/lite",
          note="Free with attribution to IPinfo."),
-    Spec("ipregistry", "ip_company", "Ipregistry", ("IPREGISTRY_KEY",), "100,000 free lookups on sign-up", signup=_H + "ipregistry.co"),
+    Spec("ipregistry", "ip_company", "Ipregistry", ("IPREGISTRY_KEY",), "100,000 free lookups on sign-up (one-time)", grant=100000, signup=_H + "ipregistry.co"),
     Spec("rdap", "ip_company", "RDAP (regional internet registries)", (), "Keyless: who the address block is registered to"),
     Spec("ptr", "ip_company", "Reverse DNS", (), "Keyless: the address's host name"),
     # --- subdomains and DNS history ---
@@ -252,8 +255,22 @@ async def save_config(values: dict) -> dict:
     if "disabled" in values:
         clean["disabled"] = sorted({n for n in values.get("disabled") or [] if n in SPEC_BY_NAME})
     if "limits" in values:
-        clean["limits"] = {pool: {k: int(v) for k, v in (lim or {}).items() if k in ("monthly", "daily") and v is not None and int(v) >= 0}
-                           for pool, lim in (values.get("limits") or {}).items()}
+        # monthly / daily allowances, or one-time credits (`total`) with an optional `expires` date. A grant keeps its own
+        # counter from the day it is entered (`starts`), so entering a new grant (a renewal, the real balance) starts at zero.
+        current = (await config())["limits"]
+        out = {}
+        for pool, lim in (values.get("limits") or {}).items():
+            lim = lim or {}
+            new = {k: int(v) for k, v in lim.items() if k in ("monthly", "daily", "total") and v not in (None, "") and int(v) >= 0}
+            if lim.get("expires"):
+                new["expires"] = date.fromisoformat(str(lim["expires"])[:10]).isoformat()
+            if "total" in new:
+                prev = current.get(pool) or {}
+                same = prev.get("total") == new["total"] and prev.get("expires") == new.get("expires") and prev.get("starts")
+                new["starts"] = prev["starts"] if same else _now().date().isoformat()
+            if new:
+                out[pool] = new
+        clean["limits"] = out
     await _db().settings.update_one({"key": "providers"}, {"$set": {**clean, "updated_at": now_iso()}}, upsert=True)
     cache.bump("providers_cfg")
     return await config()
@@ -275,9 +292,11 @@ def _month(now: Optional[datetime] = None) -> str:
     return (now or _now()).strftime("%Y-%m")
 
 
-async def usage(pool: str) -> dict:
-    month = _month()
-    u = _usage.get(pool)
+async def usage(pool: str, month: Optional[str] = None) -> dict:
+    """Units counted this calendar month, or under a one-time grant's counter (`month` = "grant:<start date>")."""
+    month = month or _month()
+    key = f"{pool}|{month}" if month.startswith("grant:") else pool
+    u = _usage.get(key)
     if u and u["month"] == month and time.monotonic() - u["loaded"] < USAGE_TTL:
         return u
     try:
@@ -285,11 +304,11 @@ async def usage(pool: str) -> dict:
     except Exception:  # noqa: BLE001
         doc = {}
     u = {"month": month, "units": int(doc.get("units") or 0), "days": dict(doc.get("days") or {}), "loaded": time.monotonic()}
-    if pool in _usage and _usage[pool]["month"] == month:  # keep counts this process added since the last read
-        u["units"] = max(u["units"], _usage[pool]["units"])
-        for d, n in _usage[pool]["days"].items():
+    if key in _usage and _usage[key]["month"] == month:  # keep counts this process added since the last read
+        u["units"] = max(u["units"], _usage[key]["units"])
+        for d, n in _usage[key]["days"].items():
             u["days"][d] = max(int(u["days"].get(d) or 0), n)
-    _usage[pool] = u
+    _usage[key] = u
     return u
 
 
@@ -297,20 +316,39 @@ async def charge(spec: Spec, units: int = 1) -> None:
     if units <= 0:
         return
     pool, now = spec.quota_pool, _now()
-    u = await usage(pool)
+    g = await grant(spec)
     day = now.strftime("%d")
-    u["units"] += units
-    u["days"][day] = int(u["days"].get(day) or 0) + units
-    try:
-        await _db().provider_usage.update_one({"pool": pool, "month": u["month"]},
-                                              {"$inc": {"units": units, f"days.{day}": units}, "$set": {"updated_at": now.isoformat()}}, upsert=True)
-    except Exception:  # noqa: BLE001 - counting must never fail a lookup
-        logger.debug("usage write failed for %s", pool)
+    for month in [None] + ([g["month"]] if g else []):
+        u = await usage(pool, month)
+        u["units"] += units
+        u["days"][day] = int(u["days"].get(day) or 0) + units
+        try:
+            await _db().provider_usage.update_one({"pool": pool, "month": u["month"]},
+                                                  {"$inc": {"units": units, f"days.{day}": units}, "$set": {"updated_at": now.isoformat()}}, upsert=True)
+        except Exception:  # noqa: BLE001 - counting must never fail a lookup
+            logger.debug("usage write failed for %s", pool)
 
 
 async def limits(spec: Spec) -> Tuple[Optional[int], Optional[int]]:
     over = (await config())["limits"].get(spec.quota_pool) or {}
     return over.get("monthly", spec.monthly), over.get("daily", spec.daily)
+
+
+GRANT_HORIZON_DAYS = 60  # one-time credits with no expiry date are spread as if they had to last this long
+
+
+async def grant(spec: Spec) -> Optional[dict]:
+    """One-time credits for the provider's pool: entered in Data sources, else the provider's built-in sign-up grant."""
+    over = (await config())["limits"].get(spec.quota_pool) or {}
+    total = over.get("total", spec.grant)
+    if not total:
+        return None
+    starts = over.get("starts") if "total" in over else None
+    return {"total": int(total), "expires": over.get("expires"), "starts": starts, "month": f"grant:{starts or 'signup'}"}
+
+
+def days_until(iso_date: str, now: Optional[datetime] = None) -> int:
+    return (date.fromisoformat(iso_date[:10]) - (now or _now()).date()).days
 
 
 def pace(cap: int, used_before_today: int, now: Optional[datetime] = None) -> int:
@@ -322,10 +360,21 @@ def pace(cap: int, used_before_today: int, now: Optional[datetime] = None) -> in
 
 async def headroom(spec: Spec, bulk: bool = False) -> Tuple[bool, str]:
     monthly, daily = await limits(spec)
-    if monthly is None and daily is None:
+    g = await grant(spec)
+    if monthly is None and daily is None and not g:
         return True, ""
     u = await usage(spec.quota_pool)
     today = int(u["days"].get(_now().strftime("%d")) or 0)
+    if g:
+        if g["expires"] and days_until(g["expires"]) < 0:
+            return False, f"credits expired on {g['expires']}"
+        used = (await usage(spec.quota_pool, g["month"]))["units"]
+        if used >= g["total"]:
+            return False, f"one-time credits used ({used}/{g['total']})"
+        if bulk:
+            days_left = days_until(g["expires"]) + 1 if g["expires"] else GRANT_HORIZON_DAYS
+            if today >= max(1, math.ceil((g["total"] - (used - today)) / max(days_left, 1))):
+                return False, "paced: today's share of the remaining credits is used"
     if monthly is not None and u["units"] >= monthly:
         return False, f"free allowance used for {u['month']} ({u['units']}/{monthly})"
     if daily is not None and today >= daily:
@@ -510,6 +559,8 @@ async def status() -> dict:
             monthly, daily = await limits(spec)
             u = await usage(spec.quota_pool)
             today = int(u["days"].get(_now().strftime("%d")) or 0)
+            g = await grant(spec)
+            g_used = (await usage(spec.quota_pool, g["month"]))["units"] if g else None
             is_on = spec in order
             ok, why = await ready(spec) if is_on else (False, "switched off")
             c = _cool.get(_kid(spec))
@@ -517,6 +568,8 @@ async def status() -> dict:
                 "name": spec.name, "label": spec.label, "keyless": spec.keyless, "env": list(spec.env), "free": spec.free, "signup": spec.signup, "note": spec.note,
                 "configured": configured(spec), "enabled": is_on, "ready": ok, "reason": why, "pool": spec.quota_pool,
                 "monthly_cap": monthly, "daily_cap": daily, "used_month": u["units"], "used_today": today,
+                "grant_total": g["total"] if g else None, "grant_used": g_used, "grant_left": max(0, g["total"] - g_used) if g else None,
+                "expires": g["expires"] if g else None, "expires_in_days": days_until(g["expires"]) if g and g["expires"] else None,
                 "left_month": None if monthly is None else max(0, monthly - u["units"]),
                 "resting_until": datetime.fromtimestamp(c[2], tz=timezone.utc).isoformat() if c and c[0] > time.monotonic() else None,
                 **{k: v for k, v in (_last.get(spec.name) or {}).items()},

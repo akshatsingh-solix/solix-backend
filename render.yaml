@@ -104,8 +104,6 @@ services:
         sync: false
       - key: BRAVE_API_KEY
         sync: false
-      - key: EXA_API_KEY
-        sync: false
       - key: GOOGLE_CSE_KEY
         sync: false
       - key: GOOGLE_CSE_CX
@@ -119,10 +117,6 @@ services:
       - key: NEWSDATA_API_KEY
         sync: false
       - key: THEIRSTACK_API_KEY
-        sync: false
-      - key: ADZUNA_APP_ID
-        sync: false
-      - key: ADZUNA_APP_KEY
         sync: false
       - key: RAPIDAPI_KEY
         sync: false

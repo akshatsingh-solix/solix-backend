@@ -9,6 +9,9 @@ launch checklist (email, compliance, Instantly): [`GO-LIVE.md`](GO-LIVE.md).
 
 ---
 
+> Company policy: **Exa and Adzuna are not used** and have been removed from the Radar. Don't sign
+> up for them or add their keys.
+
 ## Step 1. Merge the two pull requests (10 minutes)
 
 Order matters: the admin screen calls the new API, so the backend goes first.
@@ -38,13 +41,14 @@ or chat). Each line is: provider → where to sign up → the variable name the 
 |---|---|---|---|
 | 1 | Tavily (web search, 1,000/month) | tavily.com → Sign up → API key on the dashboard | `TAVILY_API_KEY` |
 | 2 | Serper (Google results, 2,500 once) | serper.dev → Sign up → API key | `SERPER_API_KEY` |
-| 3 | Exa (web search, monthly credit) | exa.ai → Dashboard → API keys | `EXA_API_KEY` |
-| 4 | TheirStack (job postings, 200/month) | theirstack.com → Sign up → Settings → API key | `THEIRSTACK_API_KEY` |
-| 5 | Adzuna (job postings) | developer.adzuna.com → Register → it shows an *Application ID* and *Application Key* | `ADZUNA_APP_ID`, `ADZUNA_APP_KEY` |
+| 3 | TheirStack (job postings, 200/month) | theirstack.com → Sign up → Settings → API key | `THEIRSTACK_API_KEY` |
+| 4 | JSearch (Google for Jobs, LinkedIn, Indeed jobs) | rapidapi.com → search *JSearch* → **Subscribe to Basic (free)** → copy *X-RapidAPI-Key* | `RAPIDAPI_KEY` |
+| 5 | Jooble (jobs) | jooble.org/api/about → request a key (arrives by email) | `JOOBLE_API_KEY` |
 | 6 | Tomba (people + emails, 25/month) | tomba.io → Sign up → API → copy the key **and** the secret | `TOMBA_KEY`, `TOMBA_SECRET` |
-| 7 | MailboxValidator (300 checks/month) | mailboxvalidator.com → Free plan → API key | `MAILBOXVALIDATOR_API_KEY` |
+| 7 | MailboxValidator (API credits, can expire) | mailboxvalidator.com → Free plan → API key. Note how many API credits you got and their expiry date: you enter both in Step 4 | `MAILBOXVALIDATOR_API_KEY` |
 | 8 | IPinfo Lite (website visitor companies, unlimited) | ipinfo.io → Sign up → Token | `IPINFO_TOKEN` |
 | 9 | UK Companies House (UK size, HQ, directors) | developer.company-information.service.gov.uk → Register → *Create an application* → *Create new key* (type **REST**) | `COMPANIES_HOUSE_API_KEY` |
+| 10 | Google Gemini (AI for Sol, the website chat) | aistudio.google.com → **Get API key** | `GEMINI_API_KEY` (see Step 6 before using it for prospect data) |
 
 If Firecrawl, Parallel and Hunter keys are already on Render, keep them: they stay first in their
 chains and the new ones take over when they run out.
@@ -54,8 +58,6 @@ chains and the new ones take over when they run out.
 | Provider | Sign up | Copy into |
 |---|---|---|
 | Brave Search ($5 credit/month, card required) | brave.com/search/api → Subscribe to the free/"Search" plan → API key | `BRAVE_API_KEY` |
-| JSearch (Google for Jobs, LinkedIn, Indeed jobs) | rapidapi.com → search *JSearch* → **Subscribe to Basic (free)** → copy *X-RapidAPI-Key* | `RAPIDAPI_KEY` |
-| Jooble (jobs) | jooble.org/api/about → request a key (arrives by email) | `JOOBLE_API_KEY` |
 | USAJOBS (US federal jobs) | developer.usajobs.gov → Request API key | `USAJOBS_API_KEY` and the email you registered with in `USAJOBS_EMAIL` |
 | Reed (UK jobs) | reed.co.uk/developers → Jobseeker API → key | `REED_API_KEY` |
 | SAM.gov (US federal tenders) | sam.gov → sign in → profile → **Account Details** → request public API key | `SAM_GOV_API_KEY` |
@@ -106,9 +108,16 @@ Keys live only on Render. They are never written to either repository.
 | `Not set up: VARIABLE` | The variable name on Render is spelled differently. Copy it from this page exactly. |
 | `rate limited` | Normal on a burst of tests. Wait a minute and test again. |
 
-4. If a provider's real free allowance differs from the one shown (for example your Serper balance),
-   click **Allowance** on its row and enter the right number.
-5. Admin → **Outbound → Health**: the check **Radar data sources** should be green.
+4. **Time-limited and one-time credits.** For any provider whose free credits are a one-off grant
+   or expire (for example MailboxValidator's API credits, valid for 6 months, or Serper's 2,500
+   sign-up queries): click **Allowance** on its row → *One-time credits* → enter the number of
+   credits left → set **Expires on** → **Save**. The Radar then spreads those credits over the days
+   to the expiry date, skips the provider once they are used or expired, and warns you in
+   Outbound → Health two weeks before they expire. When you renew or top up, enter the new grant the
+   same way (it starts a fresh count). For a monthly or daily allowance that differs from the one
+   shown, pick *Every month* or *Every day* instead.
+5. Admin → **Outbound → Health**: the checks **Radar data sources** and **Radar one-time credits**
+   should be green.
 
 ## Step 5. Radar settings (5 minutes)
 
@@ -129,9 +138,14 @@ Deep dives, outreach openers and reply labels contain prospect names, so they on
 providers named in `LLM_PII_PROVIDERS` on Render (default `openai`). Pick one:
 
 - **Have an OpenAI key**: nothing to do.
-- **Stay free**: read the data terms of a free provider you have a key for (Groq, Cerebras, Gemini...),
+- **Stay free**: read the data terms of a free provider you have a key for (Groq, Cerebras...),
   and if they are acceptable to your legal/compliance owner, set for example
   `LLM_PII_PROVIDERS=groq,cerebras` on Render.
+- **Gemini**: on a free key, Google's terms say not to send personal information (free use may be used
+  to improve Google's products). So keep `gemini` out of `LLM_PII_PROVIDERS` unless you enable billing
+  on the key's Google Cloud project (Google Cloud console → Billing → link a billing account). Use then
+  becomes a paid service under Google's data processing terms, and `LLM_PII_PROVIDERS=gemini` is
+  reasonable to propose to your compliance owner. Either way the key works for Sol straight away.
 - **Free and private**: run a model on your own server (for example Ollama), set `SOL_CUSTOM_BASE_URL`,
   `SOL_CUSTOM_MODELS`, and `LLM_PII_PROVIDERS=custom`.
 - **Do nothing**: deep dives are drafted from the signals by rules (useful, but shorter).
@@ -144,6 +158,20 @@ sentence to the cookie banner or privacy notice, for example: *"If you accept an
 use your IP address to identify the organisation whose network you are browsing from. We store the
 organisation, not the address."* If you would rather not, untick *Website visitor companies* in
 Step 5.
+
+## Step 7b. Companies researching competitors (optional, 15 minutes)
+
+Seeing who visits a competitor's website is only possible for that competitor; the lawful sources
+are intent providers. If you have (or buy) one, export its account list as CSV and import it:
+Admin → **Radar → Setup → Companies researching competitors** → set **Source** (e.g. "G2 Buyer
+Intent" or "Bombora") → **Import CSV export**. The accounts appear on the **Researching** tab, tied to
+the competitor they researched. Repeat weekly; re-importing never duplicates. Details and providers:
+[`radar-free-sources.md`](radar-free-sources.md#companies-researching-competitors).
+
+Free and built in: organisations visiting *your* site who read or search for a competitor appear on
+the **Website intent** tab with that competitor. To get more of them, publish comparison and
+migration pages ("Solix vs OpenText InfoArchive", "Migrating off Documentum") with the competitor's
+name in the page address.
 
 ## Step 8. First run (5 minutes to start, 10 to 30 minutes to finish)
 

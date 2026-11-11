@@ -6,7 +6,7 @@ import io
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional, Union
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -60,7 +60,7 @@ def filters_dep(q: Optional[str] = None, competitor: Optional[str] = None, stren
 
 
 TAB_TYPES = {"jobs": {"competitor_job"}, "problems": {"problem_job"}, "linkedin": {"linkedin"}, "dns": {"dns", "cert"}, "news": {"news", "filing"}, "tenders": {"tender", "spend"},
-             "website": {"website", "visit"}}
+             "website": {"website", "visit"}, "intent": {"intent"}}
 LIST_FIELDS = {"_id": 0, "history": 0, "alias_keys": 0}
 
 
@@ -241,7 +241,7 @@ async def summary(f: RadarFilters = Depends(filters_dep), user: dict = Depends(g
         "competitors": [{"product": k, "signals": v} for k, v in sorted(comp_counts.items(), key=lambda kv: -kv[1])[:8]],
         "scope": [{"id": c["id"], "name": c["name"], "strength": c.get("strength"), "signals": c.get("signal_count") or 0, "dive": c.get("research_score"), "surge": c.get("surge"), "fresh": fresh[c["id"]]} for c in base],
         "territories": [{**t, "reps": sorted(t["reps"].values(), key=lambda r: -r["accounts"])} for t in sorted(terr.values(), key=lambda t: rm.TERRITORY_ORDER.index(t["territory"]) if t["territory"] in rm.TERRITORY_ORDER else 99)],
-        "tabs": {tab: sum(1 for c in base if _passes(c, RadarFilters(tab=tab), fresh[c["id"]])) for tab in ("new", "todo", "dives", "jobs", "problems", "linkedin", "dns", "news", "tenders", "website", "ready", "surge", "excluded")},
+        "tabs": {tab: sum(1 for c in base if _passes(c, RadarFilters(tab=tab), fresh[c["id"]])) for tab in ("new", "todo", "dives", "jobs", "problems", "linkedin", "dns", "news", "tenders", "website", "intent", "ready", "surge", "excluded")},
         "trend": {"weeks": weeks, "series": [{"key": k, "product": (rm.COMPETITOR_BY_KEY.get(k) or {}).get("product", k), "counts": [v.get(w, 0) for w in weeks]}
                                              for k, v in sorted(trend.items(), key=lambda kv: -sum(kv[1].values()))[:6]]},
         "last_run": last,
@@ -337,7 +337,7 @@ async def create_account(body: AccountIn, user: dict = Depends(get_current_admin
 
 
 class SignalIn(BaseModel):
-    type: Literal["linkedin", "news", "filing", "tender", "competitor_job", "problem_job", "dns", "spend"]
+    type: Literal["linkedin", "news", "filing", "tender", "competitor_job", "problem_job", "dns", "spend", "intent"]
     title: str = Field(min_length=1, max_length=300)
     evidence_url: Optional[str] = Field(default=None, max_length=1000)
     evidence_text: Optional[str] = Field(default=None, max_length=2000)
@@ -534,6 +534,27 @@ async def enrich_account(company_id: str, user: dict = Depends(get_current_admin
     return {"account": updated, "firmographics": sets.get("firmographics"), "problems": problems}
 
 
+# --- Intent data: companies researching a competitor or the problem (radar_intent.py) ------------------
+
+class IntentIn(BaseModel):
+    csv: Optional[str] = Field(default=None, max_length=10_000_000)
+    rows: Optional[List[Dict[str, Optional[Union[str, int, float]]]]] = Field(default=None, max_length=50000)
+    source: str = Field(default="Intent data", min_length=1, max_length=60)
+
+
+@router.post("/intent/import", dependencies=[can_work])
+async def import_intent(body: IntentIn, user: dict = Depends(get_current_admin)):
+    """A G2 Buyer Intent, Bombora Company Surge, TrustRadius, 6sense... export (CSV text) or rows from an automation."""
+    import ops
+    import radar_intent
+    rows = radar_intent.parse(body.csv) if body.csv else [{k: str(v) for k, v in r.items() if v not in (None, "")} for r in body.rows or []]
+    if not rows:
+        raise HTTPException(status_code=422, detail="No rows found. The file needs a header row with a company (or domain) column and a topic column.")
+    async with ops.run("radar_intent_import", by=user["email"]) as r:
+        r["counts"] = await radar_intent.import_rows(rows, body.source, by=user["email"])
+    return r["counts"]
+
+
 # --- Data sources (providers.py): every chain, what's set up, what's left ------------------------
 
 @router.get("/providers")
@@ -545,13 +566,17 @@ async def providers_status():
 class ProvidersIn(BaseModel):
     order: Optional[Dict[str, List[str]]] = None
     disabled: Optional[List[str]] = Field(default=None, max_length=200)
-    limits: Optional[Dict[str, Dict[str, Optional[int]]]] = None
+    # pool -> {"monthly": n} | {"daily": n} | {"total": n, "expires": "YYYY-MM-DD"} (one-time credits)
+    limits: Optional[Dict[str, Dict[str, Optional[Union[int, str]]]]] = None
 
 
 @router.put("/providers", dependencies=[admin_only])
 async def providers_save(body: ProvidersIn):
     import providers as pv
-    await pv.save_config(body.model_dump(exclude_none=True))
+    try:
+        await pv.save_config(body.model_dump(exclude_none=True))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=f"Allowance not saved: {e}")
     return await pv.status()
 
 

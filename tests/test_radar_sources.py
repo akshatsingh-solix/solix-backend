@@ -202,8 +202,7 @@ def test_news_falls_back_from_google_to_bing(monkeypatch):
 
 def test_market_jobs_classify_size_filter_and_phrase_matches(monkeypatch):
     monkeypatch.setenv("THEIRSTACK_API_KEY", "ts")
-    monkeypatch.setenv("ADZUNA_APP_ID", "id")
-    monkeypatch.setenv("ADZUNA_APP_KEY", "key")
+    monkeypatch.setenv("RAPIDAPI_KEY", "rk")
     monkeypatch.setattr(radar_run, "job_terms", lambda settings: ["Documentum"])
 
     def handler(request):
@@ -215,10 +214,12 @@ def test_market_jobs_classify_size_filter_and_phrase_matches(monkeypatch):
                  "description": "You will administer OpenText Documentum D2 and xPlore.", "country_code": "US", "company_object": {"employee_count": 2500}},
                 {"id": 2, "job_title": "Developer", "url": "https://jobs.example/2", "date_posted": "2026-11-01", "company": "Tiny Shop", "description": "Documentum experience.",
                  "country_code": "US", "company_object": {"employee_count": 40}}]})
-        assert request.url.params["what_phrase"] == "Documentum"
-        return httpx.Response(200, json={"results": [{"id": "9", "title": "Records Systems Analyst", "description": "Support our content platforms and retention...",
-                                                      "redirect_url": "https://adzuna.example/9", "created": "2026-11-02T08:00:00Z", "company": {"display_name": "Fabrikam Health"},
-                                                      "location": {"display_name": "Austin, Travis County", "area": ["US", "Texas", "Travis County", "Austin"]}}]})
+        assert request.url.host == "jsearch.p.rapidapi.com" and request.headers["x-rapidapi-key"] == "rk"
+        assert request.url.params["query"].startswith('"Documentum"')
+        return httpx.Response(200, json={"data": [{"job_id": "9", "employer_name": "Fabrikam Health", "employer_website": "https://www.fabrikam.example",
+                                                   "job_title": "Records Systems Analyst", "job_description": "Support our content platforms and retention...",
+                                                   "job_apply_link": "https://jobs.example/9", "job_city": "Austin", "job_state": "TX", "job_country": "US",
+                                                   "job_posted_at_datetime_utc": "2026-11-02T08:00:00.000Z"}]})
 
     async def go():
         async with mock(handler) as c:
@@ -227,8 +228,8 @@ def test_market_jobs_classify_size_filter_and_phrase_matches(monkeypatch):
     assert set(sigs) == {"Contoso Mutual", "Fabrikam Health"}  # the 40-person company is below mid-market
     assert sigs["Contoso Mutual"]["type"] == "competitor_job" and sigs["Contoso Mutual"]["employees"] == 2500 and "Documentum D2" in sigs["Contoso Mutual"]["evidence_text"]
     fab = sigs["Fabrikam Health"]
-    assert fab["competitor_key"] == "opentext-documentum" and fab["evidence_text"].startswith("Listed by adzuna for “Documentum”")
-    assert fab["state"] == "Texas" and fab["role_strength"] == "Strong"
+    assert fab["competitor_key"] == "opentext-documentum" and fab["evidence_text"].startswith("Listed by jsearch for “Documentum”")
+    assert fab["state"] == "TX" and fab["domain"] == "fabrikam.example" and fab["role_strength"] == "Strong"
     assert run(pv.usage("theirstack"))["units"] == 2  # billed per job returned
 
 
@@ -496,4 +497,90 @@ def test_health_flags_a_chain_whose_keys_have_all_run_dry(client, monkeypatch):
 def test_keys_report_names_variables_but_never_values(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-super-secret")
     out = pv.report()
-    assert "Web search: 1 of 10 set up - Tavily" in out and "SERPER_API_KEY" in out and "tvly-super-secret" not in out
+    assert "Web search: 1 of 9 set up - Tavily" in out and "SERPER_API_KEY" in out and "tvly-super-secret" not in out
+
+
+# --- One-time credits that expire (e.g. "300 API credits for 6 months") -------------------------------------------
+
+def test_one_time_credits_are_paced_to_their_expiry_then_skipped(client, monkeypatch):
+    import ops
+    monkeypatch.setenv("A_KEY", "x")
+    _registry(monkeypatch, Spec("a", "t", "A", ("A_KEY",), grant=300))
+    clock = {"now": datetime(2026, 11, 11, 12, tzinfo=timezone.utc)}
+    monkeypatch.setattr(pv, "_now", lambda: clock["now"])
+    spec = pv.SPEC_BY_NAME["a"]
+    assert run(pv.headroom(spec)) == (True, "")
+    run(pv.charge(spec, 300))  # the built-in sign-up grant counts across months
+    assert run(pv.headroom(spec))[1] == "one-time credits used (300/300)"
+    # A renewed grant with an expiry date: a fresh count from today, spread over the days to the expiry.
+    st = client.put("/api/admin/radar/providers", json={"limits": {"a": {"total": 300, "expires": "2027-05-11"}}}).json()
+    row = next(p for c in st["capabilities"] if c["key"] == "t" for p in c["providers"])
+    assert (row["grant_total"], row["grant_used"], row["expires"], row["expires_in_days"]) == (300, 0, "2027-05-11", 181)
+    run(pv.charge(spec, 2))  # 300 credits over 182 days: 2 a day for scheduled work
+    assert run(pv.headroom(spec, bulk=True))[1].startswith("paced") and run(pv.headroom(spec)) == (True, "")
+    clock["now"] = datetime(2027, 5, 1, 12, tzinfo=timezone.utc)
+    pv._usage.clear()
+    credits = run(ops.radar_sources_health())[2]
+    assert credits == ["A credits expire on 2027-05-11 (10 days)"]
+    clock["now"] = datetime(2027, 5, 12, 12, tzinfo=timezone.utc)
+    assert run(pv.headroom(spec)) == (False, "credits expired on 2027-05-11")
+    assert "expired on 2027-05-11" in run(ops.radar_sources_health())[2][0]
+
+
+def test_wayback_reads_the_archived_copy_of_a_blocked_page():
+    article = "<html><head><title>Leadership | Contoso</title></head><body><article>" + "".join(
+        f"<p>Contoso Mutual appointed Dana Whitfield as Chief Information Officer to lead the retirement of legacy platforms, paragraph {i}.</p>" for i in range(8)) + "</article></body></html>"
+
+    def handler(request):
+        if request.url.host == "archive.org":
+            assert request.url.params["url"] == "https://contoso.example/leadership"
+            return httpx.Response(200, json={"archived_snapshots": {"closest": {"available": True, "timestamp": "20261101093000",
+                                                                                "url": "http://web.archive.org/web/20261101093000/https://contoso.example/leadership"}}})
+        assert request.url.path == "/web/20261101093000id_/https://contoso.example/leadership"
+        return httpx.Response(200, text=article, headers={"content-type": "text/html"})
+
+    async def go():
+        async with mock(handler) as c:
+            return await srcs.READ_ADAPTERS["wayback"](c, "https://contoso.example/leadership")
+    page = run(go())
+    assert page["title"] == "Leadership | Contoso" and "Dana Whitfield" in page["text"] and page["date"] == "2026-11-01"
+
+
+# --- Companies researching competitors: intent-data import and research seen on our own site ----------------------
+
+G2_EXPORT = """Company Name,Company Domain,Activity Type,Product,Buyer Intent Score,Date,Country,Employees
+Litware Insurance,litware.example,Compared products,OpenText Documentum vs Solix,82,2026-11-03,United States,4200
+Litware Insurance,litware.example,Viewed alternatives,OpenText Documentum,61,2026-11-04,United States,4200
+Proseware Health,proseware.example,Viewed category,Data archiving software,40,11/02/2026,United Kingdom,650
+,,Viewed category,Data archiving software,10,2026-11-02,,
+"""
+
+
+def test_intent_export_becomes_research_signals_on_accounts(client):
+    r = client.post("/api/admin/radar/intent/import", json={"csv": G2_EXPORT, "source": "G2 Buyer Intent"}).json()
+    assert r == {"rows": 4, "signals_new": 3, "signals_seen": 0, "accounts": 2, "skipped": 1}
+    again = client.post("/api/admin/radar/intent/import", json={"csv": G2_EXPORT, "source": "G2 Buyer Intent"}).json()
+    assert again["signals_new"] == 0 and again["signals_seen"] == 3  # re-importing the same export never duplicates
+    lit = client.get("/api/admin/radar/accounts", params={"q": "litware.example", "tab": "intent"}).json()["items"][0]
+    assert lit["competitor_keys"] == ["opentext-documentum"] and lit["segment"] == "enterprise" and "intent" in lit["signal_types"]
+    detail = client.get(f"/api/admin/radar/accounts/{lit['id']}").json()
+    sig = next(s for s in detail["signals"] if s["type"] == "intent")
+    assert sig["source"] == "g2_buyer_intent" and sig["evidence_text"].startswith("G2 Buyer Intent: researching")
+    pro = client.get("/api/admin/radar/accounts", params={"q": "proseware.example"}).json()["items"][0]
+    assert pro["segment"] == "mid_market" and pro["competitor_keys"] == []
+    assert client.post("/api/admin/radar/intent/import", json={"csv": "a,b\n1,2\n"}).status_code == 422
+
+
+def test_visitors_reading_about_a_competitor_on_our_site_carry_it(client):
+    now = datetime.now(timezone.utc).isoformat()
+    db = database.db
+    run(db.visitors.insert_one({"id": "v-fab-1", "last_seen": now, "pages_count": 3, "sessions": 1, "product_scores": {},
+                                "org": {"org": "Fabrikam Bank", "domain": "fabrikambank.example", "type": "business", "via": "ipinfo_lite"}}))
+    run(db.events.insert_many([
+        {"id": "e1", "visitor_id": "v-fab-1", "type": "page_view", "path": "/resources/documentum-migration-guide", "meta": {}},
+        {"id": "e2", "visitor_id": "v-fab-1", "type": "site_search", "path": "/search", "meta": {"q": "infoarchive alternative"}},
+        {"id": "e3", "visitor_id": "v-fab-1", "type": "page_view", "path": "/products/application-retirement", "meta": {}}]))
+    sig = next(s for s in run(radar_visitors.signals(30)) if s["domain"] == "fabrikambank.example")
+    assert sig["competitor_key"] in ("opentext-documentum", "opentext-infoarchive") and ", researching OpenText" in sig["title"]
+    assert "/resources/documentum-migration-guide" in sig["evidence_text"] and "search “infoarchive alternative”" in sig["evidence_text"]
+    assert set(sig["meta"]["competitors"]) == {"opentext-documentum", "opentext-infoarchive"}

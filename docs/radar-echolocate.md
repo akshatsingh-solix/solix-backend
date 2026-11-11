@@ -16,7 +16,7 @@ sign-up links and the Data sources screen: [`radar-free-sources.md`](radar-free-
 
 | Type | Source | Notes |
 |---|---|---|
-| Competitor job | Greenhouse, Lever, Ashby, Workday, SmartRecruiters, Recruitee, Workable, Personio boards (free); TheirStack, Adzuna, JSearch, Jooble, Reed, USAJOBS (free tiers); ATS X-ray through search engines; Crustdata (paid, capped) | A posting that names a competitor product, with the matching sentence |
+| Competitor job | Greenhouse, Lever, Ashby, Workday, SmartRecruiters, Recruitee, Workable, Personio boards (free); TheirStack, JSearch, Jooble, Reed, USAJOBS (free tiers); ATS X-ray through search engines; Crustdata (paid, capped) | A posting that names a competitor product, with the matching sentence |
 | Problem job | Same | Archiving, retention, retirement or decommissioning work with no competitor named |
 | DNS / certificate | Public DNS (MX, SPF; DNS-over-HTTPS backup), crt.sh and Cert Spotter, passive DNS (HackerTarget, OTX, urlscan) | Records, hosts and CNAMEs that fingerprint Mimecast, Proofpoint, Smarsh, Global Relay, Archive360 and others |
 | News | Google News, Bing News, GDELT, NewsData | For strong accounts only: acquisitions, migrations, decommissioning, fines |
@@ -25,7 +25,8 @@ sign-up links and the Data sources screen: [`radar-free-sources.md`](radar-free-
 | Public spend | USAspending.gov (free) | US agencies already paying a competitor |
 | LinkedIn | Logged by hand from an account | No lawful free feed exists |
 | Website | Your own `/api/track` intent | Leads whose email domain matches the account |
-| Website visits | Consenting visitors' networks (ipapi.is, IPinfo, Ipregistry, RDAP, reverse DNS) | Organisations browsing the site before anyone fills a form; addresses never stored |
+| Website visits | Consenting visitors' networks (ipapi.is, IPinfo, Ipregistry, RDAP, reverse DNS) | Organisations browsing the site before anyone fills a form, with any competitor they read about; addresses never stored |
+| Researching (intent) | Intent-data exports imported in Setup (G2 Buyer Intent, Bombora, TrustRadius, 6sense...) | Companies researching a competitor or the problem elsewhere |
 
 Signals are stored once per `dedupe_key`; later sightings only refresh
 `last_seen_at`. Staffing firms and consultancies are dropped.

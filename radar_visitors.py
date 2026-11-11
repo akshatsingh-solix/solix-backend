@@ -9,7 +9,9 @@ the organisation's name, domain and network type.
 
 Each daily run turns the last `visitor_days` of identified visits into one "visit" signal per
 organisation and ISO week: how many people from it browsed, how many pages, and which product
-lines they read about. It lands on the matching Radar account (by domain, else name), so an account
+lines they read about. When they read pages, or searched the site, for a competitor's product
+(a "Documentum migration" or "InfoArchive alternative" page), the signal carries that competitor:
+the organisation is researching it, seen on the one site whose visitors you can lawfully see. It lands on the matching Radar account (by domain, else name), so an account
 whose people are reading about application retirement shows up before anyone fills in a form.
 """
 from __future__ import annotations
@@ -17,10 +19,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 import httpx
+
+import radar_model as rm
 
 logger = logging.getLogger("solix.radar.visitors")
 RECHECK_DAYS = 7
@@ -95,7 +100,8 @@ async def signals(days: int = 30) -> List[dict]:
         except (KeyError, ValueError):
             continue
         year, week, _ = seen.isocalendar()
-        g = groups.setdefault((dom, f"{year}-W{week:02d}"), {"org": org, "visitors": 0, "pages": 0, "sessions": 0, "leads": 0, "scores": {}, "last": ""})
+        g = groups.setdefault((dom, f"{year}-W{week:02d}"), {"org": org, "visitors": 0, "pages": 0, "sessions": 0, "leads": 0, "scores": {}, "last": "", "ids": []})
+        g["ids"].append(v["id"])
         g["visitors"] += 1
         g["pages"] += v.get("pages_count") or 0
         g["sessions"] += v.get("sessions") or 0
@@ -104,15 +110,41 @@ async def signals(days: int = 30) -> List[dict]:
         for k, s in (v.get("product_scores") or {}).items():
             g["scores"][k] = g["scores"].get(k, 0) + (s or 0)
     site = os.environ.get("SITE_URL", "https://www.solix.com").rstrip("/")
+    research = await _competitor_reading([v for g in groups.values() for v in g["ids"]])
     out = []
     for (dom, week), g in groups.items():
         org = g["org"]
         top = [_label(k) for k, _ in sorted(g["scores"].items(), key=lambda kv: -kv[1])[:3] if g["scores"][k] > 0]
         name = org.get("org") or dom.split(".")[0].title()
         people = f"{g['visitors']} visitor{'s' if g['visitors'] != 1 else ''}"
+        comps: Dict[str, int] = {}
+        pages: List[str] = []
+        for vid in g["ids"]:
+            for key, path in research.get(vid, []):
+                comps[key] = comps.get(key, 0) + 1
+                if path not in pages:
+                    pages.append(path)
+        top_comp = max(comps, key=comps.get) if comps else None
+        product = rm.COMPETITOR_BY_KEY[top_comp]["product"] if top_comp else None
         out.append({"company": name, "domain": dom, "type": "visit", "source": "website", "source_ref": f"visit|{dom}|{week}", "evidence_url": site,
-                    "title": f"{people} from {name} browsed the site ({week})", "posted_at": g["last"], "country": org.get("country"),
+                    "title": f"{people} from {name} browsed the site ({week})" + (f", researching {product}" if product else ""), "posted_at": g["last"],
+                    "country": org.get("country"), "competitor_key": top_comp, "competitor_product": product,
                     "evidence_text": f"{people}, {g['sessions']} session(s), {g['pages']} page(s)" + (f"; reading about {', '.join(top)}" if top else "")
+                                     + (f"; read or searched for {', '.join(rm.COMPETITOR_BY_KEY[k]['product'] for k in comps)}: {', '.join(pages[:4])}" if comps else "")
                                      + (f"; {g['leads']} already a lead" if g["leads"] else "") + f". Network identified by {org.get('via') or 'IP lookup'}.",
-                    "meta": {"visitors": g["visitors"], "pages": g["pages"], "interest": top, "via": org.get("via")}})
+                    "meta": {"visitors": g["visitors"], "pages": g["pages"], "interest": top, "via": org.get("via"), "competitors": sorted(comps)}})
+    return out
+
+
+async def _competitor_reading(visitor_ids: List[str]) -> Dict[str, List[tuple]]:
+    """Per visitor: (competitor key, page or search) for each page path or site search that names a competitor's product."""
+    out: Dict[str, List[tuple]] = {}
+    if not visitor_ids:
+        return out
+    async for ev in _db().events.find({"visitor_id": {"$in": visitor_ids}}, {"_id": 0, "visitor_id": 1, "path": 1, "meta": 1}).limit(20000):
+        path = ev.get("path") or ""
+        query = ((ev.get("meta") or {}).get("q") or "") if isinstance(ev.get("meta"), dict) else ""
+        text = re.sub(r"[-_/]+", " ", path) + " " + query
+        for hit in rm.find_competitors(text):
+            out.setdefault(ev["visitor_id"], []).append((hit["key"], f"search \u201c{query[:60]}\u201d" if query and hit["term"].lower() in query.lower() else path[:120]))
     return out
