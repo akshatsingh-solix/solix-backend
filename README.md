@@ -129,7 +129,7 @@ Set at least one key (Groq alone is enough):
 | Provider | Env var | Default models (override with) |
 |---|---|---|
 | Groq | `GROQ_API_KEY` | `openai/gpt-oss-120b,openai/gpt-oss-20b` (`SOL_GROQ_MODELS`) |
-| Google Gemini | `GEMINI_API_KEY` | `gemini-2.5-flash,gemini-2.5-flash-lite` (`SOL_GEMINI_MODELS`) |
+| Google Gemini | `GEMINI_API_KEY` | `gemini-3.8-flash,gemini-3.5-flash-lite,gemini-2.5-flash-lite` (`SOL_GEMINI_MODELS`) |
 | Mistral | `MISTRAL_API_KEY` | `mistral-small-latest` (`SOL_MISTRAL_MODELS`) |
 | OpenRouter | `OPENROUTER_API_KEY` | `CHAT_MODELS` (or `SOL_OPENROUTER_MODELS`) |
 | OpenAI (paid) | `OPENAI_API_KEY` | `OPENAI_MODEL` (default `gpt-4o-mini`) |

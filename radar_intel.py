@@ -6,7 +6,7 @@ filings, investor material, conference talks, job postings). This does the same 
 * Web research, three angles per account searched together: the account's programs and migrations, the named
   leaders who own IT, data, architecture and records, and recent material news. The web-search chain in
   providers.py answers: Firecrawl first (ranked pages, the best leadership pages read in full, because names
-  and titles rarely fit in a snippet), then Tavily, Serper, Brave, Exa, Google Programmable Search, SerpApi,
+  and titles rarely fit in a snippet), then Tavily, Serper, Brave, Google Programmable Search, SerpApi,
   a self-hosted SearXNG, Jina and Parallel - whichever are set up and have free allowance left.
   An identical search within a day comes from the cache, so repeat clicks and a deep dive after Find people
   spend no credits.
@@ -54,8 +54,8 @@ def web_provider() -> Optional[str]:
 
 
 HOSTS = {"api.parallel.ai": "Parallel", "api.hunter.io": "Hunter", "api.firecrawl.dev": "Firecrawl", "api.tavily.com": "Tavily", "google.serper.dev": "Serper",
-         "api.search.brave.com": "Brave", "api.exa.ai": "Exa", "www.googleapis.com": "Google", "serpapi.com": "SerpApi", "s.jina.ai": "Jina", "r.jina.ai": "Jina",
-         "api.theirstack.com": "TheirStack", "api.adzuna.com": "Adzuna", "jsearch.p.rapidapi.com": "JSearch", "jooble.org": "Jooble", "www.reed.co.uk": "Reed",
+         "api.search.brave.com": "Brave", "web.archive.org": "Wayback Machine", "archive.org": "Wayback Machine", "www.googleapis.com": "Google", "serpapi.com": "SerpApi", "s.jina.ai": "Jina", "r.jina.ai": "Jina",
+         "api.theirstack.com": "TheirStack", "jsearch.p.rapidapi.com": "JSearch", "jooble.org": "Jooble", "www.reed.co.uk": "Reed",
          "data.usajobs.gov": "USAJOBS", "api.tomba.io": "Tomba", "api.snov.io": "Snov.io", "api.peopledatalabs.com": "People Data Labs", "api.apollo.io": "Apollo",
          "api.prospeo.io": "Prospeo", "api.skrapp.io": "Skrapp", "api.mailboxvalidator.com": "MailboxValidator", "api.zerobounce.net": "ZeroBounce",
          "emailvalidation.abstractapi.com": "Abstract", "api.ipapi.is": "ipapi.is", "api.ipinfo.io": "IPinfo", "api.ipregistry.co": "Ipregistry", "newsdata.io": "NewsData",

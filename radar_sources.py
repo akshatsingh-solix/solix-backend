@@ -135,19 +135,6 @@ async def _brave(client, q, limit, tbs):
     return [_hit(x["url"], x.get("title"), x.get("description"), _iso(x.get("page_age"))) for x in (r.json().get("web") or {}).get("results") or [] if x.get("url")]
 
 
-async def _exa(client, q, limit, tbs):
-    body: dict = {"query": q[:400], "numResults": min(limit, 20), "type": "auto", "contents": {"highlights": {"numSentences": 3, "highlightsPerUrl": 2}}}
-    site = re.search(r"\bsite:(\S+)", q)
-    if site:
-        body["includeDomains"] = [site.group(1).split("/")[0]]
-        body["query"] = re.sub(r"\bsite:\S+", "", q).strip()
-    if tbs in TBS_DAYS:
-        body["startPublishedDate"] = (datetime.now(timezone.utc) - timedelta(days=TBS_DAYS[tbs])).strftime("%Y-%m-%dT00:00:00.000Z")
-    r = _raise_for(await client.post("https://api.exa.ai/search", json=body, headers={"x-api-key": _env("EXA_API_KEY")}, timeout=40))
-    return [_hit(x["url"], x.get("title"), " ".join(x.get("highlights") or []) or x.get("text") or "", _iso(x.get("publishedDate")))
-            for x in r.json().get("results") or [] if x.get("url")]
-
-
 async def _google_cse(client, q, limit, tbs):
     params = {"key": _env("GOOGLE_CSE_KEY"), "cx": _env("GOOGLE_CSE_CX"), "q": q[:400], "num": min(limit, 10)}
     if tbs in TBS_DAYS:
@@ -184,10 +171,10 @@ async def _parallel(client, q, limit, tbs):
     return (await radar_intel.parallel_search(client, f"Find pages about: {plain}", [plain[:200]]))[:limit]
 
 
-SEARCH_ADAPTERS = {"firecrawl": _firecrawl, "tavily": _tavily, "serper": _serper, "brave": _brave, "exa": _exa, "google_cse": _google_cse,
+SEARCH_ADAPTERS = {"firecrawl": _firecrawl, "tavily": _tavily, "serper": _serper, "brave": _brave, "google_cse": _google_cse,
                    "serpapi": _serpapi, "searxng": _searxng, "jina": _jina, "parallel": _parallel}
 # Engines that honour site:, quotes and OR (LinkedIn X-ray and ATS discovery need them).
-KEYWORD_ENGINES = ("firecrawl", "tavily", "serper", "brave", "exa", "google_cse", "serpapi", "searxng", "jina")
+KEYWORD_ENGINES = ("firecrawl", "tavily", "serper", "brave", "google_cse", "serpapi", "searxng", "jina")
 
 
 async def search(client: httpx.AsyncClient, query: str, *, limit: int = 8, tbs: Optional[str] = None, problems: Optional[List[str]] = None,
@@ -262,10 +249,28 @@ async def _read_tavily(client, url):
     return {"title": url, "text": firecrawl_api.plain(res.get("raw_content") or ""), "date": ""}
 
 
-async def _read_exa(client, url):
-    r = _raise_for(await client.post("https://api.exa.ai/contents", json={"urls": [url], "text": True}, headers={"x-api-key": _env("EXA_API_KEY")}, timeout=45))
+async def _read_parallel(client, url):
+    r = _raise_for(await client.post("https://api.parallel.ai/v1/extract", headers={"x-api-key": _env("PARALLEL_API_KEY")}, timeout=90,
+                                     json={"urls": [url], "objective": "The page's main content, including people's names and job titles", "max_chars_total": 12000}))
     res = (r.json().get("results") or [{}])[0]
-    return {"title": res.get("title") or url, "text": res.get("text") or "", "date": _iso(res.get("publishedDate"))}
+    return {"title": res.get("title") or url, "text": res.get("full_content") or "\n".join(res.get("excerpts") or []), "date": _iso(res.get("publish_date"))}
+
+
+async def _read_wayback(client, url):
+    """The Internet Archive's latest copy of a page: keyless, and it reads pages whose own site blocks automated requests."""
+    r = _raise_for(await client.get("https://archive.org/wayback/available", params={"url": url}, headers=UA, timeout=20))
+    snap = ((r.json().get("archived_snapshots") or {}).get("closest") or {})
+    if not snap.get("available") or not snap.get("timestamp"):
+        return {"title": url, "text": "", "date": ""}
+    page = _raise_for(await client.get(f"https://web.archive.org/web/{snap['timestamp']}id_/{url}", headers=UA, timeout=40, follow_redirects=True))
+    html = page.text[:2_000_000]
+    try:
+        import trafilatura
+        text = await asyncio.to_thread(trafilatura.extract, html, include_links=False, include_tables=True) or ""
+    except Exception:  # noqa: BLE001
+        text = _strip(re.sub(r"(?is)<(script|style).*?</\1>", " ", html))
+    title = re.search(r"(?is)<title[^>]*>(.*?)</title>", html)
+    return {"title": _strip(title.group(1)) if title else url, "text": text, "date": _iso(snap["timestamp"][:8])}
 
 
 async def _read_direct(client, url):
@@ -282,7 +287,8 @@ async def _read_direct(client, url):
     return {"title": _strip(title.group(1)) if title else url, "text": text, "date": ""}
 
 
-READ_ADAPTERS = {"firecrawl_read": _read_firecrawl, "jina_reader": _read_jina, "tavily_extract": _read_tavily, "exa_contents": _read_exa, "direct_read": _read_direct}
+READ_ADAPTERS = {"firecrawl_read": _read_firecrawl, "jina_reader": _read_jina, "tavily_extract": _read_tavily, "parallel_extract": _read_parallel, "direct_read": _read_direct,
+                 "wayback": _read_wayback}
 
 
 async def read_page(client: httpx.AsyncClient, url: str, *, problems: Optional[List[str]] = None, bulk: bool = False, prefer: Optional[str] = None) -> Optional[dict]:
@@ -372,9 +378,6 @@ async def news(client: httpx.AsyncClient, query: str, *, days: int = 90, problem
 # Job postings across the market (normalised postings; radar_collectors classifies them)
 # =====================================================================================
 
-ADZUNA_CC = {"United States": "us", "United Kingdom": "gb", "Canada": "ca", "Australia": "au", "Germany": "de", "France": "fr", "Netherlands": "nl", "India": "in",
-             "Singapore": "sg", "New Zealand": "nz", "South Africa": "za", "Austria": "at", "Belgium": "be", "Brazil": "br", "Switzerland": "ch", "Spain": "es",
-             "Italy": "it", "Mexico": "mx", "Poland": "pl"}
 ISO2_COUNTRY = {"US": "United States", "GB": "United Kingdom", "UK": "United Kingdom", "CA": "Canada", "AU": "Australia", "DE": "Germany", "FR": "France", "NL": "Netherlands",
                 "IN": "India", "SG": "Singapore", "IE": "Ireland", "CH": "Switzerland", "ES": "Spain", "IT": "Italy", "BE": "Belgium", "SE": "Sweden", "AE": "United Arab Emirates"}
 
@@ -398,23 +401,6 @@ async def _jobs_theirstack(client, term, settings):
                             ref=f"ts:{j.get('id')}", location=j.get("location") or j.get("short_location") or "", country=ISO2_COUNTRY.get(j.get("country_code") or "", j.get("country") or ""),
                             posted=j.get("date_posted"), domain=j.get("company_domain") or co.get("domain"), employees=co.get("employee_count")))
     return Billed(out, max(1, len(jobs)))
-
-
-async def _jobs_adzuna(client, term, settings):
-    out, calls = [], 0
-    for country in settings.get("countries") or ["United States"]:
-        cc = ADZUNA_CC.get(country)
-        if not cc:
-            continue
-        calls += 1
-        r = _raise_for(await client.get(f"https://api.adzuna.com/v1/api/jobs/{cc}/search/1", timeout=40, params={
-            "app_id": _env("ADZUNA_APP_ID"), "app_key": _env("ADZUNA_APP_KEY"), "what_phrase": term, "results_per_page": 50, "max_days_old": 60, "content-type": "application/json"}))
-        for j in r.json().get("results") or []:
-            area = (j.get("location") or {}).get("area") or []
-            out.append(_posting((j.get("company") or {}).get("display_name"), j.get("title"), j.get("description"), j.get("redirect_url"), source="adzuna",
-                                ref=f"adz:{j.get('id')}", location=(j.get("location") or {}).get("display_name") or "", country=country,
-                                state=area[1] if len(area) > 1 and country == "United States" else "", posted=j.get("created")))
-    return Billed(out, max(1, calls))
 
 
 async def _jobs_jsearch(client, term, settings):
@@ -465,7 +451,7 @@ async def _jobs_usajobs(client, term, settings):
     return out
 
 
-JOB_ADAPTERS = {"theirstack": _jobs_theirstack, "adzuna": _jobs_adzuna, "jsearch": _jobs_jsearch, "jooble": _jobs_jooble, "reed": _jobs_reed, "usajobs": _jobs_usajobs}
+JOB_ADAPTERS = {"theirstack": _jobs_theirstack, "jsearch": _jobs_jsearch, "jooble": _jobs_jooble, "reed": _jobs_reed, "usajobs": _jobs_usajobs}
 
 
 async def job_postings(client: httpx.AsyncClient, term: str, settings: dict, *, per_term: int = 2, problems: Optional[List[str]] = None) -> List[dict]:

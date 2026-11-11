@@ -163,7 +163,7 @@ def job_terms(settings: dict) -> List[str]:
 
 
 async def market_jobs(client: httpx.AsyncClient, settings: dict, run: dict) -> list:
-    """Postings across the job market that name a competitor or describe the problem (TheirStack, Adzuna, JSearch,
+    """Postings across the job market that name a competitor or describe the problem (TheirStack, JSearch,
     Jooble, Reed, USAJOBS), smaller than mid-market dropped when the source knows the headcount."""
     min_emp = int(settings.get("min_employees") or 0)
     out = []

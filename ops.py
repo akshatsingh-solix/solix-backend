@@ -219,27 +219,45 @@ async def watchdog() -> list:
     if out.get("paused") and out.get("pause_reason"):
         await check("outbound_paused", False, "Outbound paused", out["pause_reason"], "fail")
 
-    dry, searchable = await radar_sources_health()
+    dry, searchable, credits = await radar_sources_health()
     await check("radar_sources", not dry, "Radar data sources",
                 f"every provider is resting or out of its free allowance for: {', '.join(dry)}. Add another key in Radar > Setup > Data sources" if dry
                 else "every chain with a key has a provider ready" if searchable else "no web-search key set up yet: deep dives and Find people use signals only")
+    await check("radar_credits", not credits, "Radar one-time credits", "; ".join(credits) if credits else "no one-time credits expiring or nearly used")
     await check("unassigned", unrouted == 0, "Unassigned strong accounts", f"{unrouted} strong account(s) without an owner for over 24h")
     await check("needs_routing", conflicts == 0, "Accounts needing routing", f"{conflicts} account(s) the territory rules couldn't place")
     await check("outbox_failed", failed == 0, "Deliveries", f"{failed} Slack/Digiprise/email deliveries failed in the last 24h")
     return checks
 
 
+CREDIT_WARN_DAYS = 14
+
+
 async def radar_sources_health() -> tuple:
-    """(chains whose keyed providers are all resting or out of allowance, whether any web search is set up)."""
+    """(chains whose keyed providers are all resting or out of allowance, whether any web search is set up,
+    warnings about one-time credits that expire within two weeks, have expired or are 90% used)."""
     try:
         import providers as pv
         st = await pv.status()
     except Exception:  # noqa: BLE001 - a health check must not fail the watchdog
         logger.exception("provider status failed")
-        return [], True
+        return [], True, []
     dry = [c["label"] for c in st["capabilities"] if c["ready"] == 0 and any(p["configured"] and p["enabled"] and not p["keyless"] for p in c["providers"])]
     searchable = any(p["configured"] and p["enabled"] for c in st["capabilities"] if c["key"] == "web_search" for p in c["providers"])
-    return dry, searchable
+    credits, seen = [], set()
+    for c in st["capabilities"]:
+        for p in c["providers"]:
+            if not (p["configured"] and p["enabled"] and p.get("grant_total")) or p["pool"] in seen:
+                continue
+            seen.add(p["pool"])
+            days = p.get("expires_in_days")
+            if days is not None and days < 0:
+                credits.append(f"{p['label']} credits expired on {p['expires']}: renew them and enter the new grant, or switch it off")
+            elif days is not None and days <= CREDIT_WARN_DAYS:
+                credits.append(f"{p['label']} credits expire on {p['expires']} ({days} day{'s' if days != 1 else ''})")
+            elif (p.get("grant_used") or 0) >= 0.9 * p["grant_total"]:
+                credits.append(f"{p['label']} has used {p['grant_used']} of {p['grant_total']} one-time credits")
+    return dry, searchable, credits
 
 
 # --- Background loop ---------------------------------------------------------------

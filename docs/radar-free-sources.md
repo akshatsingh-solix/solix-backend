@@ -19,16 +19,22 @@ key `providers`).
    rate limited (429) 75 seconds, 15 minutes after three in ten minutes; out of credits (402, or a
    200 that says so) 6 hours; key rejected (401/403) 1 hour; server error 2 minutes; unreachable
    1 minute. A new key starts with no cooldown.
-3. **Allowances.** Each provider has its free monthly or daily allowance (editable). It is skipped
-   once that is used, and usage is counted in MongoDB (`provider_usage`), so restarts and the
-   GitHub runner share the count.
+3. **Allowances.** Each provider has its free monthly or daily allowance, or **one-time credits**
+   (a sign-up grant, or a trial such as "300 API credits for 6 months") with an optional **expiry
+   date**. Set them per provider under **Allowance** in Data sources. A provider is skipped once its
+   allowance or credits are used, and for good once its credits have expired. Usage is counted in
+   MongoDB (`provider_usage`), so restarts and the GitHub runner share the count. Entering new
+   one-time credits (a renewal, or your real remaining balance) starts a fresh count.
 4. **Pacing.** The daily run spends at most the day's share of each monthly allowance
-   (what's left divided by the days left in the month), so day one can't drain the month. A person
+   (what's left divided by the days left in the month), and of one-time credits (what's left divided
+   by the days to their expiry, or 60 days if they don't expire), so nothing drains early. A person
    clicking *Find people* or *Find email* is only capped, never paced.
-5. **Caching.** Identical web searches are reused for a day (LinkedIn X-ray searches for a week,
+5. **Warnings.** Outbound → Health (and Slack #watchdog) warns two weeks before one-time credits
+   expire, when they have expired, and when 90% are used.
+6. **Caching.** Identical web searches are reused for a day (LinkedIn X-ray searches for a week,
    ATS discovery searches for three days); website-visitor lookups for 30 days; company size and HQ
    for 90 days.
-6. **Keyless sources first where they're good enough.** Public registries (Wikidata, GLEIF, SEC,
+7. **Keyless sources first where they're good enough.** Public registries (Wikidata, GLEIF, SEC,
    RDAP), RSS feeds, certificate logs and DNS-over-HTTPS cost nothing and need no sign-up.
 
 Total capacity is the sum of every free allowance you sign up for. Signing up for all the free
@@ -36,7 +42,8 @@ web-search keys below gives roughly 5,000+ searches a month instead of Firecrawl
 
 ## The chains
 
-Order is the default; change it in Data sources. "Keyless" needs nothing.
+Order is the default; change it in Data sources. "Keyless" needs nothing. Exa and Adzuna are not
+used (company policy) and have been removed; don't add them back.
 
 ### 1. Web search (deep-dive sources, leadership pages, LinkedIn X-ray, ATS discovery)
 
@@ -44,9 +51,8 @@ Order is the default; change it in Data sources. "Keyless" needs nothing.
 |---|---|---|---|
 | Firecrawl | Monthly free credits (2 per search) | `FIRECRAWL_API_KEY` | firecrawl.dev |
 | Tavily | 1,000 credits a month | `TAVILY_API_KEY` | tavily.com |
-| Serper (Google results) | 2,500 queries on sign-up | `SERPER_API_KEY` | serper.dev |
+| Serper (Google results) | 2,500 queries on sign-up (one-time) | `SERPER_API_KEY` | serper.dev |
 | Brave Search | $5 credit a month (~1,000 searches) | `BRAVE_API_KEY` | brave.com/search/api |
-| Exa | Monthly free credit | `EXA_API_KEY` | exa.ai |
 | Google Programmable Search | 100 a day (existing keys only) | `GOOGLE_CSE_KEY`, `GOOGLE_CSE_CX` | developers.google.com/custom-search |
 | SerpApi | 250 a month | `SERPAPI_API_KEY` | serpapi.com |
 | SearXNG | Unlimited (self-hosted) | `SEARXNG_URL` | docs.searxng.org |
@@ -56,8 +62,9 @@ Order is the default; change it in Data sources. "Keyless" needs nothing.
 ### 2. Page reading (full text of a leadership page or posting)
 
 Firecrawl (`FIRECRAWL_API_KEY`), **Jina Reader (keyless**, `JINA_API_KEY` raises the limit), Tavily
-Extract (`TAVILY_API_KEY`), Exa Contents (`EXA_API_KEY`), **direct fetch + local text extraction
-(keyless**, public http(s) addresses only).
+Extract (`TAVILY_API_KEY`), Parallel Extract (`PARALLEL_API_KEY`), **direct fetch + local text extraction
+(keyless**, public http(s) addresses only), and the **Wayback Machine's latest copy (keyless)** for
+pages that block automated reading.
 
 ### 3. News and triggers (acquisitions, migrations, decommissioning, fines)
 
@@ -69,7 +76,6 @@ NewsData.io (`NEWSDATA_API_KEY`, 200 a day), and the web-search chain limited to
 | Provider | Free allowance | Environment variable(s) |
 |---|---|---|
 | TheirStack | 200 credits a month (1 per job) | `THEIRSTACK_API_KEY` |
-| Adzuna | Free developer access | `ADZUNA_APP_ID`, `ADZUNA_APP_KEY` |
 | JSearch (Google for Jobs, LinkedIn, Indeed) | ~200 a month on RapidAPI | `RAPIDAPI_KEY` |
 | Jooble | Free key on request | `JOOBLE_API_KEY` |
 | Reed (UK) | Free key | `REED_API_KEY` |
@@ -125,14 +131,14 @@ Finder: Hunter, Tomba, Snov.io, Prospeo (`PROSPEO_API_KEY`, 75 a month), Skrapp
 (`SKRAPP_API_KEY`), then address patterns checked by a verifier.
 
 Verification: Reacher (self-hosted, unlimited, `REACHER_URL`), MailboxValidator
-(`MAILBOXVALIDATOR_API_KEY`, 300 a month), ZeroBounce (`ZEROBOUNCE_API_KEY`, 100 a month),
+(`MAILBOXVALIDATOR_API_KEY`, 300 API credits that can expire: set the date under Allowance), ZeroBounce (`ZEROBOUNCE_API_KEY`, 100 a month),
 Abstract (`ABSTRACT_EMAIL_API_KEY`, 100 a month), Hunter (50 a month), Tomba (50 a month). Only a
 definite answer (valid, invalid, catch-all) stops the chain.
 
 ### 9. Website visitor companies (who is reading your site before they fill a form)
 
 ipapi.is (`IPAPI_IS_KEY`, 1,000 a day), IPinfo Lite (`IPINFO_TOKEN`, unlimited, attribution
-required), Ipregistry (`IPREGISTRY_KEY`, 100,000 on sign-up), **RDAP and reverse DNS (keyless)**.
+required), Ipregistry (`IPREGISTRY_KEY`, 100,000 on sign-up, one-time), **RDAP and reverse DNS (keyless)**.
 
 Only visitors who accepted analytics cookies are tracked (the site sends `/api/track` only then).
 Their network is looked up once a week; home broadband, mobile, VPN and cloud addresses are dropped,
@@ -142,6 +148,12 @@ network type. Each daily run turns a week's identified visits into a **visit** s
 matching account (visitors, pages, which product lines they read about), creating the account if
 it's new. Your own company and the competitors' staff are ignored. Switch off with the `visitors`
 collector.
+
+When those visitors read a page or search the site for a competitor's product (a page whose address
+names it, such as `/resources/documentum-migration-guide`, or a site search for "InfoArchive
+alternative"), the visit signal carries that competitor: the organisation is researching it. Pages
+that compare Solix with each competitor, or explain migrating off it, are what bring that research to
+your site: see "Companies researching competitors" below.
 
 ### 10. DNS and certificate history (competitor fingerprints)
 
@@ -160,7 +172,8 @@ accounts with a **spend** signal.
 
 ### 12. AI models (deep dives, openers, reply classification)
 
-`llm.py` fails over across Gemini, Groq, Mistral, OpenRouter, OpenAI and any OpenAI-compatible
+`llm.py` fails over across Gemini (default models `gemini-3.8-flash`, `gemini-3.5-flash-lite`,
+`gemini-2.5-flash-lite`), Groq, Mistral, OpenRouter, OpenAI and any OpenAI-compatible
 server, and now also Cerebras (`CEREBRAS_API_KEY`), SambaNova (`SAMBANOVA_API_KEY`), GitHub Models
 (`GITHUB_MODELS_TOKEN`), NVIDIA NIM (`NVIDIA_API_KEY`), Cloudflare Workers AI
 (`CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN`) and Hugging Face (`HF_TOKEN`). Model names change;
@@ -173,14 +186,43 @@ key, deep dives fall back to the rules-based brief. To run them free, either lis
 have checked the terms of (for example `LLM_PII_PROVIDERS=groq,cerebras`) or run a model on your own
 server (`SOL_CUSTOM_BASE_URL`, e.g. Ollama) and set `LLM_PII_PROVIDERS=custom`.
 
+**Gemini specifically:** Google's Gemini API terms (effective 23 March 2026) class free use as
+"Unpaid Services": Google uses what is sent to improve its products, and the terms say *"Do not
+submit sensitive, confidential, or personal information to the Unpaid Services."* A Gemini key is
+therefore fine for Sol, the public website chat, but keep it **out** of `LLM_PII_PROVIDERS` unless
+its Google Cloud project has an active billing account. Use then becomes a "Paid Service": prompts
+aren't used to improve products, and Google's data processing terms apply. In the EEA, Switzerland
+and the UK the paid-service data terms apply even to free use.
+
+## Companies researching competitors
+
+Only a competitor can see who visits its own website. Nobody else can, short of breaking into its
+site or analytics, intercepting traffic, or buying data taken without consent, all of which are
+crimes and none of which the Radar does. Who is *researching* a competitor or a solution can be
+known lawfully in three ways, all of which feed the Radar:
+
+1. **Intent data providers** collect it with consent across their own networks, and sell it. Their
+   CSV export goes into **Radar → Setup → Companies researching competitors** (or
+   `POST /api/admin/radar/intent/import`) and becomes a **Researching** signal on each account
+   (Radar's *Researching* tab), tied to the competitor the topic names:
+   - **G2 Buyer Intent**: companies viewing competitor profiles, "Solix vs OpenText" comparisons and
+     category pages on G2 (needs a G2 seller profile with Buyer Intent);
+   - **Bombora Company Surge**: companies reading about a topic ("Documentum", "data archiving")
+     far more than usual across 5,000+ B2B sites (sold directly and inside many sales tools);
+   - TrustRadius, Gartner Digital Markets (Capterra, GetApp), 6sense, Demandbase, ZoomInfo intent.
+   The file needs a company (or domain) column and a topic (or product, keyword, activity) column;
+   score, date, country and employees are used when present. Re-importing never duplicates.
+2. **Your own site** (free, built in): organisations whose consenting visitors read about a competitor
+   or search for one (section 9). Publish pages people researching alternatives look for:
+   "Solix vs OpenText InfoArchive", "Migrating off Documentum", "Smarsh alternative for archiving".
+   Search ads on those competitor-alternative searches bring more of that research to you.
+3. **Public signals that someone is shopping**: competitor job postings, tenders and RFPs, filings,
+   DNS changes (a new archive vendor's MX record), news, all already collected.
+
 ## What free sources cannot do
 
-- **People from a prospect visiting competitors' websites, or researching solutions elsewhere.**
-  That data only exists in paid intent co-ops (Bombora, G2 Buyer Intent, TrustRadius, 6sense); no
-  free or lawful public source records other sites' visitors. What the Radar does instead, free: your
-  own site's visitors by organisation (above), competitor job postings, competitor DNS/certificate
-  fingerprints, filings, tenders, public spend and news. If you later buy an intent feed, its
-  companies can be added as signals through the existing account and signal endpoints.
+- **Seeing visitors on a competitor's website.** See above: only intent providers that collect it
+  lawfully, or your own site.
 - **Sending more cold email by rotating free transactional email services.** Brevo, Mailjet, Resend
   and similar prohibit unsolicited email in their terms; rotating them gets accounts closed and hurts
   your domain's reputation. Outbound sending stays on your own SMTP mailboxes or Instantly.

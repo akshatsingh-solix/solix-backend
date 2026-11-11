@@ -386,11 +386,13 @@ def route_company(name: str, signals: List[dict], hq: Optional[dict], cfg: Optio
 # --- Scoring ------------------------------------------------------------------------
 # visit: an organisation's network seen browsing the site (reverse IP, before anyone fills a form).
 # spend: a public body already paying a competitor (USAspending awards).
-SIGNAL_TYPES = ["competitor_job", "problem_job", "dns", "cert", "linkedin", "news", "filing", "tender", "website", "visit", "spend"]
+# intent: a company researching a competitor or the problem (G2, Bombora and other intent exports; radar_intent).
+SIGNAL_TYPES = ["competitor_job", "problem_job", "dns", "cert", "linkedin", "news", "filing", "tender", "website", "visit", "spend", "intent"]
 TYPE_WEIGHTS = {"competitor_job": 1.0, "problem_job": 0.7, "dns": 0.8, "cert": 0.8, "linkedin": 0.6, "news": 0.5, "filing": 0.6, "tender": 0.9, "website": 0.8,
-                "visit": 0.7, "spend": 0.7}
+                "visit": 0.7, "spend": 0.7, "intent": 0.9}
 SIGNAL_LABELS = {"competitor_job": "Job posting", "problem_job": "Job posting", "dns": "DNS record", "cert": "Certificate record", "linkedin": "LinkedIn activity",
-                 "news": "News", "filing": "SEC filing", "tender": "Public tender", "website": "Website lead", "visit": "Website visits", "spend": "Public spend"}
+                 "news": "News", "filing": "SEC filing", "tender": "Public tender", "website": "Website lead", "visit": "Website visits", "spend": "Public spend",
+                 "intent": "Researching (intent data)"}
 
 # --- Segments ------------------------------------------------------------------------
 # Mid-market and enterprise are both targets. Thresholds are editable (Radar settings "segments").
