@@ -384,8 +384,46 @@ def route_company(name: str, signals: List[dict], hq: Optional[dict], cfg: Optio
 
 
 # --- Scoring ------------------------------------------------------------------------
-SIGNAL_TYPES = ["competitor_job", "problem_job", "dns", "cert", "linkedin", "news", "filing", "tender", "website"]
-TYPE_WEIGHTS = {"competitor_job": 1.0, "problem_job": 0.7, "dns": 0.8, "cert": 0.8, "linkedin": 0.6, "news": 0.5, "filing": 0.6, "tender": 0.9, "website": 0.8}
+# visit: an organisation's network seen browsing the site (reverse IP, before anyone fills a form).
+# spend: a public body already paying a competitor (USAspending awards).
+SIGNAL_TYPES = ["competitor_job", "problem_job", "dns", "cert", "linkedin", "news", "filing", "tender", "website", "visit", "spend"]
+TYPE_WEIGHTS = {"competitor_job": 1.0, "problem_job": 0.7, "dns": 0.8, "cert": 0.8, "linkedin": 0.6, "news": 0.5, "filing": 0.6, "tender": 0.9, "website": 0.8,
+                "visit": 0.7, "spend": 0.7}
+SIGNAL_LABELS = {"competitor_job": "Job posting", "problem_job": "Job posting", "dns": "DNS record", "cert": "Certificate record", "linkedin": "LinkedIn activity",
+                 "news": "News", "filing": "SEC filing", "tender": "Public tender", "website": "Website lead", "visit": "Website visits", "spend": "Public spend"}
+
+# --- Segments ------------------------------------------------------------------------
+# Mid-market and enterprise are both targets. Thresholds are editable (Radar settings "segments").
+SEGMENTS = ["enterprise", "mid_market", "smb"]
+SEGMENT_LABELS = {"enterprise": "Enterprise", "mid_market": "Mid-market", "smb": "Small business", None: "Size unknown"}
+DEFAULT_SEGMENTS = {"mid_market_min": 200, "enterprise_min": 1000, "mid_market_revenue": 50_000_000, "enterprise_revenue": 1_000_000_000}
+
+
+def revenue_of(band) -> Optional[float]:
+    """"$1B-$10B", "$250M+", "500000000" -> the lower bound in dollars."""
+    if band in (None, ""):
+        return None
+    if isinstance(band, (int, float)):
+        return float(band)
+    m = re.search(r"\$?\s*(\d+(?:\.\d+)?)\s*([kmbt]?)", str(band).lower().replace(",", ""))
+    if not m:
+        return None
+    return float(m.group(1)) * {"": 1, "k": 1e3, "m": 1e6, "b": 1e9, "t": 1e12}[m.group(2)]
+
+
+def segment_of(employees=None, revenue=None, cfg: Optional[dict] = None) -> Optional[str]:
+    """Enterprise / mid-market / small business from headcount, else revenue; None when neither is known."""
+    c = {**DEFAULT_SEGMENTS, **(cfg or {})}
+    try:
+        emp = int(employees) if employees not in (None, "") else None
+    except (TypeError, ValueError):
+        emp = None
+    rev = revenue_of(revenue)
+    if emp is not None:
+        return "enterprise" if emp >= c["enterprise_min"] else "mid_market" if emp >= c["mid_market_min"] else "smb"
+    if rev is not None:
+        return "enterprise" if rev >= c["enterprise_revenue"] else "mid_market" if rev >= c["mid_market_revenue"] else "smb"
+    return None
 SURGE_COUNT, SURGE_DAYS = 3, 7
 READY_SCORE = 6  # deep dive score that means "ready for outreach"
 

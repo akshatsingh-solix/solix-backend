@@ -88,7 +88,12 @@ async def track(request: Request):
     events = body.get("events") if isinstance(body.get("events"), list) else []
     if not vid or len(vid) < 8 or not events:
         return Response(status_code=204)
-    await ingest(vid, sid or "none", events[:MAX_EVENTS], body.get("context") if isinstance(body.get("context"), dict) else {})
+    visitor = await ingest(vid, sid or "none", events[:MAX_EVENTS], body.get("context") if isinstance(body.get("context"), dict) else {})
+    try:  # which organisation's network this consenting visitor is on (Radar "visit" signal); the address is never stored
+        import radar_visitors
+        radar_visitors.schedule(vid, _client_ip(request), visitor.get("org_checked_at"))
+    except Exception:  # noqa: BLE001 - never affects tracking
+        logger.exception("visitor identification could not start")
     return Response(status_code=204)
 
 

@@ -96,6 +96,96 @@ services:
       # Optional: business emails and decision makers for Radar accounts (25 free searches a month).
       - key: HUNTER_API_KEY
         sync: false
+      # Radar free data sources, all optional: each function fails over across the ones set,
+      # paced to each free allowance. Sign-up links: docs/radar-free-sources.md.
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: SERPER_API_KEY
+        sync: false
+      - key: BRAVE_API_KEY
+        sync: false
+      - key: EXA_API_KEY
+        sync: false
+      - key: GOOGLE_CSE_KEY
+        sync: false
+      - key: GOOGLE_CSE_CX
+        sync: false
+      - key: SERPAPI_API_KEY
+        sync: false
+      - key: SEARXNG_URL
+        sync: false
+      - key: JINA_API_KEY
+        sync: false
+      - key: NEWSDATA_API_KEY
+        sync: false
+      - key: THEIRSTACK_API_KEY
+        sync: false
+      - key: ADZUNA_APP_ID
+        sync: false
+      - key: ADZUNA_APP_KEY
+        sync: false
+      - key: RAPIDAPI_KEY
+        sync: false
+      - key: JOOBLE_API_KEY
+        sync: false
+      - key: REED_API_KEY
+        sync: false
+      - key: USAJOBS_API_KEY
+        sync: false
+      - key: USAJOBS_EMAIL
+        sync: false
+      - key: COMPANIES_HOUSE_API_KEY
+        sync: false
+      - key: PDL_API_KEY
+        sync: false
+      - key: TOMBA_KEY
+        sync: false
+      - key: TOMBA_SECRET
+        sync: false
+      - key: SNOV_CLIENT_ID
+        sync: false
+      - key: SNOV_CLIENT_SECRET
+        sync: false
+      - key: APOLLO_API_KEY
+        sync: false
+      - key: PROSPEO_API_KEY
+        sync: false
+      - key: SKRAPP_API_KEY
+        sync: false
+      - key: MAILBOXVALIDATOR_API_KEY
+        sync: false
+      - key: ZEROBOUNCE_API_KEY
+        sync: false
+      - key: ABSTRACT_EMAIL_API_KEY
+        sync: false
+      - key: IPAPI_IS_KEY
+        sync: false
+      - key: IPINFO_TOKEN
+        sync: false
+      - key: IPREGISTRY_KEY
+        sync: false
+      - key: URLSCAN_API_KEY
+        sync: false
+      - key: OTX_API_KEY
+        sync: false
+      - key: CERTSPOTTER_API_KEY
+        sync: false
+      - key: SAM_GOV_API_KEY
+        sync: false
+      - key: CEREBRAS_API_KEY
+        sync: false
+      - key: SAMBANOVA_API_KEY
+        sync: false
+      - key: GITHUB_MODELS_TOKEN
+        sync: false
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: CLOUDFLARE_ACCOUNT_ID
+        sync: false
+      - key: CLOUDFLARE_API_TOKEN
+        sync: false
+      - key: HF_TOKEN
+        sync: false
       - key: DIGIPRISE_URL
         sync: false
       - key: DIGIPRISE_TOKEN

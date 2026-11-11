@@ -39,11 +39,22 @@ def _db():
 DEFAULT_RADAR = {
     "targets": [],            # [{company, domain, ats: greenhouse|lever|ashby|workday, board, workday_url}]
     "dns_domains": [],        # domains to fingerprint (the original Radar scanned 543)
-    "collectors": {"ats": True, "crustdata": False, "dns": True, "news": True, "filings": True, "tenders": True},
+    "collectors": {"ats": True, "crustdata": False, "dns": True, "news": True, "filings": True, "tenders": True,
+                   # Free-source collectors (providers.py chains; each provider paced to its free allowance).
+                   "jobs_api": True, "ats_xray": True, "subdomains": True, "public_sector": True, "visitors": True},
     "credit_cap": 200,        # Crustdata credits per run
     "research_per_run": 5,
     "refresh_days": 30,
-    "min_employees": 500,
+    "min_employees": 200,     # mid-market and up (was 500: enterprise only)
+    "segments": dict(rm.DEFAULT_SEGMENTS),
+    "target_segments": ["enterprise", "mid_market"],   # deep dives go to these first; unknown size still counts
+    "job_terms": [],          # extra phrases for the job-market search; competitor names are always searched
+    "jobs_per_term": 2,       # job sources asked per phrase each day
+    "xray_terms_per_run": 5,  # competitor phrases searched on public ATS hosts each day (rotates)
+    "auto_targets": True,     # boards found by the ATS X-ray join `targets` and are read free every day
+    "enrich_per_run": 40,     # accounts sized and located (firmographics) per run
+    "subdomain_batch": 40,    # domains checked for competitor-named hosts per run
+    "visitor_days": 30,       # website-visit window for the visit signal
     "countries": ["United States", "Canada", "United Kingdom"],
     "tender_countries": [],   # ISO3 codes for TED, empty = all EU
     "weights": {},            # learned multipliers per signal type (outbound.learn)
@@ -324,6 +335,7 @@ def _website_intent(leads: list) -> Optional[dict]:
 def _compute(company: dict, signals: list, research: Optional[dict], pending: bool, leads: list, terr: dict, members: list, settings: dict, half_life: float) -> dict:
     roll = rm.rollup(signals, half_life_days=half_life, weights=settings.get("weights") or None, website=_website_intent(leads), research=research)
     update = {**roll, "countries": sorted({s["country"] for s in signals if s.get("country")}), "states": sorted({s["state"] for s in signals if s.get("state")}),
+              "segment": rm.segment_of(company.get("employees"), company.get("revenue_usd") or company.get("revenue_band"), settings.get("segments")),
               "lead_ids": sorted({l["id"] for l in leads} | set(company.get("lead_ids") or [])), "recomputed_at": now_iso(), "updated_at": now_iso()}
     if research:
         update.update({"research_id": research["id"], "research_score": research.get("score"), "research_verdict": research.get("verdict"), "research_status": research.get("status"), "research_at": research.get("created_at")})

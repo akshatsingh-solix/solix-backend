@@ -86,8 +86,7 @@ async def gather(client: httpx.AsyncClient, company: dict, problems: Optional[Li
         if url in seen_urls:
             continue
         seen_urls.add(url)
-        label = {"competitor_job": "Job posting", "problem_job": "Job posting", "dns": "DNS record", "cert": "Certificate record", "linkedin": "LinkedIn activity",
-                 "news": "News", "filing": "SEC filing", "tender": "Public tender"}.get(s["type"], s["type"])
+        label = rm.SIGNAL_LABELS.get(s["type"], s["type"])
         sources.append({"title": f"{label}: {s.get('title') or s.get('role_title') or ''}".strip(), "url": url, "date": str(s.get("posted_at") or "")[:10],
                         "text": s.get("evidence_text") or "", "kind": s["type"]})
         if len(sources) >= 6:
@@ -102,8 +101,8 @@ async def gather(client: httpx.AsyncClient, company: dict, problems: Optional[Li
         if len(sources) >= MAX_SOURCES - 4:
             break
     try:
-        import seo
-        news = await seo._news(client, f'"{company["name"]}"')
+        import radar_sources
+        news = await radar_sources.news(client, f'"{company["name"]}"', days=365)
         for n in news[:10]:
             if n.get("url") in seen_urls:
                 continue

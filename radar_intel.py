@@ -4,14 +4,15 @@ The original Leads Radar's deep dives came from open web research (press release
 filings, investor material, conference talks, job postings). This does the same from live sources:
 
 * Web research, three angles per account searched together: the account's programs and migrations, the named
-  leaders who own IT, data, architecture and records, and recent material news.
-  - Firecrawl (FIRECRAWL_API_KEY) first: ranked pages with highlights, and the best leadership pages read in
-    full, because names and titles rarely fit in a snippet.
-  - Parallel Search (PARALLEL_API_KEY) when Firecrawl isn't set up or fails.
+  leaders who own IT, data, architecture and records, and recent material news. The web-search chain in
+  providers.py answers: Firecrawl first (ranked pages, the best leadership pages read in full, because names
+  and titles rarely fit in a snippet), then Tavily, Serper, Brave, Exa, Google Programmable Search, SerpApi,
+  a self-hosted SearXNG, Jina and Parallel - whichever are set up and have free allowance left.
   An identical search within a day comes from the cache, so repeat clicks and a deep dive after Find people
   spend no credits.
-* Hunter (HUNTER_API_KEY, optional): business email addresses, titles and the company's email pattern, each
-  with the public pages it was seen on.
+* People who work there now, merged from every source that's set up: leadership pages, public LinkedIn
+  profiles found through search engines (the headline shows the current employer), Hunter, Tomba, Snov.io,
+  People Data Labs, Apollo and UK Companies House officers - each with the page or record it came from.
 
 People are never invented: a name is kept only if it appears in a fetched source (or comes from Hunter with its
 sources), and every person carries the link it came from, which is recorded on the contact (GDPR Art. 14).
@@ -41,11 +42,24 @@ TARGET_TITLES = re.compile(r"\b(chief|cio|cto|cdo|cdao|ciso|vice president|vp|sv
 
 
 def sources_available() -> Dict[str, bool]:
-    return {"web_search": bool(firecrawl_api.available() or os.environ.get("PARALLEL_API_KEY")), "hunter": bool(os.environ.get("HUNTER_API_KEY"))}
+    import providers as pv
+    return {"web_search": pv.any_configured("web_search"), "hunter": bool(os.environ.get("HUNTER_API_KEY")),
+            "contacts": pv.any_configured("people", keyed_only=True)}
 
 
 def web_provider() -> Optional[str]:
-    return "firecrawl" if firecrawl_api.available() else "parallel" if os.environ.get("PARALLEL_API_KEY") else None
+    """The first web-search provider that's set up (the chain decides who actually answers)."""
+    import providers as pv
+    return next((s.name for s in pv.SPECS if s.capability == "web_search" and pv.configured(s)), None)
+
+
+HOSTS = {"api.parallel.ai": "Parallel", "api.hunter.io": "Hunter", "api.firecrawl.dev": "Firecrawl", "api.tavily.com": "Tavily", "google.serper.dev": "Serper",
+         "api.search.brave.com": "Brave", "api.exa.ai": "Exa", "www.googleapis.com": "Google", "serpapi.com": "SerpApi", "s.jina.ai": "Jina", "r.jina.ai": "Jina",
+         "api.theirstack.com": "TheirStack", "api.adzuna.com": "Adzuna", "jsearch.p.rapidapi.com": "JSearch", "jooble.org": "Jooble", "www.reed.co.uk": "Reed",
+         "data.usajobs.gov": "USAJOBS", "api.tomba.io": "Tomba", "api.snov.io": "Snov.io", "api.peopledatalabs.com": "People Data Labs", "api.apollo.io": "Apollo",
+         "api.prospeo.io": "Prospeo", "api.skrapp.io": "Skrapp", "api.mailboxvalidator.com": "MailboxValidator", "api.zerobounce.net": "ZeroBounce",
+         "emailvalidation.abstractapi.com": "Abstract", "api.ipapi.is": "ipapi.is", "api.ipinfo.io": "IPinfo", "api.ipregistry.co": "Ipregistry", "newsdata.io": "NewsData",
+         "api.company-information.service.gov.uk": "Companies House", "api.sam.gov": "SAM.gov", "api.usaspending.gov": "USAspending"}
 
 
 def why(exc: Exception) -> str:
@@ -60,7 +74,7 @@ def why(exc: Exception) -> str:
         msg = body.get("message") or (err.get("message") if isinstance(err, dict) else err) or ((body.get("errors") or [{}])[0].get("details")) or ""
     except (ValueError, AttributeError, IndexError):
         pass
-    host = {"api.parallel.ai": "Parallel", "api.hunter.io": "Hunter", "api.firecrawl.dev": "Firecrawl"}.get(r.request.url.host, r.request.url.host)
+    host = HOSTS.get(r.request.url.host, r.request.url.host)
     return f"{host} returned {r.status_code}" + (f": {str(msg)[:160]}" if msg else "")
 
 
@@ -96,8 +110,9 @@ async def parallel_search(client: httpx.AsyncClient, objective: str, queries: Li
             for x in r.json().get("results", []) if x.get("url")]
 
 
-async def firecrawl_angle(client: httpx.AsyncClient, angle: dict) -> List[dict]:
+async def firecrawl_angle(client: httpx.AsyncClient, angle: dict):
     """Firecrawl searches for one angle, then the most promising pages read in full (`read` of them, 1 credit each)."""
+    import providers as pv
     batches = await asyncio.gather(*(firecrawl_api.search(client, q, FC_RESULTS, angle.get("tbs")) for q in angle["fc_queries"]))
     found, seen = [], set()
     for batch in batches:
@@ -119,7 +134,30 @@ async def firecrawl_angle(client: httpx.AsyncClient, angle: dict) -> List[dict]:
             x["text"] = focus(page["text"])
             x["date"] = x["date"] or page["date"]
     await asyncio.gather(*(read(x) for x in picks))
-    return found
+    return pv.Billed(found, 2 * len(angle["fc_queries"]) + len(picks))
+
+
+async def keyword_angle(client: httpx.AsyncClient, name: str, angle: dict):
+    """Any other keyword engine: the angle's short queries, then the leadership pages read by the page-reading chain."""
+    import providers as pv
+    import radar_sources
+    adapter = radar_sources.SEARCH_ADAPTERS[name]
+    batches = await asyncio.gather(*(adapter(client, q, FC_RESULTS, angle.get("tbs")) for q in angle["fc_queries"]))
+    found, seen = [], set()
+    for batch in batches:
+        for x in batch:
+            if x["url"] not in seen:
+                seen.add(x["url"])
+                found.append(x)
+    likely = [x for x in found if _PEOPLE_PAGE.search(x["url"] + " " + x["title"])]
+
+    async def read(x: dict) -> None:
+        page = await radar_sources.read_page(client, x["url"])
+        if page and page.get("text"):
+            x["text"] = focus(page["text"])
+            x["date"] = x["date"] or page.get("date") or ""
+    await asyncio.gather(*(read(x) for x in (likely or found[:1])[:angle.get("read", 0)]))
+    return pv.Billed(found, len(angle["fc_queries"]))
 
 
 def focus(text: str, limit: int = 3500) -> str:
@@ -130,19 +168,23 @@ def focus(text: str, limit: int = 3500) -> str:
 
 
 async def web_search(client: httpx.AsyncClient, angle: dict, problems: Optional[List[str]] = None) -> List[dict]:
-    """One angle's pages from the first web provider that answers: Firecrawl, then Parallel. Failures go to `problems`."""
-    providers = []
-    if firecrawl_api.available():
-        providers.append(("firecrawl", lambda: firecrawl_angle(client, angle)))
-    if os.environ.get("PARALLEL_API_KEY"):
-        providers.append(("parallel", lambda: parallel_search(client, angle["objective"], angle["queries"])))
-    for name, call in providers:
-        try:
-            return await call()
-        except (httpx.HTTPError, KeyError, ValueError) as exc:
-            logger.warning("web search via %s failed: %s", name, why(exc))
-            _note(problems, f"Web search failed: {why(exc)}")
-    return []
+    """One angle's pages from the first web provider in the chain that answers (see providers.py). Failures go to `problems`."""
+    import providers as pv
+    import radar_sources
+    calls = {}
+    for name in radar_sources.SEARCH_ADAPTERS:
+        if name == "firecrawl":
+            calls[name] = lambda: firecrawl_angle(client, angle)
+        elif name == "parallel":
+            calls[name] = lambda: parallel_search(client, angle["objective"], angle["queries"])
+        else:
+            calls[name] = lambda n=name: keyword_angle(client, n, angle)
+
+    def failed(spec, exc):
+        logger.warning("web search via %s failed: %s", spec.name, why(exc))
+        _note(problems, f"Web search failed: {why(exc)}")
+    found, _ = await pv.first("web_search", calls, on_error=failed)
+    return found or []
 
 
 async def cached_search(client: httpx.AsyncClient, angle: dict, problems: Optional[List[str]] = None) -> List[dict]:
@@ -310,12 +352,20 @@ async def hunter_people(client: httpx.AsyncClient, domain: Optional[str], limit:
     """Hunter Domain Search: decision makers in IT, executive and management, with work emails and where they were seen.
     Without a domain on the account, Hunter is asked by company name and says which domain it matched.
     10 results is the most the free plan returns (more is a 400), and enough once filtered to senior IT and executives."""
+    import providers as pv
     if not os.environ.get("HUNTER_API_KEY") or not (domain or company):
         return {"people": [], "pattern": None, "domain": None}
-    r = await client.get(f"{HUNTER_URL}/domain-search", timeout=30, params={
-        **({"domain": domain} if domain else {"company": search_name(company)}), "api_key": os.environ["HUNTER_API_KEY"], "type": "personal", "limit": limit,
-        "department": "it,executive,management,legal,operations", "seniority": "senior,executive"})
-    r.raise_for_status()
+    if not await pv.usable("hunter"):
+        return {"people": [], "pattern": None, "domain": None, "resting": True}
+    try:
+        r = await client.get(f"{HUNTER_URL}/domain-search", timeout=30, params={
+            **({"domain": domain} if domain else {"company": search_name(company)}), "api_key": os.environ["HUNTER_API_KEY"], "type": "personal", "limit": limit,
+            "department": "it,executive,management,legal,operations", "seniority": "senior,executive"})
+        r.raise_for_status()
+    except httpx.HTTPError as exc:
+        pv.failed("hunter", exc)
+        raise
+    await pv.succeeded("hunter")
     data = r.json().get("data") or {}
     if not domain and data.get("domain") and not domain_matches(data["domain"], company):
         # Asked by name, Hunter picked a different company ("Varonis Systems" -> marini.systems): its people aren't the account's.
@@ -325,23 +375,30 @@ async def hunter_people(client: httpx.AsyncClient, domain: Optional[str], limit:
     for e in data.get("emails") or []:
         if not (e.get("first_name") and e.get("last_name")):
             continue
-        src = (e.get("sources") or [{}])[0]
+        srcs = e.get("sources") or [{}]
+        src = srcs[0]
         people.append({"name": f"{e['first_name']} {e['last_name']}", "title": e.get("position") or "", "email": e.get("value"),
                        "email_confidence": e.get("confidence"), "email_status": ((e.get("verification") or {}).get("status")),
                        "linkedin_url": e.get("linkedin"), "source_url": src.get("uri") or f"https://hunter.io/search/{domain}", "source_title": src.get("domain") or "Hunter",
-                       "via": "hunter"})
+                       "via": "hunter", "current": True if any(s.get("still_on_page") for s in srcs) else None})
     return {"people": people, "pattern": data.get("pattern"), "domain": domain}
 
 
 async def hunter_email(client: httpx.AsyncClient, domain: str, first: str, last: str) -> Optional[dict]:
     """Hunter Email Finder for one person; None when Hunter isn't set up or has no confident answer."""
-    if not os.environ.get("HUNTER_API_KEY") or not (domain and first and last):
+    import providers as pv
+    if not os.environ.get("HUNTER_API_KEY") or not (domain and first and last) or not await pv.usable("hunter_find"):
         return None
     r = await client.get(f"{HUNTER_URL}/email-finder", timeout=30, params={"domain": domain, "first_name": first, "last_name": last,
                                                                           "api_key": os.environ["HUNTER_API_KEY"]})
     if r.status_code == 404:
         return None
-    r.raise_for_status()
+    try:
+        r.raise_for_status()
+    except httpx.HTTPError as exc:
+        pv.failed("hunter_find", exc)
+        raise
+    await pv.succeeded("hunter_find")
     d = r.json().get("data") or {}
     if not d.get("email") or (d.get("score") or 0) < 50:
         return None
@@ -350,34 +407,53 @@ async def hunter_email(client: httpx.AsyncClient, domain: str, first: str, last:
 
 
 async def find_people(client: httpx.AsyncClient, company: dict, known_names: Optional[set] = None) -> dict:
-    """Live candidates for an account: named in fetched web sources and/or found by Hunter, never invented."""
+    """Live candidates for an account, never invented: named in fetched web sources, on public LinkedIn profiles that list
+    the company as the current employer, or found by a contact-data provider (Hunter, Tomba, Snov.io, PDL, Apollo,
+    Companies House). The same person from several sources becomes one candidate with every detail found."""
+    import radar_sources
     known = {n.lower() for n in known_names or set()}
     problems: List[str] = []
+    xray = radar_sources.linkedin_xray(client, company["name"], problems=problems)
     if company.get("domains"):
-        web, hunter = await asyncio.gather(research_sources(client, company, ["people"], problems),
-                                           _safe_hunter(client, company["domains"][0], None, problems))
+        domain = company["domains"][0]
+        web, hunter, (linked, _) = await asyncio.gather(research_sources(client, company, ["people"], problems),
+                                                        _safe_hunter(client, domain, None, problems), xray)
     else:
         # No domain on the account: find the company's own site in the web results first, so Hunter searches the right company.
-        web = await research_sources(client, company, ["people"], problems)
+        web, (linked, _) = await asyncio.gather(research_sources(client, company, ["people"], problems), xray)
         domain = company_domain(company, web)
         hunter = await _safe_hunter(client, domain, None if domain else company["name"], problems)
     if hunter.get("mismatch"):
         _note(problems, f"Hunter matched {hunter['mismatch']}, which doesn't look like {company['name']}, so its people were left out. "
                         "Add the account's website domain to use Hunter.")
-    people = named_in_sources(await extract_people(company, web), web) + hunter["people"]
-    out, seen = [], set()
+    others = await radar_sources.people(client, company, domain or hunter.get("domain"), problems=problems)
+    people = named_in_sources(await extract_people(company, web), web) + hunter["people"] + linked + others
+    out, by_name = [], {}
     for p in people:
         key = p["name"].lower()
-        if key in seen or key in known:
+        if key in known:
             continue
-        seen.add(key)
+        if key in by_name:  # the same person from another source: keep the first record, add what this one knows
+            first = by_name[key]
+            for f in ("email", "email_confidence", "email_status", "linkedin_url"):
+                if p.get(f) and not first.get(f):
+                    first[f] = p[f]
+            if not first.get("title") and p.get("title"):
+                first["title"] = p["title"]
+            if p.get("current"):
+                first["current"] = True
+            first["also_via"] = sorted(set(first.get("also_via") or []) | {p.get("via") or "web"})
+            continue
+        rec = {**p, "current": p.get("current")}
+        by_name[key] = rec
+        out.append(rec)
+    for p in out:  # after merging: a title can arrive with a later source
         title = p.get("title") or ""
-        out.append({**p, "persona": "target" if TARGET_TITLES.search(title) else "other",
-                    "relevant": bool(re.search(r"information|data|architect|record|governance|content|technology|digital|it\b|cio|cto|cdo|compliance|legal|security",
-                                               title, re.I))})
-    out.sort(key=lambda p: (not p["relevant"], p["persona"] != "target", p["name"]))
-    return {"people": out[:25], "sources_used": {"web_pages": len(web), "hunter": len(hunter["people"])}, "email_pattern": hunter.get("pattern"),
-            "hunter_domain": hunter.get("domain"), "problems": problems, "available": sources_available()}
+        p["persona"] = "target" if TARGET_TITLES.search(title) else "other"
+        p["relevant"] = bool(re.search(r"information|data|architect|record|governance|content|technology|digital|it\b|cio|cto|cdo|compliance|legal|security", title, re.I))
+    out.sort(key=lambda p: (not p["relevant"], p["persona"] != "target", p.get("current") is not True, p["name"]))
+    return {"people": out[:25], "sources_used": {"web_pages": len(web), "hunter": len(hunter["people"]), "linkedin_xray": len(linked), "other": len(others)},
+            "email_pattern": hunter.get("pattern"), "hunter_domain": hunter.get("domain"), "problems": problems, "available": sources_available()}
 
 
 async def _safe_hunter(client: httpx.AsyncClient, domain: Optional[str], company: Optional[str] = None, problems: Optional[List[str]] = None) -> dict:

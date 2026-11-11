@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       steps:
-        description: "daily, collect, score, research or digest"
+        description: "daily, collect, enrich, score, research or digest"
         default: daily
         required: false
 
@@ -45,6 +45,21 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           CRUSTDATA_API_KEY: ${{ secrets.CRUSTDATA_API_KEY }}
+          # Radar free data sources (docs/radar-free-sources.md); any that are set are used.
+          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+          PARALLEL_API_KEY: ${{ secrets.PARALLEL_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          THEIRSTACK_API_KEY: ${{ secrets.THEIRSTACK_API_KEY }}
+          ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
+          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+          HUNTER_API_KEY: ${{ secrets.HUNTER_API_KEY }}
+          PDL_API_KEY: ${{ secrets.PDL_API_KEY }}
+          COMPANIES_HOUSE_API_KEY: ${{ secrets.COMPANIES_HOUSE_API_KEY }}
+          SAM_GOV_API_KEY: ${{ secrets.SAM_GOV_API_KEY }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}

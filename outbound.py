@@ -93,7 +93,8 @@ def new_contact_doc(data: dict, company: Optional[dict]) -> dict:
 
 
 async def verify_email(email: str) -> dict:
-    """Syntax, MX lookup, then Reacher (self-hosted, free) when REACHER_URL is set."""
+    """Syntax, MX lookup, then the mailbox-verification chain (radar_sources.verify_email): a self-hosted Reacher, then
+    MailboxValidator, ZeroBounce, Abstract, Hunter and Tomba's free allowances - whichever are set up and have checks left."""
     email = (email or "").strip().lower()
     if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[a-z]{2,}", email):
         return {"status": "invalid", "detail": "Not an email address"}
@@ -108,19 +109,14 @@ async def verify_email(email: str) -> dict:
             return {"status": "invalid", "detail": "Domain has no mail server"}
     except Exception:  # noqa: BLE001 - NXDOMAIN, no answer, timeout
         return {"status": "invalid", "detail": "Domain has no mail server"}
-    url = os.environ.get("REACHER_URL")
-    if not url:
-        return {"status": "mx_only", "detail": "Mail server exists; mailbox not checked (set REACHER_URL to verify mailboxes)"}
-    headers = {"Authorization": os.environ["REACHER_TOKEN"]} if os.environ.get("REACHER_TOKEN") else {}
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            res = (await client.post(f"{url.rstrip('/')}/v0/check_email", json={"to_email": email}, headers=headers)).json()
-    except (httpx.HTTPError, ValueError) as e:
-        return {"status": "unknown", "detail": f"Verifier unavailable: {type(e).__name__}"}
-    reach = res.get("is_reachable")
-    smtp = res.get("smtp") or {}
-    status = {"safe": "valid", "invalid": "invalid", "risky": "catch_all" if smtp.get("is_catch_all") else "risky"}.get(reach, "unknown")
-    return {"status": status, "detail": f"Reacher: {reach}"}
+    import radar_sources
+    if not radar_sources.mailbox_verifier_ready():
+        return {"status": "mx_only", "detail": "Mail server exists; mailbox not checked (set REACHER_URL or a verification key, see docs/radar-free-sources.md)"}
+    async with httpx.AsyncClient(timeout=60) as client:
+        res = await radar_sources.verify_email(client, email)
+    if not res:
+        return {"status": "unknown", "detail": "No verifier gave a definite answer (unavailable, out of free checks, or the server greylisted us)"}
+    return res
 
 
 async def set_verification(contact: dict) -> dict:
@@ -903,18 +899,24 @@ async def find_email(contact_id: str):
         raise HTTPException(status_code=422, detail="Add the account's web domain first (Account → Details)")
     tried = []
     import radar_intel
+    import radar_sources
+    via = "hunter"
     async with httpx.AsyncClient() as client:
         try:
             hit = await radar_intel.hunter_email(client, domain, c.get("first_name"), c.get("last_name"))
         except (httpx.HTTPError, ValueError):
             hit = None
+        if not hit and c.get("first_name") and c.get("last_name"):  # Hunter had nothing or is out of searches: the other finders
+            hit, via = await radar_sources.find_email(client, domain, c["first_name"], c["last_name"], skip={"hunter_find"})
     if hit:
+        label = {"hunter": "Hunter", "tomba_find": "Tomba", "snov_find": "Snov.io", "prospeo": "Prospeo", "skrapp": "Skrapp"}.get(via, via)
         v = await verify_email(hit["email"])
         status = "valid" if hit.get("status") == "valid" or v["status"] == "valid" else v["status"]
+        detail = f"{label} (confidence {hit.get('score')})" if hit.get("score") else label
         await _db().contacts.update_one({"id": contact_id}, {"$set": {"email": hit["email"], "email_status": status, "verified_at": now_iso() if status == "valid" else None,
-                                                                    "verify_detail": f"Hunter (confidence {hit.get('score')})", "source_email": "hunter",
+                                                                    "verify_detail": detail, "source_email": "hunter" if via == "hunter" else via,
                                                                     "email_source_url": hit.get("source_url")}})
-        return {"found": hit["email"], "tried": [{"email": hit["email"], "status": status, "detail": "Hunter Email Finder"}]}
+        return {"found": hit["email"], "tried": [{"email": hit["email"], "status": status, "detail": f"{label} Email Finder"}]}
     for cand in guess_emails(c.get("first_name"), c.get("last_name"), domain)[:6]:
         v = await verify_email(cand)
         tried.append({"email": cand, **v})

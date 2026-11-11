@@ -7,14 +7,20 @@ soft: a source that is down costs that source's signals for the day, nothing
 else.
 
 Sources (all free unless noted):
-  ATS boards   Greenhouse, Lever, Ashby public job-board APIs; Workday career
-               sites' JSON search. Configured per target in Admin > Radar.
-  Crustdata    Indexed job search (paid credits, capped per run). Optional.
-  DNS / certs  MX and SPF records plus certificate-transparency names (crt.sh)
-               that fingerprint a competitor's service.
-  News         Google News RSS for strong accounts (via seo._news).
+  ATS boards   Greenhouse, Lever, Ashby, SmartRecruiters, Recruitee, Workable and
+               Personio public job-board APIs; Workday career sites' JSON search.
+               Configured per target in Admin > Radar, and added automatically by
+               the ATS X-ray (radar_sources.ats_xray) as new boards are found.
+  Job market   TheirStack, Adzuna, JSearch, Jooble, Reed, USAJOBS (radar_sources),
+               each paced to its free allowance. Crustdata (paid, capped) optional.
+  DNS / certs  MX and SPF records (local resolver, then Google and Cloudflare
+               DNS-over-HTTPS) plus certificate-transparency names (crt.sh, then
+               Cert Spotter) that fingerprint a competitor's service; subdomains
+               and CNAMEs from passive DNS (radar_sources.subdomains).
+  News         Google News RSS, then Bing News and GDELT (radar_sources.news).
   Filings      SEC EDGAR full-text search for competitor products in filings.
-  Tenders      EU TED notices for archiving / retirement / records work.
+  Tenders      EU TED notices; SAM.gov, UK Contracts Finder and USAspending awards
+               to competitors (radar_sources.public_sector).
 """
 from __future__ import annotations
 
@@ -65,15 +71,22 @@ def _date(value) -> Optional[str]:
 
 
 def classify_posting(company: str, title: str, text: str, *, url: str, location: str = "", country: str = "", state: str = "", posted: Optional[str] = None,
-                     source: str, source_ref: Optional[str] = None, domain: Optional[str] = None) -> List[dict]:
-    """A posting becomes one competitor_job signal per competitor it names, else at most one problem_job."""
+                     source: str, source_ref: Optional[str] = None, domain: Optional[str] = None, matched_term: Optional[str] = None) -> List[dict]:
+    """A posting becomes one competitor_job signal per competitor it names, else at most one problem_job.
+
+    `matched_term` is the phrase a job-search API matched in the full posting when it only returns a snippet:
+    if the snippet doesn't show a competitor, the API's phrase match stands as the evidence."""
     if rm.is_staffing(company):
         return []
     body = f"{title}\n{text}"
     out = []
     base = {"company": company, "domain": domain, "title": title, "role_title": title, "role_strength": rm.role_strength(title), "evidence_url": url,
             "location": location, "country": country, "state": state, "posted_at": posted, "source": source}
-    for hit in rm.find_competitors(body):
+    hits = rm.find_competitors(body)
+    if not hits and matched_term:
+        snippet = re.sub(r"\s+", " ", text or "")[:220]
+        hits = [{**h, "sentence": f"Listed by {source} for \u201c{matched_term}\u201d. {snippet}".strip()} for h in rm.find_competitors(matched_term)]
+    for hit in hits:
         out.append({**base, "type": "competitor_job", "competitor_key": hit["key"], "competitor_product": hit["product"], "evidence_text": hit["sentence"],
                     "source_ref": f"{source_ref or url}|{hit['key']}"})
     if not out:
@@ -177,7 +190,76 @@ async def workday(client: httpx.AsyncClient, t: dict) -> List[dict]:
     return out
 
 
-ATS = {"greenhouse": greenhouse, "lever": lever, "ashby": ashby, "workday": workday}
+async def smartrecruiters(client: httpx.AsyncClient, t: dict) -> List[dict]:
+    api = f"https://api.smartrecruiters.com/v1/companies/{t['board']}/postings"
+    r = await client.get(api, params={"limit": 100}, timeout=40)
+    r.raise_for_status()
+    out = []
+    for p in (r.json().get("content") or [])[:60]:
+        posted = _date(p.get("releasedDate"))
+        if posted and posted < _since().date().isoformat():
+            continue
+        try:
+            d = (await client.get(f"{api}/{p['id']}", timeout=30)).json()
+        except (httpx.HTTPError, ValueError, KeyError):
+            continue
+        secs = ((d.get("jobAd") or {}).get("sections") or {})
+        text = "\n".join(_plain((secs.get(k) or {}).get("text")) for k in ("companyDescription", "jobDescription", "qualifications", "additionalInformation"))
+        loc = p.get("location") or {}
+        import radar_sources
+        cc = (loc.get("country") or "").upper()
+        out += classify_posting(t["company"], p.get("name") or "", text, url=d.get("postingUrl") or f"https://jobs.smartrecruiters.com/{t['board']}/{p['id']}",
+                                location=", ".join(x for x in (loc.get("city"), loc.get("region")) if x), country=radar_sources.ISO2_COUNTRY.get(cc, cc),
+                                state=loc.get("region") or "", posted=posted, source="smartrecruiters", source_ref=f"sr:{p['id']}", domain=t.get("domain"))
+    return out
+
+
+async def recruitee(client: httpx.AsyncClient, t: dict) -> List[dict]:
+    r = await client.get(f"https://{t['board']}.recruitee.com/api/offers/", timeout=40)
+    r.raise_for_status()
+    out = []
+    for j in r.json().get("offers") or []:
+        posted = _date(j.get("published_at") or j.get("created_at"))
+        if posted and posted < _since().date().isoformat():
+            continue
+        out += classify_posting(t["company"], j.get("title") or "", _plain(f"{j.get('description') or ''}\n{j.get('requirements') or ''}"), url=j.get("careers_url"),
+                                location=j.get("location") or "", country=j.get("country") or "", state=j.get("state_name") or j.get("state_code") or "", posted=posted,
+                                source="recruitee", source_ref=f"rec:{j.get('id')}", domain=t.get("domain"))
+    return out
+
+
+async def workable(client: httpx.AsyncClient, t: dict) -> List[dict]:
+    r = await client.get(f"https://apply.workable.com/api/v1/widget/accounts/{t['board']}", params={"details": "true"}, timeout=40)
+    r.raise_for_status()
+    out = []
+    for j in r.json().get("jobs") or []:
+        posted = _date(j.get("published_on") or j.get("created_at"))
+        if posted and posted < _since().date().isoformat():
+            continue
+        out += classify_posting(t["company"], j.get("title") or "", _plain(j.get("description")), url=j.get("url") or j.get("application_url"),
+                                location=", ".join(x for x in (j.get("city"), j.get("state")) if x), country=j.get("country") or "", state=j.get("state") or "", posted=posted,
+                                source="workable", source_ref=f"wk:{j.get('shortcode')}", domain=t.get("domain"))
+    return out
+
+
+async def personio(client: httpx.AsyncClient, t: dict) -> List[dict]:
+    from defusedxml import ElementTree as ET
+    r = await client.get(f"https://{t['board']}.jobs.personio.de/xml", timeout=40)
+    r.raise_for_status()
+    out = []
+    for p in ET.fromstring(r.content).iter("position"):
+        posted = _date(p.findtext("createdAt"))
+        if posted and posted < _since().date().isoformat():
+            continue
+        text = "\n".join(f"{d.findtext('name') or ''}\n{_plain(d.findtext('value'))}" for d in p.iter("jobDescription"))
+        pid = p.findtext("id")
+        out += classify_posting(t["company"], p.findtext("name") or "", text, url=f"https://{t['board']}.jobs.personio.de/job/{pid}", location=p.findtext("office") or "",
+                                posted=posted, source="personio", source_ref=f"pers:{t['board']}:{pid}", domain=t.get("domain"))
+    return out
+
+
+ATS = {"greenhouse": greenhouse, "lever": lever, "ashby": ashby, "workday": workday, "smartrecruiters": smartrecruiters, "recruitee": recruitee, "workable": workable,
+       "personio": personio}
 
 
 async def detect_board(client: httpx.AsyncClient, company: str, domain: Optional[str]) -> Optional[dict]:
@@ -186,11 +268,14 @@ async def detect_board(client: httpx.AsyncClient, company: str, domain: Optional
     if not stem:
         return None
     probes = [("greenhouse", f"https://boards-api.greenhouse.io/v1/boards/{stem}/jobs"), ("lever", f"https://api.lever.co/v0/postings/{stem}?mode=json&limit=1"),
-              ("ashby", f"https://api.ashbyhq.com/posting-api/job-board/{stem}")]
+              ("ashby", f"https://api.ashbyhq.com/posting-api/job-board/{stem}"), ("smartrecruiters", f"https://api.smartrecruiters.com/v1/companies/{stem}/postings?limit=1"),
+              ("recruitee", f"https://{stem}.recruitee.com/api/offers/"), ("workable", f"https://apply.workable.com/api/v1/widget/accounts/{stem}")]
     for ats, url in probes:
         try:
             r = await client.get(url, timeout=15)
-            if r.status_code == 200 and r.text.strip() not in ("[]", ""):
+            body = r.text.strip()
+            empty = body in ("[]", "") or '"totalFound":0' in body.replace(" ", "") or '"offers":[]' in body.replace(" ", "") or '"jobs":[]' in body.replace(" ", "")
+            if r.status_code == 200 and not empty:
                 return {"company": company, "domain": domain, "ats": ats, "board": stem}
         except httpx.HTTPError:
             continue
@@ -262,6 +347,7 @@ async def dns_records(client: httpx.AsyncClient, domain: str, use_crtsh: bool = 
     import dns.asyncresolver
     import dns.exception
     import dns.resolver
+    import providers as pv
     resolver = dns.asyncresolver.Resolver()
     resolver.lifetime = 8
     out: Dict[str, List[str]] = {}
@@ -271,7 +357,10 @@ async def dns_records(client: httpx.AsyncClient, domain: str, use_crtsh: bool = 
         except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
             out[rtype] = []
         except (dns.exception.DNSException, OSError):
-            continue
+            if pv.keyless_on():  # the local resolver failed: ask public DNS-over-HTTPS instead
+                got = await doh(client, domain, rtype)
+                if got is not None:
+                    out[rtype] = got
     if use_crtsh:
         try:
             r = await client.get("https://crt.sh/", params={"q": f"%.{domain}", "output": "json", "exclude": "expired"}, timeout=25)
@@ -280,7 +369,33 @@ async def dns_records(client: httpx.AsyncClient, domain: str, use_crtsh: bool = 
                 out["CERT"] = sorted(n for n in names if n.endswith(domain))
         except (httpx.HTTPError, ValueError):
             pass
+        if "CERT" not in out and pv.keyless_on():  # crt.sh is often overloaded: Cert Spotter is the same public logs
+            try:
+                import radar_sources
+                out["CERT"] = (await radar_sources._sub_certspotter(client, domain))["hosts"]
+            except (httpx.HTTPError, ValueError):
+                pass
     return out
+
+
+DOH = ("https://dns.google/resolve", "https://cloudflare-dns.com/dns-query")
+
+
+async def doh(client: httpx.AsyncClient, domain: str, rtype: str) -> Optional[List[str]]:
+    """Records from public DNS-over-HTTPS resolvers (Google, then Cloudflare); None when both fail."""
+    for url in DOH:
+        try:
+            r = await client.get(url, params={"name": domain, "type": rtype}, headers={"Accept": "application/dns-json"}, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+        except (httpx.HTTPError, ValueError):
+            continue
+        if data.get("Status") == 3:  # NXDOMAIN
+            return []
+        want = {"MX": 15, "TXT": 16}[rtype]
+        return sorted({str(a.get("data") or "").strip('"').split(" ", 1)[-1].rstrip(".") if rtype == "MX" else str(a.get("data") or "").strip('"')
+                       for a in data.get("Answer") or [] if a.get("type") == want})
+    return None
 
 
 def dns_signals_from(company: str, domain: str, records: Dict[str, List[str]], previous: Optional[Dict[str, List[str]]] = None) -> List[dict]:
@@ -289,11 +404,16 @@ def dns_signals_from(company: str, domain: str, records: Dict[str, List[str]], p
     out = []
 
     def signal(rtype: str, value: str, action: str) -> Optional[dict]:
-        key = _fingerprint(value if rtype != "CERT" else value.split("." + domain)[0] + ".")
+        key = _fingerprint(value if rtype not in ("CERT", "SUB") else value.split("." + domain)[0] + ".")
         if not key:
             return None
         comp = rm.COMPETITOR_BY_KEY[key]
         verb = {"present": "points to", "added": "now points to", "removed": "no longer points to"}[action]
+        if rtype in ("SUB", "PDNS"):  # passive DNS: a host named for the product, or a CNAME into the vendor's service
+            return {"company": company, "domain": domain, "type": "cert" if rtype == "SUB" else "dns", "source": "passive_dns", "source_ref": f"{domain}|{rtype}|{value}",
+                    "record_type": rtype, "record_value": value[:300], "competitor_key": key, "competitor_product": comp["product"], "action": "present",
+                    "title": f"Host {value[:80]} " + ("is named for " if rtype == "SUB" else "is an alias into ") + comp["vendor"], "evidence_text": f"{rtype} {value[:200]}",
+                    "evidence_url": f"https://crt.sh/?q={value}" if rtype == "SUB" else f"https://dns.google/query?name={value}&type=CNAME"}
         return {"company": company, "domain": domain, "type": "cert" if rtype == "CERT" else "dns", "source": "crtsh" if rtype == "CERT" else "dns",
                 "source_ref": f"{domain}|{rtype}|{value}" + ("" if action == "present" else f"|{action}"), "record_type": rtype, "record_value": value[:300],
                 "competitor_key": key, "competitor_product": comp["product"], "action": action,
@@ -323,10 +443,10 @@ _EVENT_WORDS = re.compile(r"\b(acqui\w+|merger|divest\w*|spin-?off|moderni[sz]\w
 
 
 async def news_signals(client: httpx.AsyncClient, company: str, domain: Optional[str] = None) -> List[dict]:
-    import seo
+    import radar_sources
     q = f'"{company}" (archiving OR decommission OR "legacy systems" OR migration OR acquisition OR modernization OR recordkeeping)'
     try:
-        items = await seo._news(client, q)
+        items = await radar_sources.news(client, q, days=WINDOW_DAYS, bulk=True)
     except Exception as e:  # noqa: BLE001 - RSS feeds fail in many small ways
         logger.warning("news failed for %s: %s", company, e)
         return []
