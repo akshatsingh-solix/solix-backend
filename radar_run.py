@@ -417,14 +417,17 @@ async def daily(steps: Iterable[str] = ("collect", "enrich", "score", "research"
 
 def main(argv: list) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    cmd = argv[1] if len(argv) > 1 else "daily"
+    if cmd == "sources":
+        print(pv.report())
+        return 0
     if not os.environ.get("MONGO_URL"):
         print("MONGO_URL is not set; nothing to do.")
         return 0
-    cmd = argv[1] if len(argv) > 1 else "daily"
     steps = {"daily": ("collect", "enrich", "score", "research", "digest"), "collect": ("collect", "score"), "enrich": ("enrich", "score"), "score": ("score",),
              "research": ("research",), "digest": ("digest",)}.get(cmd)
     if not steps:
-        print("usage: python radar_run.py [daily|collect|enrich|score|research|digest]")
+        print("usage: python radar_run.py [daily|collect|enrich|score|research|digest|sources]")
         return 2
     counts = asyncio.run(daily(steps, by="scheduler"))
     print("radar run finished:", {k: v for k, v in counts.items() if not isinstance(v, str) or k == "steps"})

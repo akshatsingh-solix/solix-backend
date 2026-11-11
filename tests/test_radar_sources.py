@@ -476,3 +476,24 @@ def test_data_sources_screen_lists_every_chain_and_can_switch_one_off(client):
     assert client.post("/api/admin/radar/providers/nope/test").json() == {"ok": False, "detail": "Unknown provider"}
     meta = client.get("/api/admin/radar/meta").json()
     assert meta["live_sources"]["chains"]["web_search"] == 0 and {s["key"] for s in meta["segments"]} == {"enterprise", "mid_market", "smb"}
+
+
+# --- Go-live helpers: the health check and the keys report ------------------------------------------------------
+
+def test_health_flags_a_chain_whose_keys_have_all_run_dry(client, monkeypatch):
+    import ops
+    monkeypatch.setenv("A_KEY", "x")
+    _registry(monkeypatch, Spec("a", "t", "A", ("A_KEY",)), Spec("free", "t", "Keyless", ()))
+    checks = {c["code"]: c for c in run(ops.watchdog())}
+    assert checks["radar_sources"]["ok"]  # a set-up provider with allowance left
+    pv._rest(pv.SPEC_BY_NAME["a"], 600, "out of credits")
+    checks = {c["code"]: c for c in run(ops.watchdog())}
+    assert not checks["radar_sources"]["ok"] and "Test" in checks["radar_sources"]["detail"]
+    health = client.get("/api/admin/ops/health").json()
+    assert any(c["code"] == "radar_sources" for c in health["checks"])
+
+
+def test_keys_report_names_variables_but_never_values(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-super-secret")
+    out = pv.report()
+    assert "Web search: 1 of 10 set up - Tavily" in out and "SERPER_API_KEY" in out and "tvly-super-secret" not in out

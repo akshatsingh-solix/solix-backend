@@ -219,10 +219,27 @@ async def watchdog() -> list:
     if out.get("paused") and out.get("pause_reason"):
         await check("outbound_paused", False, "Outbound paused", out["pause_reason"], "fail")
 
+    dry, searchable = await radar_sources_health()
+    await check("radar_sources", not dry, "Radar data sources",
+                f"every provider is resting or out of its free allowance for: {', '.join(dry)}. Add another key in Radar > Setup > Data sources" if dry
+                else "every chain with a key has a provider ready" if searchable else "no web-search key set up yet: deep dives and Find people use signals only")
     await check("unassigned", unrouted == 0, "Unassigned strong accounts", f"{unrouted} strong account(s) without an owner for over 24h")
     await check("needs_routing", conflicts == 0, "Accounts needing routing", f"{conflicts} account(s) the territory rules couldn't place")
     await check("outbox_failed", failed == 0, "Deliveries", f"{failed} Slack/Digiprise/email deliveries failed in the last 24h")
     return checks
+
+
+async def radar_sources_health() -> tuple:
+    """(chains whose keyed providers are all resting or out of allowance, whether any web search is set up)."""
+    try:
+        import providers as pv
+        st = await pv.status()
+    except Exception:  # noqa: BLE001 - a health check must not fail the watchdog
+        logger.exception("provider status failed")
+        return [], True
+    dry = [c["label"] for c in st["capabilities"] if c["ready"] == 0 and any(p["configured"] and p["enabled"] and not p["keyless"] for p in c["providers"])]
+    searchable = any(p["configured"] and p["enabled"] for c in st["capabilities"] if c["key"] == "web_search" for p in c["providers"])
+    return dry, searchable
 
 
 # --- Background loop ---------------------------------------------------------------

@@ -73,7 +73,8 @@ fully with just MongoDB configured.
   provider that is rate limited or out of credits rests and the next one answers;
   each is paced to its free allowance, counted in MongoDB. Accounts are segmented
   enterprise / mid-market / small business. Sign-up list:
-  [`docs/radar-free-sources.md`](docs/radar-free-sources.md).
+  [`docs/radar-free-sources.md`](docs/radar-free-sources.md); step-by-step go-live:
+  [`docs/radar-sources-go-live.md`](docs/radar-sources-go-live.md).
 - Daily job: `.github/workflows/radar-daily.yml` (needs the `MONGO_URL` and
   `DB_NAME` secrets). Full method: [`docs/radar-echolocate.md`](docs/radar-echolocate.md).
 

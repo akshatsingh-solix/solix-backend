@@ -1,5 +1,7 @@
 # Radar data sources: free providers with automatic failover
 
+Setting it up, step by step: [`radar-sources-go-live.md`](radar-sources-go-live.md).
+
 Every Radar function now has a **chain** of providers, most of them free. When one is rate
 limited, out of credits, rejects its key or is down, the next one answers, and the Radar keeps
 working. Code: `providers.py` (failover, cooldowns, quotas), `radar_sources.py` (one adapter per
@@ -214,3 +216,6 @@ named providers off from the environment.
 - `POST /api/admin/radar/providers/{name}/test` (admin): one light call.
 - `POST /api/admin/radar/accounts/{id}/enrich`: size, HQ and domain for one account now.
 - `POST /api/admin/radar/run` with `steps` including `enrich`; `python radar_run.py enrich`.
+- `python providers.py` (or the GitHub workflow with steps `sources`): which keys are set, by variable name only.
+- Outbound → Health and the watchdog: a **Radar data sources** check that alerts when every keyed provider
+  of a function is resting or out of allowance.

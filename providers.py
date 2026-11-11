@@ -524,3 +524,21 @@ async def status() -> dict:
         live = sum(1 for r in rows if r["ready"])
         caps.append({"key": cap, **meta, "providers": rows, "ready": live, "configured": sum(1 for r in rows if r["configured"] and r["enabled"])})
     return {"capabilities": caps, "keyless_on": keyless_on(), "config": cfg, "month": _month()}
+
+
+def report() -> str:
+    """Which providers each chain has set up on this machine (names only, never key values), for checking Render or
+    GitHub secrets without the admin: `python providers.py`. Allowances and cooldowns are on the Data sources screen."""
+    lines = []
+    for cap, meta in CAPABILITIES.items():
+        specs = [s for s in SPECS if s.capability == cap]
+        on = [s.label for s in specs if configured(s) and s.name not in _env_disabled()]
+        off = [f"{s.label} ({' + '.join(s.env)})" for s in specs if not configured(s) and s.env]
+        lines.append(f"{meta['label']}: {len(on)} of {len(specs)} set up" + (f" - {', '.join(on)}" if on else ""))
+        if off:
+            lines.append(f"    not set: {', '.join(off)}")
+    return "\n".join(lines)
+
+
+if __name__ == "__main__":
+    print(report())
