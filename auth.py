@@ -1,5 +1,6 @@
 import os
 import uuid
+import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 
@@ -33,6 +34,17 @@ def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
 
 
+# bcrypt is deliberately slow (~0.3s of CPU per call, several seconds on a small
+# instance). Run on the event loop it freezes every other request - site
+# visitors, the admin, the chat - for that long, so request handlers use these.
+async def hash_password_async(password: str) -> str:
+    return await asyncio.to_thread(hash_password, password)
+
+
+async def verify_password_async(plain: str, hashed: str) -> bool:
+    return await asyncio.to_thread(verify_password, plain, hashed)
+
+
 def create_access_token(user_id: str, email: str) -> str:
     payload = {"sub": user_id, "email": email, "type": "access", "exp": datetime.now(timezone.utc) + ACCESS_TTL}
     return jwt.encode(payload, os.environ["JWT_SECRET"], algorithm=JWT_ALGORITHM)
@@ -43,10 +55,10 @@ async def seed_admin() -> None:
     password = os.environ["ADMIN_PASSWORD"]
     existing = await db.users.find_one({"email": email})
     if existing is None:
-        await db.users.insert_one({"id": str(uuid.uuid4()), "email": email, "password_hash": hash_password(password), "name": "Solix Admin", "role": "admin", "created_at": now_iso()})
+        await db.users.insert_one({"id": str(uuid.uuid4()), "email": email, "password_hash": await hash_password_async(password), "name": "Solix Admin", "role": "admin", "created_at": now_iso()})
         logger.info("admin user seeded")
-    elif not verify_password(password, existing["password_hash"]):
-        await db.users.update_one({"email": email}, {"$set": {"password_hash": hash_password(password)}})
+    elif not await verify_password_async(password, existing["password_hash"]):
+        await db.users.update_one({"email": email}, {"$set": {"password_hash": await hash_password_async(password)}})
         logger.info("admin password updated from env")
 
 
@@ -116,7 +128,7 @@ async def login(body: LoginRequest, request: Request):
         await db.login_attempts.delete_one({"identifier": identifier})
 
     user = await db.users.find_one({"email": email, "role": {"$in": list(ROLES)}})
-    if not user or user.get("disabled") or not verify_password(body.password, user["password_hash"]):
+    if not user or user.get("disabled") or not await verify_password_async(body.password, user["password_hash"]):
         await db.login_attempts.update_one({"identifier": identifier}, {"$inc": {"count": 1}, "$set": {"last_attempt": now.isoformat()}}, upsert=True)
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
@@ -137,10 +149,10 @@ class PasswordChange(BaseModel):
 @router.post("/password", status_code=204)
 async def change_password(body: PasswordChange, user: dict = Depends(get_current_admin)):
     full = await db.users.find_one({"id": user["id"]})
-    if not full or not verify_password(body.current_password, full["password_hash"]):
+    if not full or not await verify_password_async(body.current_password, full["password_hash"]):
         raise HTTPException(status_code=400, detail="Your current password is incorrect")
     pw = body.new_password
     if len(pw) < 10 or not any(c.isalpha() for c in pw) or not any(c.isdigit() for c in pw):
         raise HTTPException(status_code=422, detail="Use at least 10 characters with letters and numbers")
-    await db.users.update_one({"id": user["id"]}, {"$set": {"password_hash": hash_password(pw), "password_changed_at": now_iso()}})
+    await db.users.update_one({"id": user["id"]}, {"$set": {"password_hash": await hash_password_async(pw), "password_changed_at": now_iso()}})
     cache.bump("users")

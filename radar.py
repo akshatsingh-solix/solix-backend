@@ -678,9 +678,17 @@ async def legacy(owner: Optional[str] = None):
 
 @router.get("/export.xlsx", dependencies=[can_work])
 async def export_xlsx(owner: Optional[str] = None):
+    data = await rs.legacy_export(owner)
+    runs = await _db().ops_runs.find({"job": {"$regex": "^radar"}}, {"_id": 0}).sort("started_at", -1).limit(200).to_list(200)
+    # CPU-bound: built off the event loop so an export never stalls other requests.
+    buf = await asyncio.to_thread(_radar_workbook, data, runs)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="Competitive_Intent_Radar-{stamp}.xlsx"'})
+
+
+def _radar_workbook(data: dict, run_docs: list) -> io.BytesIO:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill
-    data = await rs.legacy_export(owner)
     wb = Workbook()
     sheets = [("Summary", None), ("Job Postings", "jobs"), ("Problem Signals", "problems"), ("LinkedIn Engagers", "linkedin"), ("DNS Signals", "dns")]
     ws = wb.active
@@ -697,7 +705,7 @@ async def export_xlsx(owner: Optional[str] = None):
             sh.append([_xl(r.get(h)) for h in headers])
     runs = wb.create_sheet("Run Log")
     runs.append(["Job", "Started", "Finished", "Status", "Counts"])
-    async for run in _db().ops_runs.find({"job": {"$regex": "^radar"}}, {"_id": 0}).sort("started_at", -1).limit(200):
+    for run in run_docs:
         runs.append([run["job"], run.get("started_at"), run.get("finished_at"), run.get("status"), str(run.get("counts") or {})])
     for sh in wb.worksheets:
         for c in sh[1]:
@@ -707,8 +715,7 @@ async def export_xlsx(owner: Optional[str] = None):
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
-    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="Competitive_Intent_Radar-{stamp}.xlsx"'})
+    return buf
 
 
 def _xl(v):

@@ -17,7 +17,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 import cache
 import scoring
-from auth import ROLES, get_current_admin, hash_password, require_roles
+from auth import ROLES, get_current_admin, hash_password_async, require_roles
 from database import db, now_iso
 from intent import get_scoring_settings, rescore_all, rollup_lead
 
@@ -322,6 +322,37 @@ def _cell(lead: dict, key: str):
     return "" if v is None else v
 
 
+def _leads_workbook(headers: list, rows: list, leads: list) -> io.BytesIO:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Leads"
+    ws.append(headers)
+    for r in rows:
+        ws.append([_xl_safe(c) for c in r])
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="0D192D")
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    for i, h in enumerate(headers, 1):
+        ws.column_dimensions[get_column_letter(i)].width = min(40, max(12, len(h) + 2))
+    summary = wb.create_sheet("Summary by product line")
+    summary.append(["Product line", "Leads", "MQL or later", "SQL or later"])
+    for key, label in LINE_LABELS.items():
+        in_line = [l for l in leads if l.get("primary_line") == key]
+        summary.append([label, len(in_line), sum(1 for l in in_line if l["stage"] not in ("lead", "disqualified")), sum(1 for l in in_line if l["stage"] in ("sql", "opportunity", "won"))])
+    for c in summary[1]:
+        c.font = Font(bold=True)
+    summary.column_dimensions["A"].width = 44
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
 @router.get("/leads-export")
 async def export_leads(f: LeadFilters = Depends(filters_dep), format: Literal["csv", "xlsx"] = "csv", sort: str = "score"):
     cursor = db.leads.find(lead_query(f), LEAD_LIST_FIELDS)
@@ -332,33 +363,8 @@ async def export_leads(f: LeadFilters = Depends(filters_dep), format: Literal["c
     headers = [h for h, _ in EXPORT_COLUMNS]
     rows = [[_cell(l, k) for _, k in EXPORT_COLUMNS] for l in leads]
     if format == "xlsx":
-        from openpyxl import Workbook
-        from openpyxl.styles import Font, PatternFill
-        from openpyxl.utils import get_column_letter
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Leads"
-        ws.append(headers)
-        for r in rows:
-            ws.append([_xl_safe(c) for c in r])
-        for c in ws[1]:
-            c.font = Font(bold=True, color="FFFFFF")
-            c.fill = PatternFill("solid", fgColor="0D192D")
-        ws.freeze_panes = "A2"
-        ws.auto_filter.ref = ws.dimensions
-        for i, h in enumerate(headers, 1):
-            ws.column_dimensions[get_column_letter(i)].width = min(40, max(12, len(h) + 2))
-        summary = wb.create_sheet("Summary by product line")
-        summary.append(["Product line", "Leads", "MQL or later", "SQL or later"])
-        for key, label in LINE_LABELS.items():
-            in_line = [l for l in leads if l.get("primary_line") == key]
-            summary.append([label, len(in_line), sum(1 for l in in_line if l["stage"] not in ("lead", "disqualified")), sum(1 for l in in_line if l["stage"] in ("sql", "opportunity", "won"))])
-        for c in summary[1]:
-            c.font = Font(bold=True)
-        summary.column_dimensions["A"].width = 44
-        buf = io.BytesIO()
-        wb.save(buf)
-        buf.seek(0)
+        # Building a workbook is CPU-bound: off the event loop, so a big export never stalls other requests.
+        buf = await asyncio.to_thread(_leads_workbook, headers, rows, leads)
         return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="solix-leads-{stamp}.xlsx"'})
     out = io.StringIO()
     w = csv.writer(out)
@@ -585,6 +591,7 @@ async def get_scoring():
 @router.put("/scoring", dependencies=[admin_only])
 async def put_scoring(body: ScoringIn):
     await db.settings.update_one({"key": "scoring"}, {"$set": {**body.model_dump(), "updated_at": now_iso()}}, upsert=True)
+    cache.bump("scoring")
     n = await rescore_all()
     cache.bump("reports")
     cache.bump("radar_ctx")  # Radar scores decay with the same half-life
@@ -621,7 +628,7 @@ async def create_user(body: UserIn):
     if await db.users.find_one({"email": email}, {"_id": 1}):
         raise HTTPException(status_code=409, detail="A user with this email already exists")
     password = _temp_password()
-    doc = {"id": str(uuid.uuid4()), "email": email, "name": body.name.strip(), "role": body.role, "password_hash": hash_password(password), "created_at": now_iso(), "disabled": False}
+    doc = {"id": str(uuid.uuid4()), "email": email, "name": body.name.strip(), "role": body.role, "password_hash": await hash_password_async(password), "created_at": now_iso(), "disabled": False}
     await db.users.insert_one(dict(doc))
     cache.bump("radar_ctx")  # sales and admin logins are Radar team members
     cache.bump("users")
@@ -639,7 +646,7 @@ async def update_user(user_id: str, body: UserPatch, me: dict = Depends(get_curr
     out: dict = {}
     if body.reset_password:
         password = _temp_password()
-        changes["password_hash"] = hash_password(password)
+        changes["password_hash"] = await hash_password_async(password)
         out["temporary_password"] = password
     if changes:
         await db.users.update_one({"id": user_id}, {"$set": changes})
