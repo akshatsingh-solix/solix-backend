@@ -893,7 +893,7 @@ async def basic_extract(client: httpx.AsyncClient, url: str) -> Optional[dict]:
         if r.status_code != 200 or "html" not in r.headers.get("content-type", ""):
             return None
         m = re.search(r"(?is)<title[^>]*>(.*?)</title>", r.text)
-        return {"title": (m.group(1).strip() if m else ""), "text": _html_text(r.text)[:8000]}
+        return {"title": (m.group(1).strip() if m else ""), "text": (await asyncio.to_thread(_html_text, r.text))[:8000]}
     except httpx.HTTPError:
         return None
 

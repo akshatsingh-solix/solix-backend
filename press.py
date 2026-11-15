@@ -1,3 +1,4 @@
+import asyncio
 import io
 import re
 from pathlib import Path
@@ -91,6 +92,7 @@ async def press_pdf(req: PressPdfRequest):
     story += [Spacer(1, 10), HRFlowable(width="100%", thickness=0.6, color=colors.HexColor("#CBD5E1"), spaceAfter=10)]
     story += [Paragraph("About Solix Technologies", s["h2"]), Paragraph(_clean(req.boilerplate), s["small"]), Spacer(1, 6), Paragraph(f"<b>Media contact:</b> {_clean(req.contact)}", s["small"]), Paragraph("###", ParagraphStyle("end", fontName="Helvetica", fontSize=9, textColor=SLATE, alignment=1, spaceBefore=14))]
 
-    doc.build(story)
+    # Typesetting is CPU-bound and this endpoint is public: keep it off the event loop.
+    await asyncio.to_thread(doc.build, story)
     buf.seek(0)
     return StreamingResponse(buf, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="solix-press-{req.id}.pdf"'})

@@ -16,7 +16,7 @@ import jwt
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
-from auth import hash_password, verify_password, JWT_ALGORITHM, MAX_ATTEMPTS, LOCKOUT, _client_ip
+from auth import hash_password_async, verify_password_async, JWT_ALGORITHM, MAX_ATTEMPTS, LOCKOUT, _client_ip
 from database import db, now_iso
 from emailer import notify_lead
 from intent import record_submission
@@ -140,7 +140,7 @@ async def signup(body: SignupRequest):
     doc.update(
         id=str(uuid.uuid4()),
         email=email,
-        password_hash=hash_password(body.password),
+        password_hash=await hash_password_async(body.password),
         plan="trial",
         trial_ends_at=(now + timedelta(days=TRIAL_DAYS)).isoformat(),
         created_at=now.isoformat(),
@@ -186,7 +186,7 @@ async def signin(body: SigninRequest, request: Request):
         await db.login_attempts.delete_one({"identifier": identifier})
 
     account = await db.accounts.find_one({"email": email})
-    if not account or not verify_password(body.password, account["password_hash"]):
+    if not account or not await verify_password_async(body.password, account["password_hash"]):
         await db.login_attempts.update_one({"identifier": identifier}, {"$inc": {"count": 1}, "$set": {"last_attempt": now.isoformat()}}, upsert=True)
         raise HTTPException(status_code=401, detail="Incorrect email or password.")
 

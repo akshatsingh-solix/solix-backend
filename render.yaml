@@ -5,6 +5,8 @@ services:
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    # Render only routes traffic to a new deploy once this answers, so deploys don't 502.
+    healthCheckPath: /api/
     envVars:
       - key: MONGO_URL
         sync: false

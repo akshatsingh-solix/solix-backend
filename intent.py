@@ -56,8 +56,11 @@ def _s(v, n: int) -> Optional[str]:
 
 
 async def get_scoring_settings() -> dict:
-    doc = await db.settings.find_one({"key": "scoring"}, {"_id": 0}) or {}
-    return {**scoring.DEFAULT_SETTINGS, **{k: doc[k] for k in scoring.DEFAULT_SETTINGS if k in doc}}
+    """Read on every tracking beacon, so memoised briefly; saving the settings clears it (cache.bump("scoring"))."""
+    async def load():
+        doc = await db.settings.find_one({"key": "scoring"}, {"_id": 0}) or {}
+        return {**scoring.DEFAULT_SETTINGS, **{k: doc[k] for k in scoring.DEFAULT_SETTINGS if k in doc}}
+    return dict(await cache.memo("scoring", "settings", 30, load))
 
 
 def _touch(ctx: dict, landing: Optional[str]) -> dict:

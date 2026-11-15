@@ -613,6 +613,26 @@ def _cell(r: dict, key: str):
     return "" if v is None else v
 
 
+def _registrations_workbook(headers: list, data: list) -> io.BytesIO:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Registrations"
+    ws.append(headers)
+    for row in data:
+        ws.append(row)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="0D192D")
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
 @admin.get("/{slug}/registrations-export")
 async def export(slug: str, format: Literal["csv", "xlsx"] = "csv", q: Optional[str] = None, status: Optional[str] = None, ticket: Optional[str] = None,
                  interest: Optional[str] = None, checked_in: Optional[bool] = None):
@@ -621,22 +641,8 @@ async def export(slug: str, format: Literal["csv", "xlsx"] = "csv", q: Optional[
     headers = [h for h, _ in EXPORT]
     data = [[_cell(r, k) for _, k in EXPORT] for r in rows]
     if format == "xlsx":
-        from openpyxl import Workbook
-        from openpyxl.styles import Font, PatternFill
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Registrations"
-        ws.append(headers)
-        for row in data:
-            ws.append(row)
-        for c in ws[1]:
-            c.font = Font(bold=True, color="FFFFFF")
-            c.fill = PatternFill("solid", fgColor="0D192D")
-        ws.freeze_panes = "A2"
-        ws.auto_filter.ref = ws.dimensions
-        buf = io.BytesIO()
-        wb.save(buf)
-        buf.seek(0)
+        # CPU-bound: built off the event loop so a large export never stalls other requests.
+        buf = await asyncio.to_thread(_registrations_workbook, headers, data)
         return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="{slug}-registrations-{stamp}.xlsx"'})
     out = io.StringIO()
     w = csv.writer(out)
