@@ -30,7 +30,15 @@ services:
       - key: MISTRAL_API_KEY
         sync: false
       - key: SOL_PROVIDER_ORDER
-        value: gemini,groq,mistral,openrouter,openai,custom
+        value: local,openai,groq,openrouter,gemini,mistral,custom
+      # Your own model (Ollama / llama.cpp / vLLM), e.g. https://llm.example.com/v1.
+      # Order, models and which providers may answer are set in Admin > Conversations > Control.
+      - key: SOL_LOCAL_BASE_URL
+        sync: false
+      - key: SOL_LOCAL_API_KEY
+        sync: false
+      - key: SOL_LOCAL_MODELS
+        value: qwen2.5:7b-instruct
       - key: OPENAI_API_KEY
         sync: false
       # Free models for Sol (CHAT_MODELS) and the SEO AI answer check (OPENROUTER_MODELS).

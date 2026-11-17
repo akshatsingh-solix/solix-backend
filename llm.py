@@ -22,10 +22,14 @@ Configure with environment variables. Any provider whose key is set is used:
   CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN
                       Workers AI (daily free allowance)   SOL_CLOUDFLARE_MODELS
   HF_TOKEN            Hugging Face inference router       SOL_HF_MODELS
+  SOL_LOCAL_BASE_URL  a model you run yourself with Ollama, llama.cpp or vLLM  SOL_LOCAL_MODELS
+                      (e.g. http://my-box:11434/v1; prompts never leave your machine, no per-token cost)
   SOL_CUSTOM_BASE_URL + SOL_CUSTOM_API_KEY + SOL_CUSTOM_MODELS
                       any other OpenAI-compatible endpoint (vLLM, Ollama,
                       Together, Cerebras, a model you host on Render, ...)
-  SOL_PROVIDER_ORDER  comma-separated order, default gemini,groq,mistral,openrouter,openai,custom
+  SOL_PROVIDER_ORDER  comma-separated order, default local,gemini,groq,mistral,openrouter,openai,custom
+                      (Admin > Conversations > Control overrides this order, the models and
+                      which providers may answer, without a redeploy; see sol_config.py)
                       (providers set up but not named are tried after these, in the order above)
   LLM_PII_PROVIDERS   providers allowed to see prospect personal data (Radar
                       deep dives, outbound openers, reply classification),
@@ -34,6 +38,7 @@ Configure with environment variables. Any provider whose key is set is used:
 import os
 import json
 import time
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Dict, List, Optional
@@ -97,9 +102,12 @@ def configured_providers() -> List[Provider]:
     if os.environ.get("HF_TOKEN"):
         known["huggingface"] = Provider("huggingface", "https://router.huggingface.co/v1", os.environ["HF_TOKEN"],
                                         _models("SOL_HF_MODELS", "openai/gpt-oss-120b,meta-llama/Llama-3.3-70B-Instruct"))
+    if os.environ.get("SOL_LOCAL_BASE_URL"):
+        known["local"] = Provider("local", os.environ["SOL_LOCAL_BASE_URL"].rstrip("/"), os.environ.get("SOL_LOCAL_API_KEY", ""),
+                                  _models("SOL_LOCAL_MODELS", "qwen2.5:7b-instruct"))
     if os.environ.get("SOL_CUSTOM_BASE_URL") and os.environ.get("SOL_CUSTOM_MODELS"):
         known["custom"] = Provider("custom", os.environ["SOL_CUSTOM_BASE_URL"].rstrip("/"), os.environ.get("SOL_CUSTOM_API_KEY", ""), _models("SOL_CUSTOM_MODELS", ""))
-    order = [p.strip() for p in os.environ.get("SOL_PROVIDER_ORDER", "gemini,groq,mistral,openrouter,openai,custom").split(",")]
+    order = [p.strip() for p in os.environ.get("SOL_PROVIDER_ORDER", "local,gemini,groq,mistral,openrouter,openai,custom").split(",")]
     ordered = [known[p] for p in order if p in known]
     return ordered + [p for n, p in known.items() if n not in order]
 
@@ -115,8 +123,64 @@ def pii_providers() -> List[Provider]:
     return [p for p in configured_providers() if p.name in allowed]
 
 
+# Providers whose terms keep prompts out of model training by default: your own machine,
+# your own endpoint, and OpenAI's API. Free tiers (Gemini free, OpenRouter ":free" models and
+# others) may log or train on prompts. Admin > Sol control can mark any provider either way.
+PRIVATE_BY_DEFAULT = {"local", "custom", "openai"}
+
+
 class ProviderError(Exception):
     pass
+
+
+# --- health, per (provider, model): what the admin control screen shows ---
+_stats: Dict[tuple, dict] = {}
+
+
+def _record(key: tuple, ok: bool, ttft_ms: Optional[float] = None, error: str = "") -> None:
+    s = _stats.setdefault(key, {"ok": 0, "failed": 0, "ttft_ms": None, "last_ok": None, "last_error": None, "last_error_at": None})
+    if ok:
+        s["ok"] += 1
+        s["last_ok"] = time.time()
+        if ttft_ms is not None:
+            # Moving average of time to first token, so one slow answer doesn't dominate.
+            s["ttft_ms"] = round(ttft_ms if s["ttft_ms"] is None else s["ttft_ms"] * 0.8 + ttft_ms * 0.2)
+    else:
+        s["failed"] += 1
+        s["last_error"], s["last_error_at"] = error[:200], time.time()
+
+
+def health() -> List[dict]:
+    now = time.monotonic()
+    return [{"provider": p, "model": m, **s, "resting_seconds": max(0, round(_cooldown.get((p, m), 0) - now))} for (p, m), s in sorted(_stats.items())]
+
+
+# --- concurrency: a provider (a local model above all) serves only so many answers at once ---
+_slots: Dict[str, asyncio.Semaphore] = {}
+_slot_sizes: Dict[str, int] = {}
+
+
+def _slot(name: str, size: Optional[int]) -> Optional[asyncio.Semaphore]:
+    if not size:
+        return None
+    if _slot_sizes.get(name) != size:
+        _slots[name], _slot_sizes[name] = asyncio.Semaphore(size), size
+    return _slots[name]
+
+
+# One pooled client for every answer: no TLS handshake per message, which is most of the
+# latency on a short reply, and a bounded number of sockets under a burst of visitors.
+_shared: Optional[httpx.AsyncClient] = None
+_shared_loop = None
+
+
+def shared_client() -> httpx.AsyncClient:
+    global _shared, _shared_loop
+    loop = asyncio.get_running_loop()
+    if _shared is None or _shared.is_closed or _shared_loop is not loop:
+        _shared_loop = loop
+        _shared = httpx.AsyncClient(timeout=httpx.Timeout(45, connect=8), limits=httpx.Limits(max_connections=200, max_keepalive_connections=40))
+    return _shared
 
 
 # (provider, model) -> monotonic time until which it is skipped after a rate limit or outage.
@@ -188,43 +252,70 @@ async def _stream_one(client: httpx.AsyncClient, p: Provider, model: str, messag
 
 
 async def stream_completion(messages: list, tools: Optional[list] = None, max_tokens: int = 900, temperature: float = 0.6, providers: Optional[List[Provider]] = None,
-                            client: Optional[httpx.AsyncClient] = None) -> AsyncIterator[dict]:
+                            client: Optional[httpx.AsyncClient] = None, first_token_timeout: Optional[float] = None,
+                            concurrency: Optional[Dict[str, int]] = None) -> AsyncIterator[dict]:
     """Streams one assistant turn, failing over across providers and models.
 
     Yields {"type": "text", "text"}, {"type": "tool_calls", "calls"} and
     finally {"type": "meta", "provider", "model"}. Raises ProviderError when
     every provider fails before producing output.
+
+    first_token_timeout: a model that hasn't started answering within this many
+    seconds is abandoned for the next one, so a slow free tier never holds a visitor.
+    concurrency: {provider: max answers at once}; a provider that is full is passed
+    over for the next one (or waited for, when it is the last choice).
     """
     providers = configured_providers() if providers is None else providers
     if not providers:
         raise ProviderError("No AI provider is configured")
-    own = client is None
-    client = client or httpx.AsyncClient(timeout=httpx.Timeout(45, connect=8))
+    client = client or shared_client()
     errors = []
-    try:
-        candidates = [(p, m) for p in providers for m in p.models]
-        # If everything is cooling down, try anyway rather than refuse.
-        ready = [c for c in candidates if _available((c[0].name, c[1]))] or candidates
-        for p, model in ready:
-            started = False
+    candidates = [(p, m) for p in providers for m in p.models]
+    # If everything is cooling down, try anyway rather than refuse.
+    ready = [c for c in candidates if _available((c[0].name, c[1]))] or candidates
+    for n, (p, model) in enumerate(ready):
+        last = n == len(ready) - 1
+        slot = _slot(p.name, (concurrency or {}).get(p.name))
+        if slot is not None and slot.locked() and not last:
+            errors.append(f"{p.name}/{model}: busy")
+            continue
+        started, t0 = False, time.monotonic()
+        try:
+            if slot is not None:
+                await slot.acquire()
             try:
-                async for event in _stream_one(client, p, model, messages, tools, max_tokens, temperature):
-                    started = True
+                gen = _stream_one(client, p, model, messages, tools, max_tokens, temperature).__aiter__()
+                while True:
+                    try:
+                        if not started and first_token_timeout:
+                            event = await asyncio.wait_for(gen.__anext__(), first_token_timeout)
+                        else:
+                            event = await gen.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError:
+                        await gen.aclose()
+                        raise ProviderError(f"no answer within {first_token_timeout:g}s")
+                    if not started:
+                        started = True
+                        _record((p.name, model), True, (time.monotonic() - t0) * 1000)
                     yield event
-                if not started:
-                    # Free models sometimes spend the whole budget thinking and say nothing.
-                    raise ProviderError("empty reply")
-                yield {"type": "meta", "provider": p.name, "model": model}
-                return
-            except (ProviderError, httpx.HTTPError) as e:
-                msg = str(e) or e.__class__.__name__
-                if started:
-                    # Text already reached the visitor; switching models mid-answer would garble it.
-                    raise ProviderError(f"{p.name}/{model} failed mid-stream: {msg}")
-                _cool((p.name, model), COOLDOWN_RATE_LIMIT if "429" in msg or "quota" in msg.lower() else COOLDOWN_ERROR)
-                errors.append(f"{p.name}/{model}: {msg}")
-                logger.warning("Sol provider %s/%s unavailable, trying next: %s", p.name, model, msg[:200])
-        raise ProviderError("; ".join(errors) or "No provider answered")
-    finally:
-        if own:
-            await client.aclose()
+            finally:
+                if slot is not None:
+                    slot.release()
+            if not started:
+                # Free models sometimes spend the whole budget thinking and say nothing.
+                raise ProviderError("empty reply")
+            yield {"type": "meta", "provider": p.name, "model": model}
+            return
+        except (ProviderError, httpx.HTTPError) as e:
+            msg = str(e) or e.__class__.__name__
+            if started:
+                # Text already reached the visitor; switching models mid-answer would garble it.
+                _record((p.name, model), False, error=f"mid-stream: {msg}")
+                raise ProviderError(f"{p.name}/{model} failed mid-stream: {msg}")
+            _record((p.name, model), False, error=msg)
+            _cool((p.name, model), COOLDOWN_RATE_LIMIT if "429" in msg or "quota" in msg.lower() else COOLDOWN_ERROR)
+            errors.append(f"{p.name}/{model}: {msg}")
+            logger.warning("Sol provider %s/%s unavailable, trying next: %s", p.name, model, msg[:200])
+    raise ProviderError("; ".join(errors) or "No provider answered")

@@ -7,10 +7,16 @@ the API keeps itself in sync with the live site (re-checked every few hours);
 the copy committed here is the fallback when the site cannot be reached.
 Published CMS content (the `content` collection) is merged in and refreshed
 every few minutes, so articles published in the admin are answerable without
-a redeploy; gated items contribute only their summary. Everything is ranked with BM25 (the keyword ranking
+a redeploy; gated items (lead magnets) contribute their summary, topics and
+form path, never their body. Admin-approved learned answers (sol_learning.py)
+are indexed too. Publishing in the admin bumps the "content" cache
+generation, which rebuilds the index on the next message, so new content is
+answerable at once; a background loop also refreshes every few minutes so
+every worker and scheduled items catch up. Everything is ranked with BM25 (the keyword ranking
 behind most search engines), in-process: no embedding API to pay for or rate
 limit, no vector database, and it fits easily in a free instance's memory.
 """
+import asyncio
 import json
 import logging
 import math
@@ -42,6 +48,11 @@ SYNONYMS = {
     "office": "offices", "address": "offices headquarters", "phone": "offices contact",
     "partner": "partners", "reseller": "partners distribution", "press": "media",
     "demo": "contact", "trial": "free trial", "ecc": "sap", "s4": "s/4hana", "hana": "s/4hana",
+    "cloud": "cloud migration solixcloud", "moving": "migration", "move": "migration", "migrate": "migration", "lift": "migration",
+    "merger": "m&a acquisition preservation", "mergers": "m&a acquisition preservation", "acquisition": "m&a merger preservation",
+    "acquired": "m&a merger preservation", "divestiture": "m&a preservation",
+    "vendors": "why solix differentiators", "vendor": "why solix differentiators", "competitors": "why solix differentiators",
+    "hipaa": "healthcare", "hospital": "healthcare", "patient": "healthcare", "bank": "financial services", "banking": "financial services",
 }
 
 
@@ -67,9 +78,14 @@ class Index:
         self.docs = [Counter(tokenize(f"{c['title']} {c['title']} {c['text']}")) for c in chunks]
         self.lens = [sum(d.values()) for d in self.docs]
         self.avg = (sum(self.lens) / len(self.lens)) if self.lens else 1
-        df = Counter(t for d in self.docs for t in d)
+        # Postings: term -> [(chunk, frequency)], so a query touches only chunks that share a term
+        # (milliseconds over thousands of chunks, which matters under concurrent visitors).
+        self.postings: dict = {}
+        for i, d in enumerate(self.docs):
+            for t, f in d.items():
+                self.postings.setdefault(t, []).append((i, f))
         n = len(chunks)
-        self.idf = {t: math.log(1 + (n - f + 0.5) / (f + 0.5)) for t, f in df.items()}
+        self.idf = {t: math.log(1 + (n - len(p) + 0.5) / (len(p) + 0.5)) for t, p in self.postings.items()}
 
     def _expand(self, query: str) -> List[str]:
         terms = tokenize(query)
@@ -80,18 +96,14 @@ class Index:
         terms = self._expand(query)
         if not terms:
             return []
-        scored = []
-        for i, d in enumerate(self.docs):
-            if kinds and self.chunks[i]["kind"] not in kinds:
+        scores: dict = {}
+        for t in terms:
+            idf = self.idf.get(t)
+            if idf is None:
                 continue
-            s = 0.0
-            for t in terms:
-                f = d.get(t)
-                if f:
-                    s += self.idf[t] * f * (self.k1 + 1) / (f + self.k1 * (1 - self.b + self.b * self.lens[i] / self.avg))
-            if s > 0:
-                scored.append((s, i))
-        scored.sort(reverse=True)
+            for i, f in self.postings[t]:
+                scores[i] = scores.get(i, 0.0) + idf * f * (self.k1 + 1) / (f + self.k1 * (1 - self.b + self.b * self.lens[i] / self.avg))
+        scored = sorted(((s, i) for i, s in scores.items() if s > 0 and (not kinds or self.chunks[i]["kind"] in kinds)), reverse=True)
         return [{**self.chunks[i], "score": round(s, 2)} for s, i in scored[:k]]
 
 
@@ -99,6 +111,12 @@ _index: Optional[Index] = None
 _bundled: Optional[List[dict]] = None
 _cms_checked: Optional[float] = None  # monotonic time of the last CMS load
 _site_checked: Optional[float] = None  # monotonic time of the last live-site fetch
+_content_gen: Optional[int] = None  # cache.generation("content") the index was built at
+_version = 0  # bumps on every rebuild; the answer cache keys on it
+_cms_items = 0
+_learned_items = 0
+_built_at: Optional[str] = None
+_lock: Optional[asyncio.Lock] = None
 
 
 def bundled_chunks() -> List[dict]:
@@ -118,6 +136,31 @@ def index() -> Index:
     return _index
 
 
+def version() -> int:
+    return _version
+
+
+def invalidate() -> None:
+    """Rebuild on the next message (new content published, an answer learned)."""
+    global _cms_checked
+    _cms_checked = None
+
+
+def stats() -> dict:
+    chunks = index().chunks
+    kinds = Counter(c["kind"] for c in chunks)
+    return {
+        "chunks": len(chunks),
+        "documents": len({c["url"] or c["id"] for c in chunks}),
+        "site_chunks": len(bundled_chunks()),
+        "cms_items": _cms_items,
+        "learned": _learned_items,
+        "by_kind": dict(kinds.most_common()),
+        "built_at": _built_at,
+        "version": _version,
+    }
+
+
 def cms_chunks(doc: dict) -> List[dict]:
     """Retrieval chunks for one published CMS item: a summary, then one per heading section."""
     slug, title = doc.get("slug"), (doc.get("title") or "").strip()
@@ -125,8 +168,17 @@ def cms_chunks(doc: dict) -> List[dict]:
         return []
     url, kind = f"/resources/{slug}", doc.get("type") or "article"
     gated = bool(doc.get("gated"))
-    header = f"{title} ({kind}{', gated download: visitors unlock it with a short form' if gated else ''}). {doc.get('summary') or ''}"
-    out = [{"id": f"cms:{slug}", "kind": "cms", "title": title, "url": url, "text": header.strip()}]
+    header = f"{title} ({kind}{', gated download: visitors unlock it with a short form on the page' if gated else ''}). {doc.get('summary') or ''}"
+    facets = [
+        doc.get("tag") and f"Topic: {doc['tag']}",
+        doc.get("products") and f"Related products: {', '.join(doc['products'])}",
+        doc.get("industries") and f"Industries: {', '.join(doc['industries'])}",
+        doc.get("file_id") and "Includes a downloadable file" + (" (lead magnet: offer it, the form unlocks it)" if gated else ""),
+        doc.get("event_date") and f"Event date: {doc['event_date']}",
+        doc.get("seo_description") if doc.get("seo_description") and doc.get("seo_description") != doc.get("summary") else None,
+    ]
+    header = "\n".join([header.strip(), *[f for f in facets if f]])
+    out = [{"id": f"cms:{slug}", "kind": "cms", "title": title, "url": url, "text": header}]
     if gated or not doc.get("body"):
         return out
     body = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", doc["body"])  # drop images
@@ -174,26 +226,48 @@ async def refresh_site(force: bool = False) -> bool:
 
 
 async def refresh_cms(db, force: bool = False) -> None:
-    """Merge live CMS content into the index; cheap no-op between refreshes."""
-    global _index, _cms_checked
+    """Merge live CMS content and learned answers into the index; cheap no-op between refreshes."""
+    global _index, _cms_checked, _content_gen, _version, _cms_items, _learned_items, _built_at, _lock
+    import cache
+
     if await refresh_site():
         force = True
+    gen = cache.generation("content")
+    if gen != _content_gen:
+        force = True  # something was published, edited or unpublished in this process
     if not force and _cms_checked is not None and time.monotonic() - _cms_checked < CMS_REFRESH_SECONDS:
         return
-    _cms_checked = time.monotonic()
-    now = datetime.now(timezone.utc).isoformat()
-    try:
-        docs = await db.content.find(
-            {"status": {"$in": ["published", "scheduled"]}, "publish_at": {"$lte": now}},
-            {"_id": 0, "slug": 1, "title": 1, "summary": 1, "body": 1, "type": 1, "gated": 1},
-        ).to_list(1000)
-    except Exception:
-        logger.exception("Sol could not load CMS content; answering from site knowledge only")
-        return
-    cms = [c for d in docs for c in cms_chunks(d)]
-    # A CMS item replaces the built-in article at the same address.
-    urls = {c["url"] for c in cms}
-    _index = Index([c for c in bundled_chunks() if c["url"] not in urls] + cms)
+    if _lock is None:
+        _lock = asyncio.Lock()
+    if _lock.locked():
+        # Another request is rebuilding (it takes well under a second): wait and use its result.
+        async with _lock:
+            return
+    async with _lock:
+        _cms_checked, _content_gen = time.monotonic(), gen
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            docs = await db.content.find(
+                {"status": {"$in": ["published", "scheduled"]}, "publish_at": {"$lte": now}},
+                {"_id": 0, "slug": 1, "title": 1, "summary": 1, "body": 1, "type": 1, "gated": 1, "tag": 1, "products": 1, "industries": 1,
+                 "file_id": 1, "event_date": 1, "seo_description": 1},
+            ).to_list(5000)
+        except Exception:
+            logger.exception("Sol could not load CMS content; answering from site knowledge only")
+            return
+        cms = [c for d in docs for c in cms_chunks(d)]
+        import sol_learning
+
+        learned = await sol_learning.learned_chunks()
+        # A CMS item replaces the built-in article at the same address.
+        urls = {c["url"] for c in cms}
+        chunks = [c for c in bundled_chunks() if c["url"] not in urls] + cms + learned
+        # Tokenising a few thousand chunks takes a moment: off the event loop, so other visitors aren't held up.
+        built = await asyncio.get_running_loop().run_in_executor(None, Index, chunks)
+        _index, _cms_items, _learned_items = built, len(docs), len(learned)
+        _version += 1
+        _built_at = now
+        logger.info("Sol knowledge rebuilt: %d chunks (%d site, %d CMS items, %d learned)", len(chunks), len(bundled_chunks()), len(docs), len(learned))
 
 
 def search(query: str, k: int = 5) -> List[dict]:
@@ -204,7 +278,8 @@ def format_context(hits: List[dict], max_chars: int = 6000) -> str:
     """Retrieved chunks as a compact, citable block for the prompt."""
     parts, used = [], 0
     for h in hits:
-        block = f"[{h['title']}] (page: {h['url']})\n{h['text']}"
+        where = f"(page: {h['url']})" if h.get("url") else "(approved answer)"
+        block = f"[{h['title']}] {where}\n{h['text']}"
         if used + len(block) > max_chars:
             block = block[: max(0, max_chars - used)]
         if not block:

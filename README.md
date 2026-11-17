@@ -80,22 +80,26 @@ fully with just MongoDB configured.
 
 ## Sol, the AI concierge
 
-Sol answers visitors in the site's chat widget on free-tier models.
+Sol answers visitors in the site's chat widget. Full guide (control panel,
+security layer, learning, local model, testing): [`docs/sol-ai.md`](docs/sol-ai.md).
 
 - **Open conversation.** Sol answers general questions (concepts, regulations,
   architecture, competitors, small talk) from the model's own knowledge and
   reasoning, and uses site content as the authority for Solix-specific facts
   (products, outcomes, pricing, customers), which it never invents.
   Comparison questions ("how is it better", "vs X") always bring in the
-  differentiators. `SOL_TEMPERATURE` (default 0.6) sets how conversational it is.
+  differentiators. Temperature, answer length and the rest are set in
+  Admin → Conversations → Control.
 - **Grounded answers.** `sol_knowledge.json` holds every product, solution,
   industry, article, press release, job, partner programme and service page
   of the site (~150 sections, each with its URL), generated in the Website
   repo by `frontend/scripts/sol-knowledge.js` and published with every site
   deploy. With `SITE_KNOWLEDGE_URL` set, the API pulls the live copy every
   few hours; the file committed here is only the fallback for when the site
-  cannot be reached. Published CMS content is merged in
-  automatically every 10 minutes (gated items: summary only). Each question
+  cannot be reached. All published CMS content (including imported pages and
+  lead magnets: gated items contribute summary, topics and form path) and
+  admin-approved learned answers are merged in at startup, on every publish,
+  and every 10 minutes. Each question
   is matched with BM25 keyword search in-process, and the best sections go
   into the prompt, so Sol quotes the site and links the page it drew on.
 - **Tools.** `search_site`, `create_demo_request` and
@@ -117,12 +121,17 @@ Sol answers visitors in the site's chat widget on free-tier models.
   limited, down or returns an empty reply is skipped and rested for a minute.
   If all fail, the widget falls back to its scripted concierge.
 - **Limits.** Each request stays under `SOL_INPUT_TOKEN_BUDGET` (default
-  5000) input tokens and `SOL_MAX_OUTPUT_TOKENS` (default 900), so it always
-  fits Groq's free 8K tokens-per-minute cap. Visitors are rate-limited per
-  session (20 per 5 min) and per IP (60 per hour).
-- **Admin → Sol chats** (admin and sales roles): every conversation, its
-  page, the model that answered, and whether it became a lead.
-  `GET /api/chat/status` shows which providers are active.
+  5000) input tokens and the admin's answer-length cap, so it fits Groq's
+  free 8K tokens-per-minute cap. Visitors are rate-limited per session
+  (20 per 5 min), per IP (60 per hour) and per day (set in Control), and at
+  most `SOL_MAX_CONCURRENT_STREAMS` (default 80) answers stream at once.
+- **Protection.** Coding requests, jailbreaks, key/model probes, hacking and
+  free-LLM use are refused before any model is called (`sol_guard.py`), and
+  every reply is scrubbed of code blocks and anything key-shaped.
+- **Admin → Conversations** (admin and sales roles): every conversation with
+  the visitor profile, the model that answered, latency and guard events;
+  tabs for Control, Knowledge (gaps, learned answers, admin-only web
+  research) and Quality. `GET /api/chat/status` says only whether AI is on.
 
 Set at least one key (Groq alone is enough):
 
@@ -133,10 +142,12 @@ Set at least one key (Groq alone is enough):
 | Mistral | `MISTRAL_API_KEY` | `mistral-small-latest` (`SOL_MISTRAL_MODELS`) |
 | OpenRouter | `OPENROUTER_API_KEY` | `CHAT_MODELS` (or `SOL_OPENROUTER_MODELS`) |
 | OpenAI (paid) | `OPENAI_API_KEY` | `OPENAI_MODEL` (default `gpt-4o-mini`) |
+| Your own local model (Ollama, llama.cpp, vLLM) | `SOL_LOCAL_BASE_URL`, `SOL_LOCAL_API_KEY` (optional) | `qwen2.5:7b-instruct` (`SOL_LOCAL_MODELS`) |
 | Any OpenAI-compatible server | `SOL_CUSTOM_BASE_URL`, `SOL_CUSTOM_API_KEY`, `SOL_CUSTOM_MODELS` | — |
 
-`SOL_PROVIDER_ORDER` (default `gemini,groq,mistral,openrouter,openai,custom`)
-sets the order among the providers that have keys. With Groq only, free
+`SOL_PROVIDER_ORDER` (default `local,gemini,groq,mistral,openrouter,openai,custom`)
+sets the order among the providers that have keys until an admin saves an
+order in Admin → Conversations → Control, which then wins. With Groq only, free
 limits (per model: 30 requests/min, 1,000/day, 8K tokens/min, 200K
 tokens/day) cover roughly 100+ visitor messages a day. Free tiers may use
 prompts to improve their models; switch to a paid key (same variables)
