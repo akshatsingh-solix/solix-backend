@@ -211,6 +211,10 @@ def chat_app(monkeypatch):
     chat.ALERTS = alerts
     monkeypatch.setattr(chat, "configured_providers", lambda: [provider("a")])
     chat._hits.clear()
+    chat._daily.clear()
+    import sol_config, sol_learning
+    monkeypatch.setattr(sol_config, "_cached", None)
+    sol_learning._mem.clear()
     # Each test starts from the bundled knowledge and re-reads the CMS.
     monkeypatch.setattr(sol_search, "_index", None)
     monkeypatch.setattr(sol_search, "_cms_checked", None)
@@ -360,7 +364,7 @@ def test_long_conversation_request_stays_under_budget(chat_app, monkeypatch):
     messages, tools, kw = sent[0]
     total = sum(chat._tokens(m["content"]) for m in messages) + chat._tokens(json.dumps(tools))
     assert total <= chat.INPUT_TOKEN_BUDGET
-    assert kw["max_tokens"] == chat.MAX_OUTPUT_TOKENS
+    assert kw["max_tokens"] == chat.sol_config.SolConfig().max_output_tokens
     # Newest history survives, oldest is dropped, and the latest question is last.
     assert "message 15" in messages[-2]["content"] and not any("message 0 " in m["content"] for m in messages)
     assert messages[-1]["content"].startswith("What about SAP ECC")
@@ -438,7 +442,7 @@ def test_comparison_questions_bring_the_differentiators(chat_app, monkeypatch):
     assert "(page: /platform#why-solix)" in comparison and "not a portfolio of acquisitions" in comparison
     # Nothing on the site matches small talk: Sol is told to use its own knowledge, not to deflect.
     assert "answer from your own knowledge" in small_talk and "(page: /" not in small_talk.split("Site knowledge for this turn:")[1]
-    assert seen[0][1]["temperature"] == chat.TEMPERATURE
+    assert seen[0][1]["temperature"] == chat.sol_config.SolConfig().temperature
 
 
 def test_temperature_reaches_the_provider():
@@ -457,7 +461,7 @@ def test_temperature_reaches_the_provider():
 def test_prompt_allows_general_knowledge_but_guards_solix_facts():
     import knowledge
     p = knowledge.CONCIERGE_SYSTEM_PROMPT
-    assert "Use it freely for anything general" in p
+    assert "Use your general expertise" in p
     assert "Solix-specific facts" in p and "Never invent Solix numbers" in p
 
 

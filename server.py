@@ -14,6 +14,8 @@ from emailer import notify_lead
 from auth import router as auth_router, seed_admin, get_current_admin
 from admin import router as admin_router
 from chat import router as chat_router
+from sol_admin import router as sol_admin_router
+import sol_search
 from press import router as press_router
 from accounts import router as accounts_router
 from intent import router as intent_router, record_submission, rescore_all
@@ -106,6 +108,7 @@ app.include_router(api_router)
 app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(chat_router)
+app.include_router(sol_admin_router)
 app.include_router(press_router)
 app.include_router(accounts_router)
 app.include_router(intent_router)
@@ -220,6 +223,15 @@ async def on_startup():
         db.radar_dns.create_index("domain", unique=True),
         db.ops_alerts.create_index([("code", 1), ("created_at", -1)]),
         db.webhook_events.create_index("received_at"),
+        # Sol: learning, personalisation, answer cache, quality insights.
+        db.sol_gaps.create_index("key", unique=True),
+        db.sol_gaps.create_index([("status", 1), ("count", -1)]),
+        db.sol_learned.create_index("id", unique=True),
+        db.sol_profiles.create_index("session_id", unique=True),
+        db.sol_profiles.create_index([("visitor_id", 1), ("updated_at", -1)]),
+        db.sol_answer_cache.create_index("key", unique=True),
+        db.sol_answer_cache.create_index("expires_at", expireAfterSeconds=0),
+        db.chat_messages.create_index([("role", 1), ("created_at", -1)]),
     )
     await seed_admin()
     import radar_service  # Settings → Sales team becomes the Leads Radar's reps, once
@@ -227,6 +239,8 @@ async def on_startup():
         asyncio.create_task(radar_service.recompute_all())
     await resume_interrupted()
     asyncio.create_task(_rescore_loop())
+    # Sol knows every published item from the first message, and keeps up on its own.
+    asyncio.create_task(_sol_knowledge_loop())
     # Outbox, outbound sender and watchdog (Radar + EchoLocate); OPS_LOOP=0 turns it off.
     ops.start_background()
 
@@ -244,6 +258,16 @@ async def _rescore_loop():
             await radar_service.recompute_all()
         except Exception:
             logger.exception("periodic radar recompute failed")
+
+
+async def _sol_knowledge_loop():
+    """Load the site, CMS and learned knowledge at startup, then refresh every few minutes."""
+    while True:
+        try:
+            await sol_search.refresh_cms(db, force=True)
+        except Exception:
+            logger.exception("Sol knowledge refresh failed")
+        await asyncio.sleep(sol_search.CMS_REFRESH_SECONDS)
 
 
 @app.on_event("shutdown")

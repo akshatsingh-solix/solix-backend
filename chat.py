@@ -18,6 +18,9 @@ from emailer import notify_lead
 from intent import record_submission
 import chat_leads
 from llm import ProviderError, configured_providers, stream_completion
+import sol_config
+import sol_guard
+import sol_learning
 import sol_search
 
 logger = logging.getLogger("solix.chat")
@@ -29,9 +32,9 @@ HISTORY_CHARS = 1500
 # kept under this many tokens, so one message fits well inside free tiers'
 # per-minute caps (Groq: 8K tokens/min) and each day's quota stretches further.
 INPUT_TOKEN_BUDGET = int(os.environ.get("SOL_INPUT_TOKEN_BUDGET", "5000"))
-MAX_OUTPUT_TOKENS = int(os.environ.get("SOL_MAX_OUTPUT_TOKENS", "900"))
-# Higher is more conversational and varied; lower is more literal.
-TEMPERATURE = float(os.environ.get("SOL_TEMPERATURE", "0.6"))
+# Temperature, answer length and the rest are set in Admin > Conversations > Control (sol_config.py).
+# Answers being written at once across all visitors; past this a visitor gets a quick "busy" instead of a slow queue.
+MAX_CONCURRENT_STREAMS = int(os.environ.get("SOL_MAX_CONCURRENT_STREAMS", "80"))
 # "How is it better", "vs Informatica", "why choose you": always bring the differentiators.
 COMPARISON_RX = re.compile(r"\b(better|best|vs\.?|versus|compare[sd]?|comparison|competitor|competition|alternative|differen\w*|unique|stand out|why (choose|solix|you|pick|should))\b", re.I)
 DIFFERENTIATOR_IDS = ("platform:why-solix", "platform:it-leaders")
@@ -67,6 +70,12 @@ TOOLS = [
                     "job_title": {"type": "string"},
                     "interest": {"type": "string", "description": "Product, solution or problem they care about"},
                     "notes": {"type": "string", "description": "One line on their situation or need, useful for sales follow-up"},
+                    "problem": {"type": "string", "description": "Their problem in one line, in their terms"},
+                    "industry": {"type": "string"},
+                    "systems": {"type": "string", "description": "Systems or data sources involved, comma separated (e.g. SAP ECC, mainframe)"},
+                    "goals": {"type": "string", "description": "What they want: cut cost, compliance, retire apps, migrate, privacy, AI (comma separated)"},
+                    "timeline": {"type": "string"},
+                    "data_volume": {"type": "string"},
                 },
             },
         },
@@ -109,6 +118,9 @@ TOOLS = [
 ]
 
 
+PROFILE_ARGS = ("problem", "industry", "systems", "goals", "timeline", "data_volume")
+
+
 class ChatRequest(BaseModel):
     session_id: str = Field(min_length=6, max_length=80)
     message: str = Field(min_length=1, max_length=2000)
@@ -131,6 +143,18 @@ class ChatMessage(BaseModel):
 # --- abuse protection: per-session and per-IP sliding windows (in memory; one instance) ---
 _hits = defaultdict(deque)
 LIMITS = {"session": (20, 300), "ip": (60, 3600)}  # (messages, seconds)
+_daily: dict = {}  # (utc date, ip) -> messages today
+_inflight = 0
+
+
+def _daily_limited(ip: str, limit: int) -> bool:
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    if len(_daily) > 50000:
+        for k in [k for k in _daily if k[0] != day]:
+            _daily.pop(k, None)
+    n = _daily.get((day, ip), 0) + 1
+    _daily[(day, ip)] = n
+    return n > limit
 
 
 def _rate_limited(kind: str, key: str) -> bool:
@@ -271,8 +295,9 @@ def _sources(message: str) -> List[dict]:
 
 @router.get("/status")
 async def chat_status():
-    """Which AI providers are configured (names only), for health checks."""
-    return {"ai": bool(configured_providers()), "providers": [p.name for p in configured_providers()], "knowledge_chunks": len(sol_search.index().chunks)}
+    """Whether AI answers are on. Which providers and models answer is admin-only (sol_admin.py)."""
+    cfg = await sol_config.load()
+    return {"ai": bool(cfg.enabled and sol_config.route(cfg, configured_providers()))}
 
 
 @router.post("/capture")
@@ -297,10 +322,20 @@ async def clear_chat_history(session_id: str):
     return None
 
 
+def _stream_text(text: str, size: int = 28):
+    """A ready answer (cache or guard) sent in small pieces, so the widget renders it like a live one."""
+    for i in range(0, len(text), size):
+        yield sse({"delta": text[i:i + size]})
+
+
 @router.post("/stream")
 async def chat_stream(req: ChatRequest, request: Request):
-    if _rate_limited("session", req.session_id) or _rate_limited("ip", _client_ip(request)):
+    ip = _client_ip(request)
+    if _rate_limited("session", req.session_id) or _rate_limited("ip", ip):
         raise HTTPException(status_code=429, detail="Too many messages. Please wait a moment.")
+    cfg = await sol_config.load()
+    if _daily_limited(ip, cfg.daily_ip_limit):
+        raise HTTPException(status_code=429, detail="You've reached today's chat limit. Please contact us at /contact and a Solix expert will help.")
     # Contact details are saved from the message itself before any model runs,
     # so a lead is never lost to a model that didn't notice, or wasn't up.
     captured = {}
@@ -310,88 +345,190 @@ async def chat_stream(req: ChatRequest, request: Request):
             captured = await chat_leads.capture(req.session_id, found, trusted=False, page=req.page, language=req.language, visitor_id=req.visitor_id)
     except Exception:
         logger.exception("chat lead capture failed")
-    if not configured_providers():
+    # What the visitor's situation is, read from every message (no model needed).
+    prior = {}
+    try:
+        profile = prior = await sol_learning.get_profile(req.session_id, req.visitor_id)
+        seen = sol_learning.read_message(req.message)
+        if seen or (profile.get("returning") and not profile.get("session_id")):
+            profile = await sol_learning.update_profile(req.session_id, seen, req.visitor_id, profile)
+    except Exception:
+        logger.exception("visitor profile update failed")
+        profile = {}
+
+    # The protection layer: coding, jailbreaks, key probes and free-LLM use never reach a model.
+    verdict = sol_guard.screen(req.message, block_code=cfg.block_code)
+    if verdict:
+        logger.info("Sol guard blocked a %s message in %s", verdict.kind, req.session_id)
+
+        async def guarded():
+            await save_message(req.session_id, "user", req.message, page=req.page, language=req.language, guard=verdict.kind)
+            if captured:
+                yield sse({"event": "lead_captured", "fields": sorted(captured)})
+            for piece in _stream_text(verdict.reply):
+                yield piece
+            await save_message(req.session_id, "assistant", verdict.reply, provider="guard", model=verdict.kind)
+            yield sse({"done": True})
+        return StreamingResponse(guarded(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    routed = sol_config.route(cfg, configured_providers()) if cfg.enabled else []
+    if not routed:
         raise HTTPException(status_code=503, detail="AI concierge is not configured")
+    if _inflight >= MAX_CONCURRENT_STREAMS:
+        raise HTTPException(status_code=503, detail="Sol is busy right now. Please try again in a few seconds.")
 
     recent = await db.chat_messages.find({"session_id": req.session_id}, {"_id": 0, "role": 1, "content": 1}).sort("created_at", -1).to_list(HISTORY_LIMIT)
     history = [{"role": m["role"], "content": m["content"][:HISTORY_CHARS]} for m in reversed(recent)]
 
     await sol_search.refresh_cms(db)
-    lang = LANGUAGE_NAMES.get(req.language.split("-")[0].lower(), "English")
-    context = sol_search.format_context(_retrieve(req.message, history, req.page), max_chars=CONTEXT_CHARS)
-    visitor = f"The visitor is on page {req.page}" + (f' ("{req.page_title}")' if req.page_title else "") + "." if req.page else "Page unknown."
     contact = await chat_leads.get_contact(req.session_id) or {}
+    # What this message alone says is part of the question itself; anything known from before makes it personal.
+    personal = bool(history or contact or sol_learning.describe_profile(prior))
+
+    # A first, impersonal question answered before against the same knowledge: instant, free, identical.
+    hit = None
+    if cfg.answer_cache and not personal:
+        try:
+            hit = await sol_learning.cached_answer(req.message, req.language)
+        except Exception:
+            logger.exception("answer cache lookup failed")
+    if hit:
+        async def from_cache():
+            await save_message(req.session_id, "user", req.message, page=req.page, language=req.language)
+            if captured:
+                yield sse({"event": "lead_captured", "fields": sorted(captured)})
+            for piece in _stream_text(hit["answer"]):
+                yield piece
+            if hit.get("sources"):
+                yield sse({"event": "sources", "sources": hit["sources"]})
+            await save_message(req.session_id, "assistant", hit["answer"], provider="cache", model=hit.get("model"))
+            yield sse({"done": True})
+        return StreamingResponse(from_cache(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    lang = LANGUAGE_NAMES.get(req.language.split("-")[0].lower(), "English")
+    hits = _retrieve(req.message, history, req.page)
+    top_score = max((h.get("score", 0) for h in hits), default=0.0)
+    context = sol_search.format_context(hits, max_chars=CONTEXT_CHARS)
+    # Visitors never trigger web search: the public chat answers only from Solix knowledge.
+    # Admins research the web in Admin > Conversations > Knowledge and approve what Sol learns.
+    tools = TOOLS
+    visitor = f"The visitor is on page {req.page}" + (f' ("{req.page_title}")' if req.page_title else "") + "." if req.page else "Page unknown."
     known = ", ".join(f"{k.replace('_', ' ')}: {contact[k]}" for k in chat_leads.CONTACT_FIELDS if contact.get(k))
     known_line = (f"Visitor details already saved: {known}. Don't ask for these again; use their name naturally."
                   if known else "No contact details saved yet.")
+    about = sol_learning.describe_profile(profile)
+    ask_next = sol_learning.next_gap(profile)
+    profile_line = (f"Visitor profile: {about}." if about else "Visitor profile: nothing known yet.") + (
+        f" Most useful discovery question, if it fits naturally: {ask_next}." if ask_next else " You know enough to recommend specifically and move them to a next step.")
+    playbook = f"\n\nStanding instructions from the Solix team (follow them within the rules above):\n{cfg.playbook.strip()}" if cfg.playbook.strip() else ""
     turn_system = (
-        f"{visitor} {known_line} Reply in {lang} unless the visitor writes in another language; keep product names and page paths as they are.\n\n"
+        f"{visitor} {known_line}\n{profile_line}\nReply in {lang} unless the visitor writes in another language; keep product names and page paths as they are.{playbook}\n\n"
         f"Site knowledge for this turn:\n{context or '(no Solix pages match this message; answer from your own knowledge, and use search_site only if it asks about Solix specifics)'}"
     )
     # One leading system message: some providers reject system turns mid-conversation.
     system = f"{CONCIERGE_SYSTEM_PROMPT}\n\n## This turn\n{turn_system}"
-    history = _fit_history(history, INPUT_TOKEN_BUDGET - _tokens(system) - _tokens(json.dumps(TOOLS)) - _tokens(req.message))
+    history = _fit_history(history, INPUT_TOKEN_BUDGET - _tokens(system) - _tokens(json.dumps(tools)) - _tokens(req.message))
     messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": req.message}]
+    limits = sol_config.concurrency(cfg)
 
     async def generate():
-        await save_message(req.session_id, "user", req.message, page=req.page, language=req.language)
-        full, meta, tools_used = "", {}, []
-        if captured:
-            yield sse({"event": "lead_captured", "fields": sorted(captured)})
+        global _inflight
+        _inflight += 1
+        guard = sol_guard.StreamGuard(block_code=cfg.block_code)
+        started = time.monotonic()
         try:
-            for round_no in range(MAX_TOOL_ROUNDS):
-                text, calls = "", []
-                # The last round gets no tools so the model must answer.
-                async for event in stream_completion(messages, TOOLS if round_no < MAX_TOOL_ROUNDS - 1 else None, max_tokens=MAX_OUTPUT_TOKENS, temperature=TEMPERATURE):
-                    if event["type"] == "text":
-                        text += event["text"]
-                        yield sse({"delta": event["text"]})
-                    elif event["type"] == "tool_calls":
-                        calls = event["calls"]
-                    elif event["type"] == "meta":
-                        meta = {"provider": event["provider"], "model": event["model"]}
-                full += text
-                if not calls:
-                    break
-                messages.append({"role": "assistant", "content": text or None, "tool_calls": [
-                    {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": json.dumps(c["arguments"])}} for c in calls]})
-                for c in calls:
-                    tools_used.append(c["name"])
-                    if c["name"] == "search_site":
-                        hits = sol_search.search(str(c["arguments"].get("query", "")), 4)
-                        outcome = {"results": [{"title": h["title"], "page": h["url"], "text": h["text"][:800]} for h in hits]} if hits else {"results": [], "note": "Nothing on the site matches."}
-                    elif c["name"] == "save_visitor_details":
-                        saved = await chat_leads.capture(req.session_id, c["arguments"], trusted=True, page=req.page, language=req.language, visitor_id=req.visitor_id)
-                        outcome = {"ok": True, "saved": sorted(saved)} if saved else {"ok": True, "note": "Nothing new to save."}
-                        if saved:
-                            yield sse({"event": "lead_captured", "fields": sorted(saved)})
-                    elif c["name"] == "create_demo_request":
-                        outcome = await create_demo_request(req.session_id, c["arguments"])
-                        if outcome.get("ok"):
-                            yield sse({"event": "demo_booked", "submission_id": outcome["submission_id"], "name": c["arguments"].get("name"), "email": c["arguments"].get("email"), "company": c["arguments"].get("company")})
-                    elif c["name"] == "request_expert_contact":
-                        outcome = await request_expert_contact(req.session_id, c["arguments"])
-                        if outcome.get("ok"):
-                            yield sse({"event": "expert_requested", "submission_id": outcome["submission_id"], "name": c["arguments"].get("name"), "email": c["arguments"].get("email")})
-                    else:
-                        outcome = {"ok": False, "error": f"Unknown tool {c['name']}"}
-                    messages.append({"role": "tool", "tool_call_id": c["id"], "name": c["name"], "content": json.dumps(outcome)})
-                if text and not text.endswith(("\n", " ")):
-                    full += "\n\n"
-                    yield sse({"delta": "\n\n"})
-        except ProviderError as e:
-            logger.error("Sol could not answer: %s", e)
-            yield sse({"error": "The concierge is temporarily unavailable. Please try again."})
-            return
+            await save_message(req.session_id, "user", req.message, page=req.page, language=req.language)
+            full, meta, tools_used = "", {}, []
+            if captured:
+                yield sse({"event": "lead_captured", "fields": sorted(captured)})
+            try:
+                for round_no in range(MAX_TOOL_ROUNDS):
+                    text, calls = "", []
+                    # The last round gets no tools so the model must answer.
+                    async for event in stream_completion(messages, tools if round_no < MAX_TOOL_ROUNDS - 1 else None, max_tokens=cfg.max_output_tokens,
+                                                         temperature=cfg.temperature, providers=routed, first_token_timeout=cfg.first_token_timeout,
+                                                         concurrency=limits):
+                        if event["type"] == "text":
+                            text += event["text"]
+                            safe = guard.feed(event["text"])
+                            if safe:
+                                full += safe
+                                yield sse({"delta": safe})
+                        elif event["type"] == "tool_calls":
+                            calls = event["calls"]
+                        elif event["type"] == "meta":
+                            meta = {"provider": event["provider"], "model": event["model"]}
+                    if guard.stopped:
+                        break
+                    if not calls:
+                        break
+                    messages.append({"role": "assistant", "content": text or None, "tool_calls": [
+                        {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": json.dumps(c["arguments"])}} for c in calls]})
+                    for c in calls:
+                        tools_used.append(c["name"])
+                        if c["name"] == "search_site":
+                            found_hits = sol_search.search(str(c["arguments"].get("query", ""))[:200], 4)
+                            tool_score = max((h["score"] for h in found_hits), default=0.0)
+                            best_score[0] = max(best_score[0], tool_score)
+                            outcome = {"results": [{"title": h["title"], "page": h["url"], "text": h["text"][:800]} for h in found_hits]} if found_hits else {"results": [], "note": "Nothing on the site matches."}
+                        elif c["name"] == "save_visitor_details":
+                            args = c["arguments"]
+                            saved = await chat_leads.capture(req.session_id, {k: v for k, v in args.items() if k not in PROFILE_ARGS}, trusted=True, page=req.page,
+                                                             language=req.language, visitor_id=req.visitor_id)
+                            situation = {k: args[k] for k in PROFILE_ARGS if args.get(k)}
+                            if situation:
+                                await sol_learning.update_profile(req.session_id, situation, req.visitor_id)
+                            outcome = {"ok": True, "saved": sorted(saved) + sorted(situation)} if (saved or situation) else {"ok": True, "note": "Nothing new to save."}
+                            if saved:
+                                yield sse({"event": "lead_captured", "fields": sorted(saved)})
+                        elif c["name"] == "create_demo_request":
+                            outcome = await create_demo_request(req.session_id, c["arguments"])
+                            if outcome.get("ok"):
+                                yield sse({"event": "demo_booked", "submission_id": outcome["submission_id"], "name": c["arguments"].get("name"), "email": c["arguments"].get("email"), "company": c["arguments"].get("company")})
+                        elif c["name"] == "request_expert_contact":
+                            outcome = await request_expert_contact(req.session_id, c["arguments"])
+                            if outcome.get("ok"):
+                                yield sse({"event": "expert_requested", "submission_id": outcome["submission_id"], "name": c["arguments"].get("name"), "email": c["arguments"].get("email")})
+                        else:
+                            outcome = {"ok": False, "error": f"Unknown tool {c['name']}"}
+                        messages.append({"role": "tool", "tool_call_id": c["id"], "name": c["name"], "content": json.dumps(outcome)})
+                    if text and not text.endswith(("\n", " ")):
+                        guard.feed("\n\n")
+                rest = guard.flush()
+                if rest:
+                    full += rest
+                    yield sse({"delta": rest})
+            except ProviderError as e:
+                logger.error("Sol could not answer: %s", e)
+                yield sse({"error": "The concierge is temporarily unavailable. Please try again."})
+                return
+            except Exception:
+                logger.exception("chat stream failed")
+                yield sse({"error": "The concierge is temporarily unavailable. Please try again."})
+                return
+            sources = _sources(req.message)
+            if sources:
+                yield sse({"event": "sources", "sources": sources})
+            if full:
+                await save_message(req.session_id, "assistant", full, tools=tools_used or None, guard=guard.events or None,
+                                   latency_ms=round((time.monotonic() - started) * 1000), top_score=top_score, **meta)
+            yield sse({"done": True})
+            await _after_answer(full, meta, tools_used, guard, sources)
+        finally:
+            _inflight -= 1
+
+    best_score = [top_score]
+
+    async def _after_answer(full, meta, tools_used, guard, sources):
+        """Learning and caching; never allowed to break a finished answer."""
+        try:
+            if cfg.learning and full and max(best_score) < sol_learning.GAP_SCORE:
+                await sol_learning.log_gap(req.message, full, round(max(best_score), 2), req.session_id)
+            cacheable = cfg.answer_cache and full and not personal and not guard.events and meta.get("provider") and len(full) > 60 and not (
+                set(tools_used) - {"search_site"}) and not captured
+            if cacheable:
+                await sol_learning.store_answer(req.message, req.language, full, sources, meta["provider"], meta["model"], cfg.cache_hours)
         except Exception:
-            logger.exception("chat stream failed")
-            yield sse({"error": "The concierge is temporarily unavailable. Please try again."})
-            return
-        sources = _sources(req.message)
-        if sources:
-            yield sse({"event": "sources", "sources": sources})
-        if full:
-            await save_message(req.session_id, "assistant", full, tools=tools_used or None, **meta)
-        yield sse({"done": True})
+            logger.exception("Sol learning/caching after an answer failed")
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
