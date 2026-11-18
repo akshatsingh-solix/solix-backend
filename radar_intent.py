@@ -128,8 +128,9 @@ async def import_rows(rows: List[dict], source: str, by: str) -> dict:
             continue
         for sig in sigs:
             company = resolver.resolve(sig["company"], sig.get("domain"), "intent")
-            if sig.get("employees") and not company.get("employees"):
-                resolver.set(company, {"employees": int(sig["employees"])})
+            if sig.get("employees") and sig.get("domain") and sig["domain"] in (company.get("domains") or []):
+                cand = rm.size_candidate(sig["employees"], "intent", "domain")  # domain-matched rows only, never a name match
+                resolver.set(company, {"size_candidates": rm.merge_candidates(company.get("size_candidates"), [cand])})
             ops.append(rs._signal_op(company, {**sig, "meta": {**sig["meta"], "imported_by": by}}))
             touched.add(company["id"])
     await resolver.flush()

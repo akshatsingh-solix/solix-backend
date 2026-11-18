@@ -162,6 +162,56 @@ async def get_or_create_company(name: str, *, domain: Optional[str] = None, hq: 
     return company
 
 
+async def add_size_candidates(company_id: str, candidates: List[dict]) -> None:
+    """Record reported headcounts on an account; recompute decides which one it shows (see rm.size_view)."""
+    cands = [c for c in candidates if c]
+    if not cands:
+        return
+    doc = await _db().companies.find_one({"id": company_id}, {"_id": 0, "size_candidates": 1}) or {}
+    await _db().companies.update_one({"id": company_id}, {"$set": {"size_candidates": rm.merge_candidates(doc.get("size_candidates"), cands)}})
+
+
+SIZE_MIGRATION = "size_v2"
+
+
+async def ensure_size_migration() -> Optional[dict]:
+    """Once per database: re-key accounts so short names stop merging ('RS Group plc' was 'rs', the same key as any
+    'RS Ltd'), keep every stored headcount as a candidate with its source (a person's edit stays verified), and send
+    every automatic one back to be checked again. Returns counts the first time, None after that."""
+    flags = await _db().settings.find_one({"key": "radar_migrations"}, {"_id": 0}) or {}
+    if SIZE_MIGRATION in (flags.get("done") or []):
+        return None
+    counts = {"rekeyed": 0, "manual_sizes": 0, "sizes_to_recheck": 0}
+    ops_ = []
+    async for c in _db().companies.find({}, {"_id": 0, "id": 1, "name": 1, "key": 1, "aliases": 1, "alias_keys": 1, "employees": 1, "employees_source": 1,
+                                             "size_candidates": 1, "history": 1}):
+        sets: dict = {}
+        key = rm.company_key(c.get("name") or "") or c.get("key")
+        alias_keys = sorted({rm.company_key(a) for a in c.get("aliases") or [] if rm.company_key(a)} - {key})
+        if key != c.get("key") or alias_keys != sorted(c.get("alias_keys") or []):
+            sets.update({"key": key, "alias_keys": alias_keys})
+            counts["rekeyed"] += 1
+        if c.get("employees") and not c.get("employees_source"):
+            by_hand = next((h for h in reversed(c.get("history") or []) if h.get("action") == "employees" and h.get("by") not in (None, "system")), None)
+            if by_hand:
+                sets["employees_source"] = {"via": "manual", "match": "manual", "confidence": "high", "by": by_hand["by"], "at": by_hand.get("at")}
+                counts["manual_sizes"] += 1
+            else:
+                sets["size_candidates"] = rm.merge_candidates(c.get("size_candidates"), [
+                    {"value": int(c["employees"]), "via": "unknown", "match": "unknown", "confidence": "low", "at": "2000-01-01T00:00:00+00:00"}])
+                sets["firmo_checked_at"] = None
+                counts["sizes_to_recheck"] += 1
+        if sets:
+            ops_.append(UpdateOne({"id": c["id"]}, {"$set": sets}))
+    if ops_:
+        await _db().companies.bulk_write(ops_, ordered=False)
+        companies_changed()
+    await _db().settings.update_one({"key": "radar_migrations"}, {"$addToSet": {"done": SIZE_MIGRATION}, "$set": {f"{SIZE_MIGRATION}_counts": counts, "updated_at": now_iso()}},
+                                    upsert=True)
+    await recompute_all()
+    return counts
+
+
 def new_company_doc(name: str, key: str, dom: Optional[str], hq: Optional[dict], source: str) -> dict:
     now = now_iso()
     return {
@@ -335,7 +385,7 @@ def _website_intent(leads: list) -> Optional[dict]:
 def _compute(company: dict, signals: list, research: Optional[dict], pending: bool, leads: list, terr: dict, members: list, settings: dict, half_life: float) -> dict:
     roll = rm.rollup(signals, half_life_days=half_life, weights=settings.get("weights") or None, website=_website_intent(leads), research=research)
     update = {**roll, "countries": sorted({s["country"] for s in signals if s.get("country")}), "states": sorted({s["state"] for s in signals if s.get("state")}),
-              "segment": rm.segment_of(company.get("employees"), company.get("revenue_usd") or company.get("revenue_band"), settings.get("segments")),
+              **rm.size_view(company, settings.get("segments")),
               "lead_ids": sorted({l["id"] for l in leads} | set(company.get("lead_ids") or [])), "recomputed_at": now_iso(), "updated_at": now_iso()}
     if research:
         update.update({"research_id": research["id"], "research_score": research.get("score"), "research_verdict": research.get("verdict"), "research_status": research.get("status"), "research_at": research.get("created_at")})
@@ -541,10 +591,18 @@ async def patch_company(company: dict, body: dict, user: dict) -> dict:
     if body.get("notes") is not None and body["notes"] != company.get("notes"):
         sets["notes"] = body["notes"][:5000]
         notes.append(("notes", "Notes updated"))
-    for k in ("is_customer", "revenue_band", "employees", "industry"):
+    for k in ("is_customer", "revenue_band", "industry"):
         if k in body and body[k] is not None and body[k] != company.get(k):
             sets[k] = body[k]
             notes.append((k, f"{k.replace('_', ' ').capitalize()} → {body[k]}"))
+    if "employees" in body and body["employees"] is not None:
+        # A person's headcount is the verified one and no lookup ever replaces it; 0 hands it back to the lookups.
+        if body["employees"] > 0:
+            sets.update({"employees": body["employees"], "employees_source": {"via": "manual", "match": "manual", "confidence": "high", "by": user.get("email"), "at": now_iso()}})
+            notes.append(("employees", f"Employees → {body['employees']:,} (entered by hand)"))
+        elif (company.get("employees_source") or {}).get("match") == "manual":
+            sets.update({"employees": None, "employees_source": None, "firmo_checked_at": None})
+            notes.append(("employees", "Employees cleared: will be looked up again"))
     if body.get("hq") is not None:
         sets["hq"] = {k: v for k, v in body["hq"].items() if k in ("country", "state", "zip", "location") and v}
         notes.append(("hq", "Headquarters updated"))

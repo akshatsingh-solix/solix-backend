@@ -338,6 +338,11 @@ async def background_loop() -> None:
     and the Radar's daily run when it's due (checked every 10 minutes)."""
     n = 0
     await asyncio.sleep(20)
+    try:  # one-time data repairs (Radar company keys and sizes), so they don't wait for the daily run
+        import radar_service
+        await radar_service.ensure_size_migration()
+    except Exception:  # noqa: BLE001
+        logger.exception("radar size repair failed; it is retried by the daily run")
     while True:
         if n % 10 == 0:
             await keep_awake()

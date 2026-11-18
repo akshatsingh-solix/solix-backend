@@ -536,6 +536,20 @@ def _wd_claim_amount(claims: dict, prop: str) -> Tuple[Optional[float], Optional
     return best if best else (None, None)
 
 
+def _wd_websites(claims: dict, name: str) -> List[str]:
+    """Official websites, best first: one whose domain matches the company's name, then preferred rank, then the most recent.
+    (RS Group plc lists electrocomponents.com, its old name, before rsgroup.com.)"""
+    import radar_intel
+    rows = []
+    for i, c in enumerate(claims.get("P856") or []):
+        url = ((c.get("mainsnak") or {}).get("datavalue") or {}).get("value")
+        if not isinstance(url, str) or not url:
+            continue
+        host = urlparse(url if "://" in url else "https://" + url).hostname or ""
+        rows.append((radar_intel.domain_matches(host, name), c.get("rank") == "preferred", i, url))
+    return [r[3] for r in sorted(rows, key=lambda r: (not r[0], not r[1], -r[2]))]
+
+
 def _wd_ids(claims: dict, prop: str) -> List[str]:
     return [((c.get("mainsnak") or {}).get("datavalue") or {}).get("value", {}).get("id") for c in claims.get(prop) or []
             if isinstance(((c.get("mainsnak") or {}).get("datavalue") or {}).get("value"), dict)]
@@ -554,12 +568,17 @@ async def _firmo_wikidata(client, name, domain, country):
     for qid in ids:
         e = ents.get(qid) or {}
         claims = e.get("claims") or {}
-        site = ((((claims.get("P856") or [{}])[0].get("mainsnak") or {}).get("datavalue") or {}).get("value") or "") if claims.get("P856") else ""
         label = ((e.get("labels") or {}).get("en") or {}).get("value", "")
         desc = ((e.get("descriptions") or {}).get("en") or {}).get("value", "")
+        sites = _wd_websites(claims, name)
+        site = sites[0] if sites else ""
+        site_domains = {registrable(urlparse(x).hostname or "") for x in sites}
         score = 0
-        if domain and site and registrable(urlparse(site).hostname or "") == domain:
+        if domain and domain in site_domains:
             score += 10
+            site = next(x for x in sites if registrable(urlparse(x).hostname or "") == domain)
+        elif domain and site_domains:
+            score -= 10  # the entity's own websites aren't the account's: a different company with a similar name
         if rm.company_key(label) == rm.company_key(name):
             score += 4
         if set(_wd_ids(claims, "P31")) & _WD_BUSINESS or re.search(r"\b(company|corporation|bank|insurer|insurance|manufacturer|retailer|conglomerate|business|firm|group|provider)\b", desc, re.I):
@@ -580,7 +599,9 @@ async def _firmo_wikidata(client, name, domain, country):
         lr = await client.get(api, params={"action": "wbgetentities", "ids": "|".join(want), "props": "labels", "languages": "en", "format": "json"}, headers=UA, timeout=20)
         labels = {k: ((v.get("labels") or {}).get("en") or {}).get("value") for k, v in (lr.json().get("entities") or {}).items()} if lr.status_code == 200 else {}
     host = urlparse(site).hostname if site else None
-    return {"employees": int(employees) if employees else None, "revenue_usd": round(revenue * _WD_USD[unit]) if revenue and unit in _WD_USD else None,
+    listed = bool(claims.get("P414")) or "Q891723" in _wd_ids(claims, "P31")
+    return {"match": "domain" if best_score >= 10 else "name", "public": listed or None,
+            "employees": int(employees) if employees else None, "revenue_usd": round(revenue * _WD_USD[unit]) if revenue and unit in _WD_USD else None,
             "industry": next((labels.get(i) for i in _wd_ids(claims, "P452") if labels.get(i)), None), "domain": registrable(host) if host else None,
             "hq": {"country": next((labels.get(i) for i in _wd_ids(claims, "P17") if labels.get(i)), None), "city": next((labels.get(i) for i in _wd_ids(claims, "P159") if labels.get(i)), None)},
             "ids": {"wikidata": qid}, "source_url": f"https://www.wikidata.org/wiki/{qid}"}
@@ -661,7 +682,8 @@ async def _firmo_companies_house(client, name, domain, country):
 
 
 async def _firmo_pdl(client, name, domain, country):
-    params = {"website": domain} if domain else {"name": name[:120]}
+    import radar_model as rm
+    params = {"website": domain} if domain else {"name": name[:120], "min_likelihood": 6}
     r = await client.get("https://api.peopledatalabs.com/v5/company/enrich", params=params, headers={"X-Api-Key": _env("PDL_API_KEY")}, timeout=30)
     if r.status_code == 404:
         return Billed({}, 0)
@@ -669,7 +691,12 @@ async def _firmo_pdl(client, name, domain, country):
     d = r.json()
     loc = d.get("location") or {}
     host = urlparse("https://" + (d.get("website") or "")).hostname if d.get("website") else None
-    return {"employees": employees_of(d.get("employee_count") or d.get("size")), "industry": (d.get("industry") or "").title() or None, "domain": registrable(host) if host else None,
+    if domain and host and registrable(host) != domain:
+        return {}  # PDL answered with another company's profile
+    if not domain and rm.company_key(d.get("name") or d.get("display_name") or "") != rm.company_key(name):
+        return {}  # a fuzzy name match ("RS Group plc" -> some other "RS") is not this company
+    return {"match": "domain" if domain else "name",
+            "employees": employees_of(d.get("employee_count") or d.get("size")), "industry": (d.get("industry") or "").title() or None, "domain": registrable(host) if host else None,
             "hq": {"country": (loc.get("country") or "").title() or None, "state": (loc.get("region") or "").title() or None, "city": (loc.get("locality") or "").title() or None,
                    "zip": loc.get("postal_code")}, "revenue_band": d.get("inferred_revenue"), "linkedin_url": ("https://" + d["linkedin_url"]) if d.get("linkedin_url") else None,
             "source_url": "https://www.peopledatalabs.com"}
@@ -684,7 +711,7 @@ async def _firmo_hunter(client, name, domain, country):
     r.raise_for_status()
     d = r.json().get("data") or {}
     geo = d.get("geo") or {}
-    return {"employees": employees_of((d.get("metrics") or {}).get("employees")), "industry": (d.get("category") or {}).get("industry"),
+    return {"match": "domain", "employees": employees_of((d.get("metrics") or {}).get("employees")), "industry": (d.get("category") or {}).get("industry"),
             "hq": {"country": geo.get("country"), "state": geo.get("stateCode") or geo.get("state"), "city": geo.get("city"), "zip": geo.get("postalCode")},
             "source_url": f"https://hunter.io/companies/{domain}"}
 
@@ -692,7 +719,10 @@ async def _firmo_hunter(client, name, domain, country):
 FIRMO_ADAPTERS = {"wikidata": _firmo_wikidata, "gleif": _firmo_gleif, "sec": _firmo_sec, "companies_house": _firmo_companies_house, "pdl_company": _firmo_pdl, "hunter_company": _firmo_hunter}
 
 
-def _merge_firmo(into: dict, got: dict, via: str) -> None:
+def _merge_firmo(into: dict, got: dict, via: str, name: str = "") -> None:
+    import radar_model as rm
+    if got.get("employees"):
+        into.setdefault("candidates", []).append(rm.size_candidate(got["employees"], via, got.get("match") or "name", name=name, url=got.get("source_url")))
     for k in ("employees", "revenue_usd", "industry", "domain", "revenue_band", "linkedin_url", "legal_name", "public"):
         if got.get(k) not in (None, "") and into.get(k) in (None, ""):
             into[k] = got[k]
@@ -716,7 +746,8 @@ async def firmographics(client: httpx.AsyncClient, name: str, domain: Optional[s
     def complete() -> bool:
         hq = out["hq"]
         located = bool(hq.get("country")) and (rm.country_norm(hq["country"]) not in ("United States", "Canada") or bool(hq.get("state") or hq.get("zip")))
-        return bool(out.get("employees") and located and (out.get("domain") or domain) and out.get("industry"))
+        sized = any(c and c.get("confidence") in ("medium", "high") for c in out.get("candidates") or [])  # a name-only headcount isn't enough
+        return bool(sized and located and (out.get("domain") or domain) and out.get("industry"))
     for spec in await pv.plan("firmographics"):
         if complete():
             break
@@ -726,7 +757,7 @@ async def firmographics(client: httpx.AsyncClient, name: str, domain: Optional[s
         call = FIRMO_ADAPTERS[spec.name]
         ok, got = await pv._attempt(spec, lambda: call(client, name, out.get("domain") or domain, country_now), _noting(problems, "Company lookup failed"))
         if ok and got:
-            _merge_firmo(out, got, spec.name)
+            _merge_firmo(out, got, spec.name, name)
     return out if any(v for k, v in out.items() if k != "hq") or any(out["hq"].values()) else {}
 
 

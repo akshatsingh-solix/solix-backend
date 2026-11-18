@@ -193,6 +193,14 @@ Only if you use **Actions → Radar daily run** by hand: add the same keys as re
 keys the runner has, run the workflow with steps `sources`: it lists variable names that are set or
 missing, never their values.
 
+## Company sizes
+
+A size the system can't stand behind shows as **Size unverified** (amber) with the reason, rather than a
+segment. If you know the real number, open the account → *Account details* → **Employees** → Save: it
+becomes the verified size and no lookup replaces it. **Setup → Run → Re-check doubtful sizes** looks up
+every doubtful one again. After this release deploys, sizes recorded before these checks are re-checked
+automatically (the one-time repair runs a minute after the API starts).
+
 ## Every week (5 minutes)
 
 - **Radar → Setup → Data sources**: any function at **0 ready** or amber? Add another free key for it.
