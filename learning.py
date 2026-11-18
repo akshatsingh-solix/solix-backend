@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
@@ -30,6 +30,7 @@ MIN_SENDS = 8          # enrollments behind a (industry, product) pair before it
 MAX_STEP = 0.2         # largest weekly change of one weight
 BOUNDS = (0.5, 1.5)
 POSITIVE = {"interested", "meeting"}
+LOOKALIKE_MIN = 60     # same bar as the Radar's Lookalikes tab
 DEFAULT_SETTINGS = {"autotune": True, "min_sends": MIN_SENDS}
 
 
@@ -265,7 +266,11 @@ async def review(by: str = "system") -> dict:
         if cfg.get("autotune"):
             applied = await apply(props, by=by, review_id=review_id)
         brief = insights(rows, cov, snap, (prev or {}).get("snapshot"), acc, props, bool(cfg.get("autotune")))
+        looks = await score_lookalikes()
+        brief = journey_insights(await journey_stats()) + committee_insights(await committee_gaps()) + lookalike_insights(looks) + brief
+        narrative = await narrate(brief, snap)
         doc = {"id": review_id, "at": _iso(_now()), "by": by, "snapshot": snap, "coverage": cov, "insights": brief, "proposals": props, "applied": applied,
+               "narrative": narrative, "lookalikes": {k: v for k, v in (looks or {}).items() if k != "lift"} if looks else None,
                "learned": {"persona": rates(rows, "persona"), "seniority": rates(rows, "seniority_band"), "industry": rates(rows, "industry_slug"),
                            "product": rates(rows, "pitch_product"), "opener": rates(rows, "opener_provider"), "quality": rates(rows, "quality_band"),
                            "outcomes": len(rows), "positive": sum(1 for r in rows if r["positive"])}}
@@ -277,6 +282,125 @@ async def review(by: str = "system") -> dict:
             await ops.notify("pipeline", "MarkHub weekly brief:\n- " + "\n- ".join(heads), event="intelligence_brief", key=f"brief:{doc['at'][:10]}")
     doc.pop("_id", None)
     return doc
+
+
+# --- Buying stages, committees, lookalikes, and a written summary --------------------------------------------------
+
+async def journey_stats(days: int = 7) -> dict:
+    """Accounts per buying stage, who moved forward this week, and who has sat in evaluating too long."""
+    import account_intel as ai
+    since = _iso(_now() - timedelta(days=days))
+    stale_before = _iso(_now() - timedelta(days=21))
+    rows = await _db().companies.find({"excluded_reason": None}, {"_id": 0, "id": 1, "name": 1, "journey": 1, "journey_moves": 1}).to_list(None)
+    by_stage = Counter((c.get("journey") or {}).get("stage") or "problem_aware" for c in rows)
+    moved = []
+    for c in rows:
+        for m in c.get("journey_moves") or []:
+            if m.get("at", "") >= since and ai.STAGES.index(m["to"]) > ai.STAGES.index(m["from"]):
+                moved.append({"id": c["id"], "name": c["name"], "to": m["to"]})
+    stalled = [c for c in rows if (c.get("journey") or {}).get("stage") == "evaluating" and ((c.get("journey") or {}).get("since") or "") < stale_before]
+    return {"by_stage": {s: by_stage.get(s, 0) for s in ai.STAGES}, "moved": moved, "stalled": [{"id": c["id"], "name": c["name"]} for c in stalled]}
+
+
+def journey_insights(j: dict) -> List[dict]:
+    import account_intel as ai
+    out = []
+    if j["moved"]:
+        to = Counter(m["to"] for m in j["moved"])
+        names = ", ".join(m["name"] for m in j["moved"][:3])
+        out.append({"kind": "win", "title": f"{len(j['moved'])} account{'s' if len(j['moved']) != 1 else ''} moved forward this week: "
+                                            + ", ".join(f"{n} to {ai.STAGE_LABELS[s].lower()}" for s, n in to.most_common()),
+                    "detail": f"Including {names}.", "action": "Switch them to the buying play: offer the working session.", "link": "/admin/radar?stage=evaluating"})
+    if j["stalled"]:
+        out.append({"kind": "risk", "title": f"{len(j['stalled'])} account{'s' if len(j['stalled']) != 1 else ''} stuck in evaluating for 3+ weeks",
+                    "detail": ", ".join(s["name"] for s in j["stalled"][:3]) + ".", "action": "Bring in a missing committee role or send a business case.",
+                    "link": "/admin/radar?stage=evaluating"})
+    return out
+
+
+async def committee_gaps() -> dict:
+    """Which roles are most often missing on accounts worth working (strong, or past problem-aware)."""
+    rows = await _db().companies.find({"excluded_reason": None, "$or": [{"strength": "Strong"}, {"journey.rank": {"$gte": 1}}]},
+                                      {"_id": 0, "committee": 1}).to_list(None)
+    missing = Counter(m for c in rows for m in (c.get("committee") or {}).get("missing") or [])
+    none = sum(1 for c in rows if (c.get("committee") or {}).get("coverage") == 0)
+    return {"accounts": len(rows), "missing": dict(missing.most_common(4)), "no_contacts": none}
+
+
+def committee_insights(g: dict) -> List[dict]:
+    if not g["accounts"] or not g["missing"]:
+        return []
+    role, n = next(iter(g["missing"].items()))
+    return [{"kind": "opportunity", "title": f"{n} of {g['accounts']} accounts worth working have no contact in {role.split(' (')[0]}",
+             "detail": f"{g['no_contacts']} have nobody from the buying committee yet." if g["no_contacts"] else "",
+             "action": "Use Find people on those accounts; the drawer shows which roles are missing.", "link": "/admin/radar?strength=Strong"}]
+
+
+async def score_lookalikes() -> Optional[dict]:
+    """Score every account against the traits of the accounts that said yes; stored as companies.lookalike."""
+    from pymongo import UpdateOne
+    import account_intel as ai
+    rows = await _db().companies.find({}, {"_id": 0, "id": 1, "name": 1, "status": 1, "journey": 1, "excluded_reason": 1,
+                                           **{f: 1 for f in ai.FEATURE_WEIGHTS}}).to_list(None)
+    model = ai.lookalike_model(rows)
+    if not model:
+        return None
+    positive = set(model["positive_ids"])
+    writes, top = [], []
+    for c in rows:
+        if c["id"] in positive:
+            writes.append(UpdateOne({"id": c["id"]}, {"$set": {"lookalike": None}}))
+            continue
+        s = ai.lookalike_score(c, model)
+        writes.append(UpdateOne({"id": c["id"]}, {"$set": {"lookalike": s}}))
+        if not c.get("excluded_reason"):
+            top.append({"id": c["id"], "name": c["name"], **s})
+    if writes:
+        await _db().companies.bulk_write(writes, ordered=False)
+        rs.companies_changed()
+    top.sort(key=lambda x: -x["score"])
+    return {**model, "top": top[:10], "strong": sum(1 for t in top if t["score"] >= LOOKALIKE_MIN)}
+
+
+def lookalike_insights(looks: Optional[dict]) -> List[dict]:
+    if not looks:
+        return [{"kind": "data", "title": "Lookalikes start after 3 accounts reply positively or reach a meeting",
+                 "detail": "MarkHub then finds accounts with the same industry, size, competitors and signals.", "action": None}]
+    traits = ", ".join(f"{t['feature'].replace('_slug', '').replace('_keys', '').replace('_', ' ')} {str(t['value']).replace('-', ' ')} ({t['lift']}x)"
+                       for t in looks["traits"][:3])
+    if not looks["strong"]:
+        return []
+    return [{"kind": "opportunity", "title": f"{looks['strong']} account{'s look' if looks['strong'] != 1 else ' looks'} like your {looks['positives']} best ones",
+             "detail": (f"What your best accounts share: {traits}. " if traits else "") + "Top: " + ", ".join(t["name"] for t in looks["top"][:3]) + ".",
+             "action": "Work the Lookalikes tab in Radar first.", "link": "/admin/radar?tab=lookalikes"}]
+
+
+async def narrate(brief: List[dict], snap: dict) -> Optional[dict]:
+    """A four-sentence summary for leadership, written by whatever model is available. It sees only aggregate numbers
+    and the brief's own titles (no people), so a free tier is fine; without a model the brief stands on its own."""
+    import llm
+    import privacy
+    providers, _ = privacy.providers_for("brief")
+    if not providers or not brief:
+        return None
+    facts = "\n".join(f"- {i['kind']}: {i['title']}" for i in brief[:12])
+    nums = ", ".join(f"{k.replace('_', ' ')}: {v}" for k, v in snap.items() if k != "at" and v is not None)
+    red = privacy.Redactor()
+    prompt = red.redact(f"This week's numbers: {nums}\nFindings:\n{facts}")
+    out = []
+    try:
+        async for ev in llm.stream_completion([{"role": "system", "content": "You write a four-sentence weekly summary for a B2B marketing and sales leadership team. "
+                                                                          "Use only the facts given. Lead with what changed and why it matters, then the single most "
+                                                                          "important action. Plain English, no bullet points, no hype, no numbers that aren't given."},
+                                               {"role": "user", "content": prompt}], max_tokens=260, temperature=0.3, providers=providers):
+            if ev["type"] == "text":
+                out.append(ev["text"])
+            elif ev["type"] == "meta":
+                provider = ev.get("provider")
+    except llm.ProviderError:
+        return None
+    text = red.restore(" ".join("".join(out).split()))
+    return {"text": text, "provider": locals().get("provider")} if text else None
 
 
 async def latest() -> Optional[dict]:

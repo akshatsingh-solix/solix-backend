@@ -126,10 +126,9 @@ def _kb(company: dict) -> str:
         return ""
 
 
-async def _complete(system: str, user: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+async def _complete(system: str, user: str, providers: Optional[list] = None) -> tuple[Optional[str], Optional[str], Optional[str]]:
     import llm
-    # Sources include leadership pages with named people, so only providers cleared for personal data.
-    providers = llm.pii_providers()
+    providers = providers if providers is not None else llm.pii_providers()
     if not providers:
         return None, None, None
     text, meta = [], {}
@@ -163,24 +162,43 @@ async def research(client: httpx.AsyncClient, company: dict) -> dict:
 
 
 async def _draft(company: dict, sources: List[dict]) -> dict:
+    """With a provider cleared for personal data, the model sees every source. On a free tier (privacy.py) it sees no
+    leadership pages and no names, emails or phone numbers: people are found by the rules on our server instead."""
+    import privacy
+    providers, mode = privacy.providers_for("research")
+    red = None
+    prompt_sources = sources
+    system = SYSTEM
+    if mode == "redacted":
+        red = privacy.Redactor([p["name"] for p in _rules_people(sources)])
+        prompt_sources = [{**s, "title": red.redact(s["title"]), "text": red.redact(s.get("text")), "url": "" if s["kind"] == "web:people" else s.get("url")}
+                          for s in sources if s["kind"] != "web:people"]
+        system = SYSTEM + "\n\n" + privacy.INSTRUCTION + ' Return "contacts": [] (people are added separately).'
     kb = _kb(company)
     facts = (f"Account: {company['name']}\nDomains: {', '.join(company.get('domains') or []) or 'unknown'}\nTerritory: {company.get('territory')}\n"
              f"Competitor products seen: {', '.join(company.get('competitors') or []) or 'none named'}\nSignal types: {', '.join(company.get('signal_types') or [])}\n"
              f"Primary Solix product fit: {company.get('primary_product') or 'unknown'}")
     src_block = "\n\n".join(f"[{s['n']}] {s['title']} ({s.get('date') or 'undated'}) {s.get('url') or ''}\n{(s.get('text') or '')[:2500 if s['kind'] == 'web:people' else 1400 if s['kind'].startswith('web') else 700]}"
-                              for s in sources)
+                              for s in prompt_sources)
     user = f"{facts}\n\nSOURCES\n{src_block or '(no sources)'}\n\nSOLIX KNOWLEDGE\n{kb or '(none)'}\n\nReturn the JSON object now."
-    text, provider, model = await _complete(SYSTEM, user)
+    text, provider, model = await (_complete(system, user, providers) if mode == "redacted" else _complete(system, user))
     data = _parse_json(text or "") if text else None
     if not data:
         return rules_brief(company, sources)
+    if red:
+        data = red.restore(data)
+        data["contacts"] = []
+        provider = f"{provider} (personal data removed)" if provider else provider
     try:
         score = max(0, min(10, int(round(float(data.get("score", 0))))))
     except (TypeError, ValueError):
         score = 0
     verdict = data.get("verdict") or ("Ready for Outreach" if score >= rm.READY_SCORE else "Research More" if score >= 4 else "Not a Fit")
     ft = data.get("first_touch") or {}
-    return {**_people_and_evidence(data.get("contacts"), sources),
+    people = _people_and_evidence(data.get("contacts"), sources)
+    if red:  # free tier: people come from the rules, on our server
+        people["contacts"] = _rules_people(sources)
+    return {**people,
         "score": score, "verdict": verdict, "headline": _text(data.get("headline"))[:500], "summary": _text(data.get("summary"))[:6000],
         "trigger": _text(data.get("trigger"))[:3000], "why_solix_wins": _text(data.get("why_solix_wins"))[:4000],
         "first_touch": {"subject": _text(ft.get("subject"))[:200], "body": _text(ft.get("body"))[:3000]}, "gaps": _text(data.get("gaps"))[:3000], "provider": provider, "model": model,

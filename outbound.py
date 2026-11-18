@@ -240,7 +240,11 @@ async def write_opener(contact: dict, company: Optional[dict]) -> dict:
     opener, provider, quality = None, "rules", None
     if evidence or b.get("industry_reason"):
         import llm
-        providers = llm.pii_providers()
+        import privacy
+        providers, mode = privacy.providers_for("opener")
+        if mode == "redacted":  # the brief carries no names; strip any from the signal and research text too
+            red = privacy.Redactor([contact.get("name"), (sig or {}).get("person")])
+            evidence = [red.redact(e) for e in evidence]
         if providers:
             text = []
             try:
@@ -546,7 +550,10 @@ async def classify(text: str) -> dict:
         if rx.search(t):
             return {"label": label, "reason": "Matched a clear phrase", "by": "rules"}
     import llm
-    providers = llm.pii_providers()
+    import privacy
+    providers, mode = privacy.providers_for("classify")
+    if mode == "redacted":  # a reply is personal: drop the signature and every identifier before a free tier sees it
+        t = privacy.Redactor().redact(t, strip_signature=True)
     if providers:
         out = []
         try:

@@ -106,3 +106,53 @@ Every Monday, after signal weights are re-learned, and on demand with **Review n
 | `PUT /api/admin/intelligence/settings` (admin) | Change settings |
 | `POST /api/admin/intelligence/apply` (admin) | Apply suggested tuning |
 | `POST /api/admin/intelligence/tuning/{id}/revert` (admin) | Undo one change |
+
+## 5. Free AI without personal data (`privacy.py`)
+
+The Radar's AI runs on free model tiers (Gemini free, Groq, Mistral, OpenRouter `:free`, Cerebras, and others).
+Personal data never reaches them:
+
+* **Removed before any call:** email addresses, phone numbers, personal profile links (LinkedIn `/in/`, X, GitHub),
+  and people's names. Names come from the people we know about, plus any "Name, Title" pattern. Each is replaced with a
+  placeholder such as `[PERSON_1]` and put back on our server when the answer arrives.
+* **Deep dives:** leadership pages are never sent. The model returns no contacts; people are found by the rules on
+  our server. The provider shows as, for example, "groq (personal data removed)".
+* **Openers:** the brief carries the role and company only, never the person's name or exact title.
+* **Reply reading:** the signature is cut off and every identifier is removed before classification.
+* **Providers cleared for personal data** (`LLM_PII_PROVIDERS`: OpenAI, your own or a company endpoint) still get the
+  full text when they're configured, and take priority.
+* **Turning it off:** set `RADAR_FREE_AI=off` to keep free tiers out of Radar work completely.
+
+To switch it on, add one free key on Render: `GEMINI_API_KEY` (already set for Sol), `GROQ_API_KEY`, or
+`OPENROUTER_API_KEY`. Live sources then shows **AI model: on · free, personal data removed**.
+
+## 6. Buying stage, committee and lookalikes (`account_intel.py`)
+
+* **Buying stage.** Each account is placed at the furthest stage its evidence supports:
+
+  | Stage | Evidence |
+  |---|---|
+  | Problem aware | Signals |
+  | Exploring | Website visits, intent data, a "not now" reply |
+  | Evaluating | An MQL, 3+ people engaged, an "interested" reply |
+  | In conversation | A meeting, or a sales-accepted lead |
+  | Buying | An opportunity, or won |
+
+  Each stage comes with its play: an **exploration** play (insight, resource, a question) until the account is
+  evaluating, a **buying** play (working session, business case, proof) after that. Stage changes are dated and kept
+  in the account history. You can filter the Radar by buying stage.
+* **Buying committee.** The roles the lead product line needs (for example, archiving needs IT leadership,
+  architecture, compliance and records, and infrastructure). The drawer shows who we have for each role, who has
+  engaged, and which roles are missing.
+* **Lookalikes.** Each week, every account is scored on how strongly it shares the traits of the accounts that
+  replied positively or reached a meeting: industry, size, competitors, signal mix and lead product. The Radar's
+  **Lookalikes** tab lists those scoring 60 or more, with the traits they share. This starts once 3 accounts are
+  positive.
+* **The weekly brief** now also reports:
+  * accounts that moved forward a stage;
+  * accounts stuck in evaluating for 3+ weeks;
+  * the most-missing committee role;
+  * lookalikes.
+
+  It opens with a four-sentence summary written by whichever model is available. The model sees only aggregate
+  numbers.
