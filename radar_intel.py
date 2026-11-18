@@ -384,7 +384,7 @@ async def hunter_people(client: httpx.AsyncClient, domain: Optional[str], limit:
     return {"people": people, "pattern": data.get("pattern"), "domain": domain}
 
 
-async def hunter_email(client: httpx.AsyncClient, domain: str, first: str, last: str) -> Optional[dict]:
+async def hunter_email(client: httpx.AsyncClient, domain: str, first: str, last: str, *, charge: bool = True) -> Optional[dict]:
     """Hunter Email Finder for one person; None when Hunter isn't set up or has no confident answer."""
     import providers as pv
     if not os.environ.get("HUNTER_API_KEY") or not (domain and first and last) or not await pv.usable("hunter_find"):
@@ -398,7 +398,8 @@ async def hunter_email(client: httpx.AsyncClient, domain: str, first: str, last:
     except httpx.HTTPError as exc:
         pv.failed("hunter_find", exc)
         raise
-    await pv.succeeded("hunter_find")
+    if charge:  # called through the email-finder chain, the chain charges it
+        await pv.succeeded("hunter_find")
     d = r.json().get("data") or {}
     if not d.get("email") or (d.get("score") or 0) < 50:
         return None

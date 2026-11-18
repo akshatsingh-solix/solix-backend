@@ -619,12 +619,55 @@ async def find_people(company_id: str, user: dict = Depends(get_current_admin)):
     if not c:
         raise HTTPException(status_code=404, detail="Account not found")
     known = {p["name"] async for p in _db().contacts.find({"company_id": company_id}, {"_id": 0, "name": 1}) if p.get("name")}
-    if not any(radar_intel.sources_available().values()):
-        raise HTTPException(status_code=422, detail="Add FIRECRAWL_API_KEY (web research) or HUNTER_API_KEY (business emails) on the server to find people.")
+    import messaging
+    import providers as pv
+    direct = [n for n in await pv.available("people") if n not in ("web_people", "linkedin_xray")]  # those two need a web-search key
+    if not any(radar_intel.sources_available().values()) and not direct:
+        raise HTTPException(status_code=422, detail="Add FIRECRAWL_API_KEY (web research), HUNTER_API_KEY or PROSPEO_API_KEY on the server to find people.")
     async with httpx.AsyncClient(follow_redirects=True) as client:
         out = await radar_intel.find_people(client, c, known)
+    if out.get("email_pattern") and out["email_pattern"] != c.get("email_pattern"):  # lets Find email try the right address first
+        await _db().companies.update_one({"id": company_id}, {"$set": {"email_pattern": out["email_pattern"]}})
+    # Who each person is on the buying committee; people who fill a missing role come first.
+    missing = {r["persona"] for r in (c.get("committee") or {}).get("roles") or [] if not r.get("have")}
+    needed = {r["persona"] for r in (c.get("committee") or {}).get("roles") or []}
+    for p in out["people"]:
+        pk = messaging.persona_key(p.get("title"))
+        p["persona"] = pk
+        p["persona_label"] = messaging.PERSONAS[pk]["label"].split(" (")[0] if pk else None
+        p["fills"] = "missing" if pk in missing else "committee" if pk in needed else None
+    out["people"].sort(key=lambda p: (0 if p["fills"] == "missing" else 1 if p["fills"] == "committee" else 2 if p.get("persona") else 3, not p.get("email")))
     await rs.add_history(company_id, user["email"], "people", f"People search: {len(out['people'])} candidate(s)")
     return out
+
+
+@router.post("/accounts/{company_id}/phones", dependencies=[can_work])
+async def account_phones(company_id: str, user: dict = Depends(get_current_admin)):
+    """The numbers the company publishes itself (switchboard, media, investor lines, and direct lines printed next to a
+    contact's name). Free: read from its own pages. Direct lines are added to the matching contacts."""
+    import httpx
+    import radar_sources
+    c = await _db().companies.find_one({"id": company_id, **(await _visible(user))}, {"_id": 0})
+    if not c:
+        raise HTTPException(status_code=404, detail="Account not found")
+    if not c.get("domains"):
+        raise HTTPException(status_code=422, detail="Add the account's web domain first (Account → Details)")
+    contacts = await _db().contacts.find({"company_id": company_id}, {"_id": 0, "id": 1, "name": 1, "phone": 1}).to_list(500)
+    problems: List[str] = []
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        phones = await radar_sources.company_phones(client, c["domains"][0], country=(c.get("hq") or {}).get("country"),
+                                                    names=[x["name"] for x in contacts if x.get("name")], problems=problems)
+    added = 0
+    for ph in phones:
+        who = next((x for x in contacts if ph.get("person") and x.get("name") == ph["person"] and not x.get("phone")), None)
+        if who:
+            await _db().contacts.update_one({"id": who["id"]}, {"$set": {"phone": ph["number"], "phone_type": "direct", "phone_status": "published",
+                                                                         "phone_source": "site_phones", "phone_source_url": ph["source_url"], "phone_found_at": rs.now_iso()}})
+            added += 1
+    await _db().companies.update_one({"id": company_id}, {"$set": {"phones": phones, "phones_at": rs.now_iso(),
+                                                                   **({"phone_hq": phones[0]["number"]} if phones and not c.get("phone_hq") else {})}})
+    await rs.add_history(company_id, user["email"], "phones", f"Published numbers: {len(phones)} found" + (f", {added} direct line(s) added to contacts" if added else ""))
+    return {"phones": phones, "contacts_updated": added, "problems": problems}
 
 
 @router.post("/accounts/{company_id}/enrich", dependencies=[can_work])

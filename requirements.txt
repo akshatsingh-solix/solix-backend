@@ -40,3 +40,4 @@ defusedxml>=0.7.1
 trafilatura>=2.0
 # Radar DNS fingerprints and EchoLocate email (MX) verification.
 dnspython>=2.6.1
+phonenumbers>=8.13

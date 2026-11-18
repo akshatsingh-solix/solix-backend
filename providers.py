@@ -88,6 +88,7 @@ CAPABILITIES: Dict[str, dict] = {
     "firmographics": {"label": "Company size and HQ", "why": "Mid-market vs enterprise, HQ for routing, the company's domain"},
     "people": {"label": "People at the account", "why": "Decision makers who work there now"},
     "email_find": {"label": "Email finder", "why": "A named person's work address"},
+    "phone_find": {"label": "Phone numbers", "why": "A person's mobile or direct line, and the company switchboard"},
     "email_verify": {"label": "Email verification", "why": "Mailbox exists before anything is sent"},
     "ip_company": {"label": "Website visitor companies", "why": "Which organisation an anonymous visitor's network belongs to"},
     "dns_history": {"label": "DNS and certificate history", "why": "Subdomains and records that fingerprint a competitor's product"},
@@ -151,13 +152,30 @@ SPECS: List[Spec] = [
          note="Apollo's API access depends on your Apollo plan."),
     Spec("companies_house_officers", "people", "UK Companies House officers", ("COMPANIES_HOUSE_API_KEY",), "Free: directors with active appointments",
          signup=_H + "developer.company-information.service.gov.uk"),
+    Spec("sec_officers", "people", "SEC insider filings (US-listed officers)", (), "Keyless: officers' names and exact titles from Forms 3, 4 and 5",
+         signup=_H + "www.sec.gov/search-filings/edgar-application-programming-interfaces"),
+    Spec("prospeo_people", "people", "Prospeo person search", ("PROSPEO_API_KEY",), "Shares Prospeo's 75 credits: 1 per page of up to 25 people with titles",
+         monthly=75, pool="prospeo", signup=_H + "prospeo.io"),
     # --- a named person's work email ---
     Spec("hunter_find", "email_find", "Hunter Email Finder", ("HUNTER_API_KEY",), "Shares Hunter's 25 searches", monthly=25, pool="hunter", signup=_H + "hunter.io"),
     Spec("tomba_find", "email_find", "Tomba Email Finder", ("TOMBA_KEY", "TOMBA_SECRET"), "Shares Tomba's 25 searches", monthly=25, pool="tomba", signup=_H + "tomba.io"),
     Spec("snov_find", "email_find", "Snov.io Email Finder", ("SNOV_CLIENT_ID", "SNOV_CLIENT_SECRET"), "Shares Snov's 50 credits", monthly=50, pool="snov", signup=_H + "snov.io"),
-    Spec("prospeo", "email_find", "Prospeo", ("PROSPEO_API_KEY",), "75 credits a month", monthly=70, signup=_H + "prospeo.io"),
+    Spec("prospeo", "email_find", "Prospeo", ("PROSPEO_API_KEY",), "75 credits a month (1 per verified email found)", monthly=75, pool="prospeo", signup=_H + "prospeo.io"),
     Spec("skrapp", "email_find", "Skrapp", ("SKRAPP_API_KEY",), "Free monthly email credits", signup=_H + "skrapp.io"),
     Spec("pattern_verify", "email_find", "Address patterns + verification", (), "Keyless when a mailbox verifier is set up", always=True),
+    # --- phone numbers ---
+    Spec("site_phones", "phone_find", "Company website (contact, press and investor pages)", (), "Keyless: switchboard and any direct lines the company publishes",
+         always=True),
+    Spec("prospeo_mobile", "phone_find", "Prospeo mobile", ("PROSPEO_API_KEY",), "Shares Prospeo's 75 credits: 10 per verified mobile found (about 7 a month)",
+         monthly=75, pool="prospeo", signup=_H + "prospeo.io"),
+    Spec("apollo_mobile", "phone_find", "Apollo mobile reveal", ("APOLLO_API_KEY", "PUBLIC_API_URL"), "Apollo's free credits; numbers arrive by webhook within minutes",
+         pool="apollo_phone", signup=_H + "apollo.io", note="Apollo sends the number to MarkHub's webhook, so PUBLIC_API_URL must be set."),
+    Spec("tomba_phone", "phone_find", "Tomba Phone Finder", ("TOMBA_KEY", "TOMBA_SECRET"), "5 phone lookups a month (contacts outside the EU)", monthly=5,
+         pool="tomba_phone", signup=_H + "tomba.io"),
+    Spec("sec_phone", "phone_find", "SEC EDGAR switchboard (US-listed)", (), "Keyless: the business phone a US-listed company files with the SEC", always=True),
+    Spec("wikidata_phone", "phone_find", "Wikidata switchboard", (), "Keyless: published main number for larger organisations", always=True),
+    Spec("site_switchboard", "phone_find", "Company website switchboard", (), "Keyless: the main number on the company's own pages; ask for the person by name",
+         always=True),
     # --- does the mailbox exist ---
     Spec("reacher", "email_verify", "Reacher (self-hosted)", ("REACHER_URL",), "Unlimited on your own server", signup=_H + "reacher.email"),
     Spec("mailboxvalidator", "email_verify", "MailboxValidator", ("MAILBOXVALIDATOR_API_KEY",), "300 API credits on the free plan, which can expire", grant=300,
@@ -329,9 +347,26 @@ async def charge(spec: Spec, units: int = 1) -> None:
             logger.debug("usage write failed for %s", pool)
 
 
+def pool_monthly(spec: Spec) -> Optional[int]:
+    """A provider with no allowance of its own spends its pool's (Hunter's company lookups use Hunter's 25 searches)."""
+    if spec.monthly is not None or not spec.pool:
+        return spec.monthly
+    return next((s.monthly for s in SPECS if s.quota_pool == spec.quota_pool and s.monthly is not None), None)
+
+
 async def limits(spec: Spec) -> Tuple[Optional[int], Optional[int]]:
     over = (await config())["limits"].get(spec.quota_pool) or {}
-    return over.get("monthly", spec.monthly), over.get("daily", spec.daily)
+    return over.get("monthly", pool_monthly(spec)), over.get("daily", spec.daily)
+
+
+async def set_usage(pool: str, units: int, source: str = "provider") -> None:
+    """Replace this month's count with the provider's own figure (its account endpoint), so the bar shows the truth."""
+    import database
+    now = _now()
+    month = now.strftime("%Y-%m")
+    await database.db.provider_usage.update_one({"pool": pool, "month": month}, {"$set": {"units": int(units), "synced_from": source, "synced_at": now.isoformat()}},
+                                               upsert=True)
+    _usage.pop(pool, None)
 
 
 GRANT_HORIZON_DAYS = 60  # one-time credits with no expiry date are spread as if they had to last this long

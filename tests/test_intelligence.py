@@ -301,3 +301,50 @@ def test_journey_and_committee_on_accounts_and_in_the_review(client):
     rev = client.post("/api/admin/intelligence/review").json()
     assert any("moved forward" in i["title"] for i in rev["insights"])
     assert any(i["kind"] == "opportunity" and "contact" in i["title"] for i in rev["insights"])
+
+
+def test_find_phone_saves_number_title_and_email(client, monkeypatch):
+    import radar_sources
+
+    async def fake(client_, person, company, problems=None):
+        assert person["name"] == "Riley Example" and company["domains"]
+        return {"phone": "+1 415-555-0142", "type": "mobile", "status": "verified", "source_url": None, "title": "VP, Records and Information Governance",
+                "email": "riley.example@phonetest.example", "phone_hq": "+1 415-555-0100"}, "prospeo_mobile"
+    monkeypatch.setattr(radar_sources, "find_phone", fake)
+    cid = _company("Phonetest Insurance", domains=["phonetest.example"])
+    c = client.post("/api/admin/outbound/contacts", json={"name": "Riley Example", "title": "Records Manager", "company_id": cid}).json()
+    r = client.post(f"/api/admin/outbound/contacts/{c['id']}/find-phone").json()
+    assert r["found"] == "+1 415-555-0142" and r["via"] == "prospeo_mobile" and r["notes"]
+    saved = run(database.db.contacts.find_one({"id": c["id"]}, {"_id": 0}))
+    assert saved["phone_type"] == "mobile" and saved["title"].startswith("VP") and saved["email"] == "riley.example@phonetest.example" and saved["email_status"] == "valid"
+    co = run(database.db.companies.find_one({"id": cid}, {"_id": 0}))
+    assert co["phone_hq"] == "+1 415-555-0100" and any(h["action"] == "contact" for h in co["history"])
+
+
+def test_no_personal_number_offers_the_switchboard_without_saving_it(client, monkeypatch):
+    import radar_sources
+
+    async def none(client_, person, company, problems=None):
+        return None, None
+
+    async def board(client_, company, problems=None):
+        return {"phone": "+1 415-555-0100", "type": "switchboard"}, "sec_phone"
+    monkeypatch.setattr(radar_sources, "find_phone", none)
+    monkeypatch.setattr(radar_sources, "switchboard", board)
+    cid = _company("Boardonly Mutual", domains=["boardonly.example"])
+    c = client.post("/api/admin/outbound/contacts", json={"name": "Sam Example", "title": "CIO", "company_id": cid}).json()
+    r = client.post(f"/api/admin/outbound/contacts/{c['id']}/find-phone").json()
+    assert r["found"] is None and r["switchboard"] == "+1 415-555-0100" and "No personal mobile" in r["detail"]
+    assert not run(database.db.contacts.find_one({"id": c["id"]}, {"_id": 0})).get("phone")
+
+
+def test_apollo_webhook_is_signed_and_fills_the_contact(client):
+    import radar_sources
+    cid = _company("Hookline Insurance", domains=["hookline.example"])
+    c = client.post("/api/admin/outbound/contacts", json={"name": "Alex Example", "title": "CIO", "company_id": cid}).json()
+    body = {"people": [{"phone_numbers": [{"raw_number": "+1 202-555-0116", "type_cd": "mobile", "status_cd": "valid_number", "dnc_status_cd": "not_found"}]}]}
+    assert client.post("/api/outbound/webhooks/apollo-phones", params={"c": c["id"], "t": "forged"}, json=body).status_code == 401
+    ok = client.post("/api/outbound/webhooks/apollo-phones", params={"c": c["id"], "t": radar_sources.apollo_phone_token(c["id"])}, json=body)
+    assert ok.status_code == 200 and ok.json()["found"]
+    saved = run(database.db.contacts.find_one({"id": c["id"]}, {"_id": 0}))
+    assert saved["phone"] == "+1 202-555-0116" and saved["phone_type"] == "mobile" and saved["phone_dnc"] is False

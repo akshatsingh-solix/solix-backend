@@ -48,7 +48,19 @@ async def _as_list(coro) -> list:
     return [result] if result else []
 
 
+async def sync_provider_accounts() -> None:
+    """Once a run: take Hunter's own usage figures, so its allowance bar matches what Hunter has counted."""
+    import os
+    if os.environ.get("HUNTER_API_KEY"):
+        try:
+            async with httpx.AsyncClient() as client:
+                await srcs.hunter_account(client)
+        except Exception:  # noqa: BLE001 - the counter just stays on MarkHub's own count
+            pass
+
+
 async def collect(run: dict) -> set:
+    await sync_provider_accounts()
     settings = await rs.radar_settings()
     on = settings["collectors"]
     budget = {"credits": 0.0, "cap": float(settings.get("credit_cap") or 0)}
