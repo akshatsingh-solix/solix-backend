@@ -43,6 +43,7 @@ from database import now_iso
 
 logger = logging.getLogger("solix.outbound")
 router = APIRouter(prefix="/api/admin/outbound", tags=["outbound"], dependencies=[Depends(get_current_admin)])
+webhooks = APIRouter(prefix="/api/outbound/webhooks", tags=["outbound-webhooks"])  # public: providers call these (secret or signed URL)
 can_work = Depends(require_roles("admin", "sales"))
 admin_only = Depends(require_roles("admin"))
 
@@ -134,7 +135,49 @@ async def set_verification(contact: dict) -> dict:
     return {**contact, "email_status": v["status"], "verify_detail": v["detail"]}
 
 
-def guess_emails(first: str, last: str, domain: str) -> List[str]:
+_PATTERNS = ["{first}.{last}", "{f}{last}", "{first}{last}", "{first}", "{first}_{last}", "{f}.{last}", "{last}.{first}", "{first}{l}", "{last}{f}", "{last}"]
+
+
+def _norm_name(x: str) -> str:
+    return re.sub(r"[^a-z]", "", (x or "").lower())
+
+
+def pattern_of(email: str, first: str, last: str) -> Optional[str]:
+    """Which address pattern an address follows for this person ("{first}.{last}"), if any."""
+    local = (email or "").split("@")[0].lower()
+    f, l = _norm_name(first), _norm_name(last)
+    if not (f and l and local):
+        return None
+    for p in _PATTERNS:
+        if p.format(first=f, last=l, f=f[0], l=l[0]) == local:
+            return p
+    return None
+
+
+async def learned_pattern(domain: str, company: Optional[dict] = None) -> Optional[str]:
+    """The pattern the company's verified addresses follow: from contacts we've verified, else the one Hunter reported."""
+    from collections import Counter
+    seen = Counter()
+    async for c in _db().contacts.find({"email": {"$regex": f"@{re.escape(domain)}$"}, "email_status": "valid"}, {"_id": 0, "email": 1, "first_name": 1, "last_name": 1}).limit(50):
+        p = pattern_of(c["email"], c.get("first_name"), c.get("last_name"))
+        if p:
+            seen[p] += 1
+    if seen:
+        return seen.most_common(1)[0][0]
+    hp = (company or {}).get("email_pattern")
+    return hp if hp in _PATTERNS else None
+
+
+def guess_emails(first: str, last: str, domain: str, pattern: Optional[str] = None) -> List[str]:
+    """Candidate addresses, the company's known pattern first."""
+    f, l = _norm_name(first), _norm_name(last)
+    if f and l and pattern in _PATTERNS:
+        lead = [pattern.format(first=f, last=l, f=f[0], l=l[0]) + "@" + domain]
+        return list(dict.fromkeys(lead + _guess_emails(first, last, domain)))
+    return _guess_emails(first, last, domain)
+
+
+def _guess_emails(first: str, last: str, domain: str) -> List[str]:
     f, l = re.sub(r"[^a-z]", "", (first or "").lower()), re.sub(r"[^a-z]", "", (last or "").lower())
     if not (f and domain):
         return []
@@ -968,6 +1011,88 @@ async def verify_contact(contact_id: str):
     return await set_verification(c)
 
 
+@router.post("/contacts/{contact_id}/find-phone", dependencies=[can_work])
+async def find_phone(contact_id: str, user: dict = Depends(get_current_admin)):
+    """A direct line or mobile for this person: numbers the company publishes next to their name first (free), then a
+    verified mobile from Prospeo (10 of its 75 monthly credits, charged only when one is found). Also refreshes their
+    title, and flags a job change, from the same lookup."""
+    import radar_sources
+    c = await _db().contacts.find_one({"id": contact_id}, {"_id": 0})
+    if not c:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    company = await _db().companies.find_one({"id": c.get("company_id")}, {"_id": 0}) if c.get("company_id") else None
+    if not (company and company.get("domains")) and not c.get("linkedin_url"):
+        raise HTTPException(status_code=422, detail="Add the account's web domain (Account → Details) or the person's LinkedIn URL first")
+    problems: List[str] = []
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        hit, via = await radar_sources.find_phone(client, c, company or {}, problems=problems)
+        board = None
+        if not hit and company:  # no personal number: offer the company's main line, clearly labelled, never as theirs
+            board, _ = await radar_sources.switchboard(client, company, problems=problems)
+            if board and not company.get("phone_hq"):
+                await _db().companies.update_one({"id": company["id"]}, {"$set": {"phone_hq": board["phone"]}})
+    if not hit:
+        ready = await _phone_ready()
+        missing = [n for n, k in (("prospeo_mobile", "PROSPEO_API_KEY"), ("tomba_phone", "TOMBA_KEY"), ("apollo_mobile", "APOLLO_API_KEY + PUBLIC_API_URL")) if n not in ready]
+        return {"found": None, "switchboard": (board or {}).get("phone"), "problems": problems,
+                "detail": "No personal mobile or direct line found for this person." + (f" The company's switchboard is {board['phone']}." if board else "") +
+                          (f" More sources would help: {', '.join(missing)}." if missing else " The free allowances may be used for this month.")}
+    if hit.get("type") == "pending":  # Apollo answers by webhook
+        upd = {"phone_pending": via, "phone_requested_at": now_iso()}
+        if hit.get("title") and hit["title"] != c.get("title"):
+            upd.update({"title": hit["title"], "persona": persona_of(hit["title"]), "seniority": seniority_of(hit["title"]), "title_source": via})
+        await _db().contacts.update_one({"id": contact_id}, {"$set": upd})
+        return {"found": None, "pending": True, "via": via, "detail": "Apollo is looking up their mobile; it appears on the contact within a few minutes."}
+    sets = {"phone": hit["phone"], "phone_type": hit.get("type"), "phone_status": hit.get("status"), "phone_source": via, "phone_source_url": hit.get("source_url"),
+            "phone_found_at": now_iso(), "updated_at": now_iso()}
+    notes = []
+    if hit.get("title") and hit["title"] != c.get("title"):
+        sets.update({"title": hit["title"], "persona": persona_of(hit["title"]), "seniority": seniority_of(hit["title"]), "title_source": via})
+        notes.append(f"title updated to {hit['title']}")
+    if hit.get("email") and not c.get("email"):
+        sets.update({"email": hit["email"], "email_status": "valid", "source_email": via, "verified_at": now_iso(), "verify_detail": f"{via} (verified)"})
+        notes.append("verified email added")
+    if hit.get("job_change_at"):
+        sets["job_change_at"] = hit["job_change_at"]
+    await _db().contacts.update_one({"id": contact_id}, {"$set": sets})
+    if company and hit.get("phone_hq") and not company.get("phone_hq"):
+        await _db().companies.update_one({"id": company["id"]}, {"$set": {"phone_hq": hit["phone_hq"]}})
+    if company:
+        await rs.add_history(company["id"], user.get("email", "system"), "contact", f"{c.get('name')}: {hit.get('type') or 'phone'} found via {via}" +
+                             (f"; {', '.join(notes)}" if notes else ""))
+    return {"found": hit["phone"], "type": hit.get("type"), "via": via, "notes": notes}
+
+
+async def _phone_ready() -> List[str]:
+    import providers as pv
+    return await pv.available("phone_find")
+
+
+@webhooks.post("/apollo-phones")
+async def apollo_phones_webhook(request: Request, c: str = Query(...), t: str = Query(...)):
+    """Apollo's asynchronous phone reveal (radar_sources._phone_apollo). Signed per contact, so only our requests land."""
+    import hmac as _hmac
+    import radar_sources
+    if not _hmac.compare_digest(radar_sources.apollo_phone_token(c), t):
+        raise HTTPException(status_code=401, detail="Invalid token")
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    contact = await _db().contacts.find_one({"id": c}, {"_id": 0})
+    if not contact:
+        return {"ok": True, "matched": False}
+    best = radar_sources.apollo_best_number(payload)
+    if not best:
+        await _db().contacts.update_one({"id": c}, {"$set": {"phone_pending": None, "phone_lookup_note": "Apollo found no mobile or direct dial"}})
+        return {"ok": True, "found": False}
+    await _db().contacts.update_one({"id": c}, {"$set": {"phone": best["phone"], "phone_type": best["type"], "phone_status": "verified", "phone_source": "apollo_mobile",
+                                                     "phone_found_at": now_iso(), "phone_pending": None, "phone_dnc": best["dnc"], "phone_dnc_status": best["dnc_status"]}})
+    if contact.get("company_id"):
+        await rs.add_history(contact["company_id"], "apollo", "contact", f"{contact.get('name')}: {best['type']} found via Apollo" + (" (on a Do Not Call list)" if best["dnc"] else ""))
+    return {"ok": True, "found": True}
+
+
 @router.post("/contacts/{contact_id}/find-email", dependencies=[can_work])
 async def find_email(contact_id: str):
     """Try common address patterns on the account's domain; keep the first one the verifier accepts."""
@@ -982,6 +1107,15 @@ async def find_email(contact_id: str):
     import radar_intel
     import radar_sources
     via = "hunter"
+    pattern = await learned_pattern(domain, company)
+    if pattern and c.get("first_name") and c.get("last_name") and radar_sources.mailbox_verifier_ready():
+        cand = guess_emails(c["first_name"], c["last_name"], domain, pattern)[0]
+        v = await verify_email(cand)
+        tried.append({"email": cand, **v, "detail": f"Company pattern {pattern}: {v['detail']}"})
+        if v["status"] == "valid":
+            await _db().contacts.update_one({"id": contact_id}, {"$set": {"email": cand, "email_status": "valid", "verify_detail": f"Company pattern {pattern}, verified",
+                                                                        "verified_at": now_iso(), "source_email": "pattern+verify"}})
+            return {"found": cand, "tried": tried}
     async with httpx.AsyncClient() as client:
         try:
             hit = await radar_intel.hunter_email(client, domain, c.get("first_name"), c.get("last_name"))
@@ -1000,7 +1134,7 @@ async def find_email(contact_id: str):
         if v["status"] in ("valid", "invalid"):  # the finder's answer checked by an independent verifier
             await score_email_source({**c, "source_email": "hunter" if via == "hunter" else via}, v["status"] == "valid", "verification")
         return {"found": hit["email"], "tried": [{"email": hit["email"], "status": status, "detail": f"{label} Email Finder"}]}
-    for cand in guess_emails(c.get("first_name"), c.get("last_name"), domain)[:6]:
+    for cand in [x for x in guess_emails(c.get("first_name"), c.get("last_name"), domain, pattern) if x not in {t["email"] for t in tried}][:6]:
         v = await verify_email(cand)
         tried.append({"email": cand, **v})
         if v["status"] == "valid":
@@ -1236,7 +1370,6 @@ async def connect_instantly(request: Request):
 
 # --- Instantly webhook (public, secret header) ------------------------------------------------------------
 
-webhooks = APIRouter(prefix="/api/outbound/webhooks", tags=["outbound-webhooks"])
 
 
 @webhooks.post("/instantly")

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import hmac
 import ipaddress
 import json
 import logging
@@ -633,15 +634,19 @@ async def _firmo_gleif(client, name, domain, country):
 _SEC_TICKERS: Dict[str, Any] = {"at": 0, "by_key": {}}
 
 
-async def _firmo_sec(client, name, domain, country):
+async def _sec_cik(client, name) -> Optional[int]:
     import radar_model as rm
-    if country and country not in ("United States", "US"):
-        raise Skip()
     if time.monotonic() - _SEC_TICKERS["at"] > 86400 or not _SEC_TICKERS["by_key"]:
         r = _raise_for(await client.get("https://www.sec.gov/files/company_tickers.json", headers=UA, timeout=40))
         _SEC_TICKERS["by_key"] = {rm.company_key(re.sub(r"/[A-Z]{2,3}/?$", "", v["title"]).strip()): v["cik_str"] for v in r.json().values()}
         _SEC_TICKERS["at"] = time.monotonic()
-    cik = _SEC_TICKERS["by_key"].get(rm.company_key(name))
+    return _SEC_TICKERS["by_key"].get(rm.company_key(name))
+
+
+async def _firmo_sec(client, name, domain, country):
+    if country and country not in ("United States", "US"):
+        raise Skip()
+    cik = await _sec_cik(client, name)
     if not cik:
         return {}
     r = _raise_for(await client.get(f"https://data.sec.gov/submissions/CIK{int(cik):010d}.json", headers=UA, timeout=30))
@@ -660,14 +665,43 @@ def _ch_auth() -> dict:
     return {"Authorization": "Basic " + base64.b64encode(f"{_env('COMPANIES_HOUSE_API_KEY')}:".encode()).decode()}
 
 
-async def _ch_company(client, name) -> Optional[dict]:
+CH_HELP = ("Companies House refused the key. Create it under an application set to the Live environment (Test keys only work on the "
+           "sandbox) and choose the REST key type (not Stream), with no IP restrictions.")
+
+
+async def _ch_get(client, url: str, **params) -> httpx.Response:
+    r = await client.get(url, params=params, headers=_ch_auth(), timeout=20)
+    if r.status_code in (401, 403):
+        raise httpx.HTTPStatusError(CH_HELP, request=r.request, response=r)
+    return _raise_for(r)
+
+
+def ch_match(name: str, items: List[dict]) -> Optional[dict]:
+    """The register entry for a company: the same name once legal words are set aside, else the active entry whose name
+    shares nearly all its words ("RS Group" -> "RS GROUP PLC", "Barclays" -> "BARCLAYS PLC"), preferring PLCs (the parent)."""
     import radar_model as rm
-    r = _raise_for(await client.get("https://api.company-information.service.gov.uk/search/companies", params={"q": name[:120], "items_per_page": 8}, headers=_ch_auth(), timeout=20))
     key = rm.company_key(name)
-    for it in r.json().get("items") or []:
-        if it.get("company_status") == "active" and rm.company_key(it.get("title") or "") == key:
+    words = set(key.split())
+    best, best_score = None, 0.0
+    for it in items:
+        if it.get("company_status") not in (None, "active"):
+            continue
+        title = it.get("title") or ""
+        k = rm.company_key(title)
+        if k == key:
             return it
-    return None
+        tw = set(k.split())
+        if not words or not tw:
+            continue
+        score = len(words & tw) / len(words | tw) + (0.1 if re.search(r"\bp\.?l\.?c\b", title, re.I) else 0)
+        if words <= tw and score > best_score:
+            best, best_score = it, score
+    return best if best_score >= 0.6 else None
+
+
+async def _ch_company(client, name) -> Optional[dict]:
+    r = await _ch_get(client, "https://api.company-information.service.gov.uk/search/companies", q=name[:120], items_per_page=10)
+    return ch_match(name, r.json().get("items") or [])
 
 
 async def _firmo_companies_house(client, name, domain, country):
@@ -906,7 +940,7 @@ async def _people_companies_house(client, domain, company, country=None):
     if not it:
         return []
     num = it["company_number"]
-    r = _raise_for(await client.get(f"https://api.company-information.service.gov.uk/company/{num}/officers", params={"items_per_page": 50}, headers=_ch_auth(), timeout=20))
+    r = await _ch_get(client, f"https://api.company-information.service.gov.uk/company/{num}/officers", items_per_page=50, register_view="false")
     out = []
     for o in r.json().get("items") or []:
         if o.get("resigned_on") or "," not in (o.get("name") or ""):
@@ -918,12 +952,99 @@ async def _people_companies_house(client, domain, company, country=None):
     return out
 
 
+async def _people_sec(client, domain, company, country=None):
+    """US-listed companies: officers and directors from their insider filings (Forms 3, 4, 5), with the exact title they
+    filed under ("Chief Information Officer"). Official, free, and current to the last filing."""
+    import xml.etree.ElementTree as ET
+    if country and country not in ("United States", "US"):
+        raise Skip()
+    cik = await _sec_cik(client, company)
+    if not cik:
+        return []
+    sub = _raise_for(await client.get(f"https://data.sec.gov/submissions/CIK{int(cik):010d}.json", headers=UA, timeout=30)).json()
+    recent = (sub.get("filings") or {}).get("recent") or {}
+    since = (datetime.now(timezone.utc) - timedelta(days=540)).date().isoformat()
+    rows = [(f, a, doc, d) for f, a, doc, d in zip(recent.get("form") or [], recent.get("accessionNumber") or [], recent.get("primaryDocument") or [],
+                                                  recent.get("filingDate") or []) if f in ("3", "4", "5", "3/A", "4/A") and d >= since][:25]
+    people: dict = {}
+    for _, acc, doc, filed in rows:
+        url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc.replace('-', '')}/{doc.split('/')[-1]}"
+        try:
+            x = ET.fromstring((await client.get(url, headers=UA, timeout=20)).content)
+        except (httpx.HTTPError, ET.ParseError):
+            continue
+        for ro in x.iter("reportingOwner"):
+            raw = (ro.findtext("reportingOwnerId/rptOwnerName") or "").strip()
+            rel = ro.find("reportingOwnerRelationship")
+            if not raw or rel is None:
+                continue
+            officer = (rel.findtext("isOfficer") or "").strip().lower() in ("1", "true")
+            title = (rel.findtext("officerTitle") or "").strip() if officer else ("Director" if (rel.findtext("isDirector") or "").strip().lower() in ("1", "true") else "")
+            if not title:
+                continue  # a 10% holder, not someone who works there
+            parts = raw.replace(",", " ").split()
+            if len(parts) < 2 or any(w in raw.lower() for w in (" llc", " lp", " inc", " trust", " fund", " holdings", " capital")):
+                continue
+            name = _title_case(" ".join(parts[1:2] + parts[:1]))  # EDGAR files "LAST FIRST MIDDLE"
+            key = name.lower()
+            if key not in people or (officer and people[key]["title"] == "Director"):
+                people[key] = _person(name, job_title_case(title), via="sec_officers", current=True, source_url=url.rsplit("/", 1)[0] + "/", filed=filed)
+        await asyncio.sleep(0.12)  # SEC asks for at most 10 requests a second
+    return list(people.values())
+
+
+_TITLE_ACRONYMS = {"ceo", "cfo", "coo", "cto", "cio", "cdo", "ciso", "cmo", "cro", "cpo", "cao", "clo", "evp", "svp", "vp", "avp", "it", "hr", "gc", "ir", "uk", "us", "emea",
+                   "apac", "erp", "sap", "ai"}
+
+
+def job_title_case(title: str) -> str:
+    """'EVP, CHIEF INFORMATION OFFICER' -> 'EVP, Chief Information Officer' (filings are often all capitals)."""
+    out = []
+    for w in (title or "").split():
+        core = re.sub(r"[^A-Za-z]", "", w).lower()
+        if core in _TITLE_ACRONYMS:
+            out.append(w.upper())
+        elif core in ("and", "of", "the", "for", "&") and out:
+            out.append(w.lower())
+        else:
+            out.append(w[:1].upper() + w[1:].lower() if (w.isupper() or w.islower()) else w)
+    return " ".join(out)
+
+
+PROSPEO_SENIORITY = ["C-Suite", "Vice President", "Director", "Head"]
+
+
+async def _people_prospeo(client, domain, company):
+    """Decision makers at the account with their current titles and LinkedIn profiles: 1 credit per page of up to 25.
+    Emails and mobiles stay hidden until a person is picked (prospeo_enrich)."""
+    if not domain:
+        raise Skip()
+    filters = {"company": {"websites": {"include": [domain]}}, "person_seniority": {"include": PROSPEO_SENIORITY}}
+    try:
+        d = await _prospeo(client, "search-person", {"page": 1, "filters": filters})
+    except httpx.HTTPStatusError as exc:
+        if "FILTER" not in str(exc).upper():
+            raise
+        d = await _prospeo(client, "search-person", {"page": 1, "filters": {"company": filters["company"]}})
+    rows = (d or {}).get("results") or (d or {}).get("data") or []
+    out = []
+    for row in rows:
+        p = row.get("person") or row
+        name = p.get("full_name") or " ".join(x for x in (p.get("first_name"), p.get("last_name")) if x)
+        if name and len(name.split()) >= 2:
+            out.append(_person(_title_case(name), p.get("current_job_title") or p.get("headline") or "", via="prospeo", current=True, linkedin_url=p.get("linkedin_url"),
+                               source_url=p.get("linkedin_url") or f"https://app.prospeo.io/search?company={domain}", prospeo_id=p.get("person_id")))
+    return Billed(out, 1 if out else 0)
+
+
 async def people(client: httpx.AsyncClient, company: dict, domain: Optional[str], *, problems: Optional[List[str]] = None) -> List[dict]:
     """People from every contact-data source that's set up, asked together (Hunter is called by radar_intel)."""
     country = (company.get("hq") or {}).get("country")
     calls = {"tomba": lambda: _people_tomba(client, domain, company["name"]), "snov": lambda: _people_snov(client, domain, company["name"]),
              "pdl_person": lambda: _people_pdl(client, domain, company["name"]), "apollo": lambda: _people_apollo(client, domain, company["name"]),
-             "companies_house_officers": lambda: _people_companies_house(client, domain, company["name"], country)}
+             "companies_house_officers": lambda: _people_companies_house(client, domain, company["name"], country),
+             "sec_officers": lambda: _people_sec(client, domain, company["name"], country),
+             "prospeo_people": lambda: _people_prospeo(client, domain, company["name"])}
     out = []
     for _, got in await pv.gather("people", calls, on_error=_noting(problems, "People search failed")):
         out += got or []
@@ -940,7 +1061,7 @@ def _tomba_headers() -> dict:
 
 async def _find_hunter(client, domain, first, last):
     import radar_intel
-    return await radar_intel.hunter_email(client, domain, first, last)
+    return await radar_intel.hunter_email(client, domain, first, last, charge=False)  # the chain charges it once
 
 
 async def _find_tomba(client, domain, first, last):
@@ -965,17 +1086,52 @@ async def _find_snov(client, domain, first, last):
     return None
 
 
-async def _find_prospeo(client, domain, first, last):
-    r = _raise_for(await client.post("https://api.prospeo.io/email-finder", json={"first_name": first, "last_name": last, "company": domain},
-                                     headers={"X-KEY": _env("PROSPEO_API_KEY"), "Content-Type": "application/json"}, timeout=30))
-    d = r.json()
-    if d.get("error"):
-        if re.search(r"credit|limit", str(d.get("message") or d.get("error_code") or ""), re.I):
-            raise OutOfCredits(str(d.get("message") or "Prospeo credits used"))
+async def _prospeo(client, path: str, body: dict) -> Optional[dict]:
+    """POST to Prospeo; None when it has no match, OutOfCredits when the allowance is spent."""
+    r = await client.post(f"https://api.prospeo.io/{path}", json=body, headers={"X-KEY": _env("PROSPEO_API_KEY"), "Content-Type": "application/json"}, timeout=40)
+    try:
+        d = r.json()
+    except ValueError:
+        r.raise_for_status()
         return None
-    resp = d.get("response") or {}
-    em = resp.get("email") if isinstance(resp.get("email"), str) else (resp.get("email") or {}).get("email")
-    return {"email": em.lower(), "score": None, "status": (resp.get("email_status") or "").lower() or None, "source_url": None} if em else None
+    if d.get("error"):
+        code = str(d.get("error_code") or d.get("message") or "")
+        if code in ("NO_MATCH", "NO_RESULTS"):
+            return None
+        if "CREDIT" in code.upper():
+            raise OutOfCredits("Prospeo credits used")
+        if r.status_code == 429:
+            r.raise_for_status()
+        raise httpx.HTTPStatusError(f"Prospeo: {code}", request=r.request, response=r)
+    r.raise_for_status()
+    return d
+
+
+async def prospeo_enrich(client, *, first: str = "", last: str = "", domain: Optional[str] = None, linkedin_url: Optional[str] = None,
+                         person_id: Optional[str] = None, mobile: bool = False) -> Optional[dict]:
+    """One person from Prospeo: current title, verified work email and (with `mobile`) a verified mobile, plus the company's
+    switchboard. Prospeo charges 1 credit for an email, 10 with a mobile, nothing for no match or a repeat within 90 days."""
+    data = {k: v for k, v in {"person_id": person_id, "linkedin_url": linkedin_url, "first_name": first, "last_name": last, "company_website": domain}.items() if v}
+    d = await _prospeo(client, "enrich-person", {"data": data, "enrich_mobile": bool(mobile), "only_verified_email": not mobile})
+    if not d:
+        return None
+    p, co = d.get("person") or {}, d.get("company") or {}
+    em, mob, hq = p.get("email") or {}, p.get("mobile") or {}, co.get("phone_hq") or {}
+    email = em.get("email") if em.get("revealed") and "*" not in str(em.get("email") or "") else None
+    number = (mob.get("mobile_international") or mob.get("mobile")) if mob.get("revealed") and "*" not in str(mob.get("mobile") or "") else None
+    cost = 0 if d.get("free_enrichment") else (10 if number else 1 if email else 0)
+    return {"name": p.get("full_name"), "title": p.get("current_job_title"), "linkedin_url": p.get("linkedin_url"), "person_id": p.get("person_id"),
+            "email": email.lower() if email else None, "email_status": (em.get("status") or "").lower() or None,
+            "mobile": number, "mobile_status": (mob.get("status") or "").lower() or None, "mobile_country": mob.get("mobile_country_code"),
+            "phone_hq": hq.get("phone_hq_international") or hq.get("phone_hq"), "job_change_at": p.get("last_job_change_detected_at"),
+            "company_domain": co.get("domain"), "company": co.get("name"), "cost": cost}
+
+
+async def _find_prospeo(client, domain, first, last):
+    hit = await prospeo_enrich(client, first=first, last=last, domain=domain)
+    if not hit or not hit.get("email"):
+        return Billed(None, 0)
+    return Billed({"email": hit["email"], "score": None, "status": hit.get("email_status"), "source_url": None}, hit["cost"])
 
 
 async def _find_skrapp(client, domain, first, last):
@@ -1326,6 +1482,245 @@ async def public_sector(client: httpx.AsyncClient, *, days: int = 14) -> List[di
 
 
 # =====================================================================================
+# Phone numbers: the company's own published numbers, and a person's mobile
+# =====================================================================================
+
+_PHONE_RX = re.compile(r"(?:(?:tel|phone|call|t|ph|switchboard|main)[\s.:]*)?(\+?\(?\d[\d\s().-]{7,18}\d)", re.I)
+PHONE_LABELS = [("media", r"media|press|journalist|communications|pr enquir"), ("investors", r"investor|shareholder|\bir\b"),
+                ("sales", r"sales|new business|enquir"), ("support", r"support|help ?desk|customer service"),
+                ("switchboard", r"switchboard|head ?office|headquarters|main|reception|general|tel|phone|call")]
+CONTACT_PATHS = ["", "/contact", "/contact-us", "/about/contact", "/company/contact", "/investors", "/investor-relations", "/media", "/newsroom", "/press"]
+
+
+def phones_in(text: str, country: Optional[str] = None, names: Optional[List[str]] = None, source_url: Optional[str] = None) -> List[dict]:
+    """Phone numbers on a page, each with what it's for (switchboard, media, investors...) or the person named next to it."""
+    import phonenumbers
+    region = {"United States": "US", "United Kingdom": "GB", "Canada": "CA", "Germany": "DE", "France": "FR", "India": "IN", "Australia": "AU"}.get(country or "", "US")
+    out, seen, prev_end = [], set(), 0
+    for m in _PHONE_RX.finditer(text or ""):
+        start_ctx, prev_end = max(prev_end, m.start() - 90), m.end()  # what's written before this number, back to the previous one
+        raw = m.group(1)
+        if sum(ch.isdigit() for ch in raw) < 9 or re.fullmatch(r"(19|20)\d\d[\s-]+(19|20)\d\d", raw.strip()):
+            continue  # years, ranges and other numbers that aren't phones
+        try:
+            num = phonenumbers.parse(raw, region)
+        except phonenumbers.NumberParseException:
+            continue
+        if not phonenumbers.is_valid_number(num):
+            continue
+        e164 = phonenumbers.format_number(num, phonenumbers.PhoneNumberFormat.E164)
+        if e164 in seen:
+            continue
+        seen.add(e164)
+        ctx = text[start_ctx: m.start()]
+        person = next((n for n in names or [] if n and n.lower() in ctx.lower()), None)
+        label = next((lab for lab, rx in PHONE_LABELS if re.search(rx, ctx, re.I)), "switchboard")
+        kind = {phonenumbers.PhoneNumberType.MOBILE: "mobile", phonenumbers.PhoneNumberType.TOLL_FREE: "toll_free"}.get(phonenumbers.number_type(num), "landline")
+        out.append({"number": phonenumbers.format_number(num, phonenumbers.PhoneNumberFormat.INTERNATIONAL), "e164": e164, "label": "direct" if person else label,
+                    "person": person, "type": kind, "source_url": source_url})
+    return out
+
+
+async def company_phones(client: httpx.AsyncClient, domain: str, *, country: Optional[str] = None, names: Optional[List[str]] = None,
+                         problems: Optional[List[str]] = None) -> List[dict]:
+    """The numbers a company publishes itself (home, contact, investor and press pages): its switchboard, media and
+    investor lines, and any direct line printed next to a person's name. Public business contact details only."""
+    found: List[dict] = []
+    for path in CONTACT_PATHS:
+        if len(found) >= 6:
+            break
+        page = await read_page(client, f"https://{domain}{path}", problems=problems, prefer="direct_read")
+        if not page:
+            continue
+        for ph in phones_in(page.get("text") or "", country, names, page.get("url") or f"https://{domain}{path}"):
+            if ph["e164"] not in {f["e164"] for f in found}:
+                found.append(ph)
+    order = {"direct": 0, "switchboard": 1, "sales": 2, "media": 3, "investors": 4, "support": 5}
+    return sorted(found, key=lambda p: order.get(p["label"], 9))
+
+
+async def _phone_site(client, person: dict, company: dict):
+    domain = (company.get("domains") or [None])[0]
+    if not domain:
+        raise Skip()
+    phones = await company_phones(client, domain, country=(company.get("hq") or {}).get("country"), names=[person.get("name")])
+    mine = next((p for p in phones if p.get("person")), None)
+    return {"phone": mine["number"], "type": "direct", "status": "published", "source_url": mine["source_url"]} if mine else None
+
+
+async def _phone_prospeo(client, person: dict, company: dict):
+    domain = (company.get("domains") or [None])[0]
+    first, last = person.get("first_name"), person.get("last_name")
+    if not (person.get("linkedin_url") or (first and last and domain)):
+        raise Skip()
+    hit = await prospeo_enrich(client, first=first or "", last=last or "", domain=domain, linkedin_url=person.get("linkedin_url"), mobile=True)
+    if not hit or not hit.get("mobile"):
+        return Billed(None, (hit or {}).get("cost", 0))
+    return Billed({"phone": hit["mobile"], "type": "mobile", "status": hit.get("mobile_status") or "verified", "source_url": None, "title": hit.get("title"),
+                   "email": hit.get("email"), "phone_hq": hit.get("phone_hq"), "job_change_at": hit.get("job_change_at")}, hit["cost"])
+
+
+async def _phone_tomba(client, person: dict, company: dict):
+    if not (person.get("email") or person.get("linkedin_url")):
+        raise Skip()
+    params = {"email": person["email"]} if person.get("email") else {"linkedin": person["linkedin_url"]}
+    r = await client.get("https://api.tomba.io/v1/phone-finder", params=params, headers=_tomba_headers(), timeout=30)
+    if r.status_code == 404:
+        return Billed(None, 0)
+    d = (_raise_for(r).json().get("data") or {})
+    num = d.get("intl_format") or d.get("e164_format")
+    if not num or d.get("valid") is False:
+        return Billed(None, 0)
+    return {"phone": num, "type": (d.get("line_type") or "direct").lower(), "status": "found", "source_url": None}
+
+
+def _switchboard(number: Optional[str], via_url: Optional[str], country: Optional[str] = None) -> Optional[dict]:
+    """A company's main number, shaped like a phone hit: the rep calls it and asks for the person by name."""
+    if not number:
+        return None
+    found = phones_in(str(number), country, None, via_url)
+    return {"phone": found[0]["number"] if found else str(number), "type": "switchboard", "status": "published", "source_url": via_url} if (found or number) else None
+
+
+async def _phone_sec(client, person: dict, company: dict):
+    country = (company.get("hq") or {}).get("country")
+    if country and country not in ("United States", "US"):
+        raise Skip()
+    cik = await _sec_cik(client, company.get("name") or "")
+    if not cik:
+        return None
+    d = _raise_for(await client.get(f"https://data.sec.gov/submissions/CIK{int(cik):010d}.json", headers=UA, timeout=30)).json()
+    return _switchboard(d.get("phone") or ((d.get("addresses") or {}).get("business") or {}).get("phone"),
+                        f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}", "United States")
+
+
+async def _phone_wikidata(client, person: dict, company: dict):
+    qid = ((company.get("firmographics") or {}).get("ids") or {}).get("wikidata")
+    if not qid:
+        raise Skip()
+    r = _raise_for(await client.get(f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json", headers=UA, timeout=20))
+    claims = (((r.json().get("entities") or {}).get(qid) or {}).get("claims") or {}).get("P1329") or []
+    num = next(((c.get("mainsnak") or {}).get("datavalue") or {}).get("value") for c in claims if (c.get("mainsnak") or {}).get("datavalue"))  if claims else None
+    return _switchboard(num, f"https://www.wikidata.org/wiki/{qid}", (company.get("hq") or {}).get("country"))
+
+
+async def _phone_site_switchboard(client, person: dict, company: dict):
+    if company.get("phone_hq"):
+        return _switchboard(company["phone_hq"], None, (company.get("hq") or {}).get("country"))
+    domain = (company.get("domains") or [None])[0]
+    if not domain:
+        raise Skip()
+    phones = await company_phones(client, domain, country=(company.get("hq") or {}).get("country"))
+    main = next((p for p in phones if p["label"] in ("switchboard", "sales")), None)
+    return {"phone": main["number"], "type": "switchboard", "status": "published", "source_url": main["source_url"]} if main else None
+
+
+def apollo_phone_token(contact_id: str) -> str:
+    import compliance
+    return hmac.new(compliance._secret(), f"apollo-phone|{contact_id}".encode(), hashlib.sha256).hexdigest()[:32]
+
+
+async def _phone_apollo(client, person: dict, company: dict):
+    """Apollo looks the person's mobile or direct dial up in the background and posts it to our webhook
+    (/api/outbound/webhooks/apollo-phones); the contact shows it a few minutes later. Returns a pending marker now."""
+    domain = (company.get("domains") or [None])[0]
+    if not person.get("id") or not (person.get("linkedin_url") or person.get("email") or (person.get("first_name") and person.get("last_name") and domain)):
+        raise Skip()
+    base = _env("PUBLIC_API_URL").rstrip("/")
+    hook = f"{base}/api/outbound/webhooks/apollo-phones?c={person['id']}&t={apollo_phone_token(person['id'])}"
+    params = {k: v for k, v in {"first_name": person.get("first_name"), "last_name": person.get("last_name"), "domain": domain, "email": person.get("email"),
+                                "linkedin_url": person.get("linkedin_url"), "reveal_phone_number": "true", "webhook_url": hook}.items() if v}
+    r = _raise_for(await client.post("https://api.apollo.io/api/v1/people/match", params=params,
+                                     headers={"X-Api-Key": _env("APOLLO_API_KEY"), "Cache-Control": "no-cache", "accept": "application/json"}, timeout=40))
+    p = (r.json() or {}).get("person") or {}
+    if not p:
+        return Billed(None, 0)
+    return {"phone": "pending", "type": "pending", "status": "requested", "source_url": None, "title": p.get("title"),
+            "email": p.get("email") if p.get("email") and "email_not_unlocked" not in str(p.get("email")) else None}
+
+
+def apollo_best_number(payload: dict) -> Optional[dict]:
+    """From Apollo's webhook: the person's mobile first, then their direct dial; never a company line."""
+    for person in payload.get("people") or []:
+        nums = [n for n in person.get("phone_numbers") or [] if n.get("status_cd") in (None, "valid_number") and n.get("type_cd") in ("mobile", "work_direct", "direct")]
+        nums.sort(key=lambda n: (n.get("type_cd") != "mobile", n.get("position") or 0))
+        if nums:
+            n = nums[0]
+            return {"phone": n.get("raw_number") or n.get("sanitized_number"), "type": "mobile" if n.get("type_cd") == "mobile" else "direct",
+                    "dnc": n.get("dnc_status_cd") not in (None, "not_found", "unknown"), "dnc_status": n.get("dnc_status_cd"), "confidence": n.get("confidence_cd")}
+    return None
+
+
+# A person's own number only: a direct line printed next to their name, then verified mobiles. The company's main
+# number (SEC, Wikidata, its website) is a separate fallback, never saved as the person's number.
+PERSONAL_PHONE = ["site_phones", "prospeo_mobile", "tomba_phone", "apollo_mobile"]
+SWITCHBOARD_PHONE = ["sec_phone", "wikidata_phone", "site_switchboard"]
+PHONE_ADAPTERS = {"site_phones": _phone_site, "prospeo_mobile": _phone_prospeo, "tomba_phone": _phone_tomba, "apollo_mobile": _phone_apollo,
+                  "sec_phone": _phone_sec, "wikidata_phone": _phone_wikidata, "site_switchboard": _phone_site_switchboard}
+
+
+async def find_phone(client: httpx.AsyncClient, person: dict, company: dict, *, problems: Optional[List[str]] = None) -> Tuple[Optional[dict], Optional[str]]:
+    """The person's own mobile or direct line: a line the company prints next to their name (free), then Prospeo,
+    Tomba and Apollo's verified numbers. Never the switchboard (see switchboard())."""
+    calls = {n: (lambda n=n: PHONE_ADAPTERS[n](client, person, company)) for n in PERSONAL_PHONE}
+    return await pv.first("phone_find", calls, accept=lambda h: bool(h and h.get("phone") and h.get("type") != "switchboard"),
+                          on_error=_noting(problems, "Phone lookup failed"), max_empty=4)
+
+
+async def switchboard(client: httpx.AsyncClient, company: dict, *, problems: Optional[List[str]] = None) -> Tuple[Optional[dict], Optional[str]]:
+    """The company's main number (SEC filing, Wikidata, its own site): a fallback shown on the account, not a person's number."""
+    calls = {n: (lambda n=n: PHONE_ADAPTERS[n](client, {}, company)) for n in SWITCHBOARD_PHONE}
+    return await pv.first("phone_find", calls, accept=lambda h: bool(h and h.get("phone")), on_error=_noting(problems, "Switchboard lookup failed"), max_empty=3)
+
+
+# =====================================================================================
+# Provider accounts: what the provider itself says is used and left (free calls)
+# =====================================================================================
+
+async def hunter_account(client: httpx.AsyncClient) -> dict:
+    """Hunter's own count of searches and verifications this month; MarkHub's counter is set to match it."""
+    r = _raise_for(await client.get("https://api.hunter.io/v2/account", params={"api_key": _env("HUNTER_API_KEY")}, timeout=20))
+    req = (r.json().get("data") or {}).get("requests") or {}
+    s, v = req.get("searches") or {}, req.get("verifications") or {}
+    await pv.set_usage("hunter", int(s.get("used") or 0), "hunter.io")
+    await pv.set_usage("hunter_verify", int(v.get("used") or 0), "hunter.io")
+    return {"searches_used": s.get("used"), "searches_available": s.get("available"), "verifications_used": v.get("used"), "verifications_available": v.get("available"),
+            "plan": (r.json().get("data") or {}).get("plan_name")}
+
+
+async def _account_probe(client, name: str) -> Optional[dict]:
+    """Free account calls that prove a key works without spending a credit."""
+    if name.startswith("hunter"):
+        a = await hunter_account(client)
+        return {"detail": f"Key works ({a.get('plan') or 'Hunter'}): {a['searches_used']}/{a['searches_available']} searches and "
+                          f"{a['verifications_used']}/{a['verifications_available']} verifications used this month. MarkHub's counter now matches."}
+    if name.startswith("tomba"):
+        d = _raise_for(await client.get("https://api.tomba.io/v1/me", headers=_tomba_headers(), timeout=20)).json().get("data") or {}
+        return {"detail": f"Key works (Tomba account {d.get('email') and 'found' or 'ok'})."}
+    if name.startswith("snov"):
+        token = await _snov_token(client)
+        d = _raise_for(await client.get("https://api.snov.io/v1/get-balance", headers={"Authorization": f"Bearer {token}"}, timeout=20)).json()
+        bal = (d.get("data") or {}).get("balance") if isinstance(d.get("data"), dict) else d.get("balance")
+        return {"detail": f"Key works: {bal} Snov.io credits left." if bal is not None else "Key works."}
+    if name.startswith("prospeo"):
+        r = await client.get("https://api.prospeo.io/account-information", headers={"X-KEY": _env("PROSPEO_API_KEY")}, timeout=20)
+        if r.status_code in (401, 403):
+            _raise_for(r)
+        d = (r.json() if r.content else {}) or {}
+        info = d.get("response") or d
+        left = info.get("remaining_credits")
+        if left is not None and info.get("used_credits") is not None:
+            await pv.set_usage("prospeo", int(info["used_credits"]), "prospeo.io")
+        return {"detail": f"Key works: {left} Prospeo credits left this month." if left is not None else "Key works."}
+    if name == "apollo":
+        _raise_for(await client.get("https://api.apollo.io/v1/auth/health", headers={"X-Api-Key": _env("APOLLO_API_KEY")}, timeout=20))
+        return {"detail": "Key works. Whether people search is allowed depends on your Apollo plan; Find people will say if Apollo refuses."}
+    if name == "pdl_person":
+        return {"detail": "Key set. A test search would spend one of PDL's free records, so it's tested by Find people instead."}
+    return None
+
+
+# =====================================================================================
 # Admin "Test" button: one light call per provider
 # =====================================================================================
 
@@ -1355,6 +1750,25 @@ async def probe(name: str) -> dict:
                 out = await SUB_ADAPTERS[name](client, "solix.com")
             elif cap == "email_verify" and name in VERIFY_ADAPTERS:
                 out = await VERIFY_ADAPTERS[name](client, "info@solix.com")
+            elif name == "companies_house_officers":
+                out = await _people_companies_house(client, "tesco.com", "Tesco PLC", "United Kingdom")
+                if not out:
+                    return {"ok": False, "detail": "The key works but no current officers came back for Tesco PLC; check the key is for the Live environment."}
+            elif name == "sec_officers":
+                out = await _people_sec(client, "microsoft.com", "Microsoft", "United States")
+            elif name in ("site_phones", "site_switchboard"):
+                out = await company_phones(client, "solix.com", country="United States")
+            elif name == "sec_phone":
+                out = await _phone_sec(client, {}, {"name": "Microsoft", "hq": {"country": "United States"}})
+            elif name == "wikidata_phone":
+                out = await _phone_wikidata(client, {}, {"firmographics": {"ids": {"wikidata": "Q2283"}}})
+            elif name == "tomba_phone":
+                out = await _account_probe(client, "tomba")
+                return {"ok": True, "detail": (out or {}).get("detail", "Key works.") + " Phone lookups are tested by Find phone (5 a month)."}
+            elif name in ("web_people", "linkedin_xray", "pattern_verify"):
+                return {"ok": True, "detail": "Uses the web-search and verification chains above; test those."}
+            elif (acct := await _account_probe(client, name)) is not None:
+                return {"ok": True, **acct}
             else:
                 return {"ok": True, "detail": "Set up; this source is exercised through the Radar itself (no separate test)."}
         except Skip:
