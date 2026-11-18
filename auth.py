@@ -7,6 +7,8 @@ from datetime import datetime, timezone, timedelta
 import bcrypt
 import jwt
 from fastapi import APIRouter, HTTPException, Request, Depends
+from typing import Dict, List, Optional
+
 from pydantic import BaseModel, EmailStr
 
 import cache
@@ -81,13 +83,17 @@ async def get_current_admin(request: Request) -> dict:
     user = await cache.memo("users", sub, 30, lambda: db.users.find_one({"id": sub, "role": {"$in": list(ROLES)}}, {"_id": 0, "password_hash": 0}))
     if not user or user.get("disabled"):
         raise HTTPException(status_code=401, detail="User not found")
+    import permissions
+    await permissions.check_request(user, request)  # no access below "view" on the feature this API belongs to
     return user
 
 
 def require_roles(*roles: str):
-    """Dependency: the signed-in staff user must hold one of `roles`."""
-    async def check(user: dict = Depends(get_current_admin)) -> dict:
-        if user.get("role") not in roles:
+    """Dependency: the signed-in staff user must hold one of `roles`, and the access level the admin set for the
+    feature (permissions.py): a role's write needs "edit"; "full" also allows what the role alone would not."""
+    async def check(request: Request, user: dict = Depends(get_current_admin)) -> dict:
+        import permissions
+        if not await permissions.allowed_by_roles(user, request, roles):
             raise HTTPException(status_code=403, detail="You don't have permission to do this")
         return user
     return check
@@ -103,6 +109,11 @@ class AdminUser(BaseModel):
     email: str
     name: str
     role: str
+    # What the admin shapes itself with (permissions.profile): level per feature, dashboard, seniority.
+    access: Optional[Dict[str, str]] = None
+    dashboard: Optional[str] = None
+    seniority: Optional[str] = None
+    disabled_features: Optional[List[str]] = None
 
 
 class LoginResponse(BaseModel):
@@ -133,12 +144,15 @@ async def login(body: LoginRequest, request: Request):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     await db.login_attempts.delete_one({"identifier": identifier})
-    return LoginResponse(access_token=create_access_token(user["id"], user["email"]), user=AdminUser(id=user["id"], email=user["email"], name=user["name"], role=user["role"]))
+    import permissions
+    return LoginResponse(access_token=create_access_token(user["id"], user["email"]),
+                         user=AdminUser(id=user["id"], email=user["email"], name=user["name"], role=user["role"], **await permissions.profile(user)))
 
 
 @router.get("/me", response_model=AdminUser)
 async def me(user: dict = Depends(get_current_admin)):
-    return AdminUser(**user)
+    import permissions
+    return AdminUser(**{k: user.get(k) for k in ("id", "email", "name", "role")}, **await permissions.profile(user))
 
 
 class PasswordChange(BaseModel):

@@ -130,6 +130,10 @@ app.include_router(outbound_public)
 app.include_router(compliance_router)
 app.include_router(ops.router)
 app.include_router(ops.public)
+import home  # noqa: E402
+import permissions  # noqa: E402
+app.include_router(permissions.router)
+app.include_router(home.router)
 
 # Compress JSON/CSV responses; tiny responses aren't worth the CPU.
 app.add_middleware(GZipMiddleware, minimum_size=800)

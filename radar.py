@@ -310,6 +310,7 @@ async def patch_account(company_id: str, body: AccountPatch, user: dict = Depend
     if not c:
         raise HTTPException(status_code=404, detail="Account not found")
     payload = body.model_dump(exclude_unset=True)
+    await _may_edit_account(c, payload, user)
     try:
         updated = await rs.patch_company(c, payload, user)
     except ValueError as e:
@@ -319,6 +320,20 @@ async def patch_account(company_id: str, body: AccountPatch, user: dict = Depend
         await outbound.on_account_status(updated, user)
     await rs.mark_seen(user["id"], [company_id])
     return updated
+
+
+async def _may_edit_account(c: dict, payload: dict, user: dict) -> None:
+    """Company-level fields are edited by the account's owner, an admin, or someone the admin gave full Radar access.
+    Anyone who can work the Radar may claim an unassigned account for themselves (and nothing else in that change)."""
+    import permissions
+    me = (user.get("email") or "").lower()
+    if await permissions.can(user, "radar", "full") or (c.get("owner") or "").lower() == me:
+        return
+    if not c.get("owner") and set(payload) <= {"owner", "reason"} and (payload.get("owner") or "").lower() == me:
+        return
+    who = c.get("owner_name") or c.get("owner") or "nobody yet"
+    raise HTTPException(status_code=403, detail=f"Only the account owner ({who}) or an admin can change this account. "
+                                                  "You can claim an unassigned account by making yourself the owner.")
 
 
 class AccountIn(BaseModel):
