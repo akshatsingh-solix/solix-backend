@@ -232,3 +232,72 @@ def test_weekly_review_tunes_logs_and_reverts(client):
     run(db.enrollments.delete_many({"contact_id": {"$regex": "^learn-"}}))
     run(db.reply_log.delete_many({"contact_id": {"$regex": "^learn-"}}))
     run(rs.save_radar_settings({"product_weights": {}}))
+
+
+# --- Free AI without personal data, buying stage, committee, lookalikes ----------------------------------------
+
+def test_redaction_round_trip_and_free_deep_dive(monkeypatch):
+    import privacy
+    import radar_research
+    r = privacy.Redactor(["Dana Whitfield"])
+    text = "Contact Maria Lopez, Talent Partner, at maria@acme.example or +1 415 555 0199. Dana Whitfield, CIO, leads it. https://linkedin.com/in/dana-w"
+    out = r.redact(text)
+    assert not r.leaks(out) and "Maria Lopez" not in out and "Dana" not in out and r.restore(out) == text
+    seen = {}
+
+    async def fake(system, user, providers=None):
+        seen["user"], seen["providers"] = user, providers
+        return ('{"score": 6, "verdict": "Ready for Outreach", "headline": "[PERSON_1] runs a retirement programme [1].", "summary": "Retiring systems [1].", '
+                '"trigger": "Retirement [1].", "why_solix_wins": "One archive.", "first_touch": {"subject": "s", "body": "b"}, "contacts": [{"name": "Invented Person"}], "gaps": ""}',
+                "gemini", "g")
+    monkeypatch.setattr(radar_research, "_complete", fake)
+    monkeypatch.setattr(privacy, "providers_for", lambda task: (["free"], "redacted"))
+    sources = [{"n": 1, "kind": "competitor_job", "title": "Archive engineer", "text": "Dana Whitfield, CIO, is retiring systems. Email jobs@acme.example.", "url": "u1"},
+               {"n": 2, "kind": "web:people", "title": "Leadership", "text": "Dana Whitfield\nChief Information Officer", "url": "https://acme.example/leadership"}]
+    brief = run(radar_research._draft({"name": "Acme", "id": "x"}, sources))
+    assert seen["providers"] == ["free"] and "Dana" not in seen["user"] and "jobs@acme.example" not in seen["user"] and "Leadership" not in seen["user"]
+    assert "Dana Whitfield" in brief["headline"]  # restored on our side
+    assert "Invented Person" not in [c["name"] for c in brief["contacts"]] and "personal data removed" in brief["provider"]
+
+
+def test_buying_stage_and_committee():
+    import account_intel as ai
+    sig = [{"type": "competitor_job"}]
+    assert ai.stage_of({}, sig, [], [])["stage"] == "problem_aware"
+    assert ai.stage_of({}, sig + [{"type": "visit"}], [], [])["stage"] == "exploring"
+    s = ai.stage_of({}, sig, [{"stage": "mql"}], [{"label": "interested"}])
+    assert s["stage"] == "evaluating" and s["intent"] == "buying" and "replied with interest" in s["evidence"]
+    assert ai.stage_of({"status": "meeting_booked"}, sig, [], [])["stage"] == "engaged"
+    assert ai.stage_of({"status": "opportunity"}, sig, [], [])["stage"] == "buying"
+    com = ai.committee({"pitch_product": "application-retirement"}, [{"id": "a", "title": "Chief Information Officer", "email": "a@x.example"},
+                                                                     {"id": "b", "title": "Records Manager"}], [{"contact_id": "b", "label": "interested"}])
+    assert com["line"] == "archiving" and com["coverage"] == 50 and com["engaged"] == 1
+    assert any("architecture" in m.lower() for m in com["missing"])
+
+
+def test_lookalikes_score_resemblance():
+    import account_intel as ai
+    won = [{"id": f"w{i}", "status": "opportunity", "industry_slug": "insurance", "segment": "enterprise", "competitor_keys": ["opentext-infoarchive"],
+            "signal_types": ["competitor_job"]} for i in range(4)]
+    others = [{"id": f"o{i}", "status": "new", "industry_slug": "retail", "segment": "smb", "competitor_keys": [], "signal_types": ["news"]} for i in range(10)]
+    twin = {"id": "t", "status": "new", "industry_slug": "insurance", "segment": "enterprise", "competitor_keys": ["opentext-infoarchive"], "signal_types": ["competitor_job"]}
+    model = ai.lookalike_model(won + others + [twin])
+    assert model and model["positives"] == 4 and any(t["value"] == "insurance" for t in model["traits"])
+    assert ai.lookalike_score(twin, model)["score"] >= 70 > ai.lookalike_score(others[0], model)["score"]
+    assert ai.lookalike_model(others) is None  # needs positive accounts to learn from
+
+
+def test_journey_and_committee_on_accounts_and_in_the_review(client):
+    cid = _company("Stagecoach Insurance", industry="Insurance")
+    c = client.get(f"/api/admin/radar/accounts/{cid}").json()["account"]
+    assert c["journey"]["stage"] == "problem_aware" and c["committee"]["roles"]
+    run(database.db.companies.update_one({"id": cid}, {"$set": {"status": "meeting_booked"}}))
+    import radar_service as rs
+    run(rs.recompute(cid))
+    c = run(database.db.companies.find_one({"id": cid}, {"_id": 0}))
+    assert c["journey"]["stage"] == "engaged" and c["journey_moves"][-1]["to"] == "engaged"
+    assert any(h["action"] == "stage" for h in c["history"])
+    assert client.get("/api/admin/radar/accounts", params={"stage": "engaged"}).json()["total"] >= 1
+    rev = client.post("/api/admin/intelligence/review").json()
+    assert any("moved forward" in i["title"] for i in rev["insights"])
+    assert any(i["kind"] == "opportunity" and "contact" in i["title"] for i in rev["insights"])

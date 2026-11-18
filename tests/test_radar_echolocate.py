@@ -433,23 +433,34 @@ def test_overlapping_runs_send_each_step_and_message_once(client):
 
 
 def test_free_tier_models_never_see_prospect_data(client, monkeypatch):
+    """Free tiers run the Radar's AI, but only on text with every personal identifier removed (privacy.py)."""
     import llm
     monkeypatch.setenv("GEMINI_API_KEY", "free")
     monkeypatch.delenv("LLM_PII_PROVIDERS", raising=False)
 
     calls = []
 
-    async def must_not_run(*a, **k):
-        calls.append(a)  # classify() swallows every error, so record the call rather than raise past it
-        raise llm.ProviderError("prospect data reached a free-tier model")
+    async def record(messages, *a, **k):
+        calls.append(" ".join(m["content"] for m in messages))  # classify() swallows every error, so record the call rather than raise past it
+        raise llm.ProviderError("stub")
         yield  # pragma: no cover
 
-    monkeypatch.setattr(llm, "stream_completion", must_not_run)
-    assert run(outbound.classify("Hmm, perhaps."))["by"] == "rules"
-    assert run(radar_research._complete("system", "Jordan Example, CIO")) == (None, None, None)
-    run(_mock_db.company_signals.insert_one({"id": "pii-s", "company_id": "pii-co", "type": "job_posting", "title": "Records Manager", "evidence_text": "Retire legacy apps."}))
-    run(outbound.write_opener({"title": "CIO"}, {"id": "pii-co", "name": "Initech"}))
-    assert calls == []
+    monkeypatch.setattr(llm, "stream_completion", record)
+    reply = "Thanks, sounds interesting. Call me on +1 415 555 0199 or jordan.example@initech.example.\n\nBest regards,\nJordan Example\nCIO, Initech"
+    assert run(outbound.classify(reply))["by"] == "rules"
+    assert run(radar_research._complete("system", "Jordan Example, CIO")) == (None, None, None)  # direct calls still need a cleared provider
+    run(_mock_db.company_signals.insert_one({"id": "pii-s", "dedupe_key": "pii-s", "company_id": "pii-co", "type": "linkedin", "title": "Records Manager",
+                                             "person": "Morgan Sample", "evidence_text": "Morgan Sample, Records Manager, liked a post on retiring legacy apps."}))
+    run(outbound.write_opener({"title": "CIO", "name": "Jordan Example"}, {"id": "pii-co", "name": "Initech"}))
+    sent = " ".join(calls)
+    assert calls and "interesting" in sent  # the free tier was used
+    for pii in ("Jordan", "Morgan Sample", "555 0199", "@initech.example", "Best regards"):
+        assert pii not in sent, pii
+    # Deep dives on a free tier: no leadership pages, no names; people come from the rules on our server.
+    import privacy
+    assert privacy.providers_for("research")[1] == "redacted"
+    monkeypatch.setenv("RADAR_FREE_AI", "off")
+    assert privacy.providers_for("research") == ([], "off")
     assert client.get("/api/admin/compliance/settings").json()["transport"]["live_sending"] is False
 
 

@@ -461,12 +461,13 @@ async def _recompute_batch(ids: List[str], ctx: tuple) -> List[dict]:
         for lid in c.get("lead_ids") or []:
             listed[lid].add(cid)
     q = {"$or": [{"company_id": {"$in": list(with_leads)}}] + ([{"id": {"$in": list(listed)}}] if listed else [])}
-    sig_rows, research_rows, lead_rows, people, enrollment_rows = await asyncio.gather(
+    sig_rows, research_rows, lead_rows, people, enrollment_rows, reply_rows = await asyncio.gather(
         db.company_signals.find({"company_id": {"$in": ids}}, {"_id": 0, "raw": 0}).to_list(None),
         db.radar_research.find({"company_id": {"$in": ids}, "status": {"$in": ["approved", "draft", "queued", "running"]}}, RESEARCH_FIELDS).to_list(None),
         db.leads.find(q, LEAD_FIELDS).to_list(None) if with_leads else _nothing(),
-        db.contacts.find({"company_id": {"$in": ids}}, {"_id": 0, "company_id": 1, "email": 1, "email_status": 1, "suppressed": 1}).to_list(None),
-        db.enrollments.find({"company_id": {"$in": ids}}, {"_id": 0, "company_id": 1}).to_list(None))
+        db.contacts.find({"company_id": {"$in": ids}}, {"_id": 0, "id": 1, "company_id": 1, "email": 1, "email_status": 1, "suppressed": 1, "title": 1}).to_list(None),
+        db.enrollments.find({"company_id": {"$in": ids}}, {"_id": 0, "company_id": 1}).to_list(None),
+        db.reply_log.find({"company_id": {"$in": ids}}, {"_id": 0, "company_id": 1, "contact_id": 1, "label": 1, "received_at": 1}).to_list(None))
     signals: dict = defaultdict(list)
     for sig in sig_rows:
         signals[sig["company_id"]].append(sig)
@@ -489,13 +490,33 @@ async def _recompute_batch(ids: List[str], ctx: tuple) -> List[dict]:
         if p.get("email") and not p.get("suppressed") and p.get("email_status") != "invalid":
             reachable[p["company_id"]] += 1
     enrolled = {e["company_id"] for e in enrollment_rows}
+    contacts_by: dict = defaultdict(list)
+    for p in people:
+        contacts_by[p["company_id"]].append(p)
+    replies_by: dict = defaultdict(list)
+    for rr in reply_rows:
+        replies_by[rr["company_id"]].append(rr)
+    import account_intel
     refresh = int(settings.get("refresh_days") or 30)
     out, writes = [], []
     for c in companies:
         update = _compute(c, signals[c["id"]], latest.get(c["id"]), c["id"] in pending, leads[c["id"]], terr, members, settings, half_life)
         update["next_action"] = rm.next_action({**c, **update}, reachable=reachable[c["id"]], enrolled=c["id"] in enrolled, research=latest.get(c["id"]),
                                                signals=signals[c["id"]], refresh_days=refresh)
-        writes.append(UpdateOne({"id": c["id"]}, {"$set": update}))
+        # Buying stage and committee (account_intel.py); a stage change is dated and kept in history.
+        merged = {**c, **update}
+        j = account_intel.stage_of(merged, signals[c["id"]], leads[c["id"]], replies_by[c["id"]])
+        prev = (c.get("journey") or {}).get("stage")
+        j["since"] = (c.get("journey") or {}).get("since") if prev == j["stage"] else now_iso()
+        update["journey"] = j
+        update["committee"] = account_intel.committee(merged, contacts_by[c["id"]], replies_by[c["id"]])
+        push = {}
+        if prev and prev != j["stage"]:
+            push = {"$push": {"history": {"$each": [{"at": now_iso(), "by": "system", "action": "stage",
+                                                      "detail": f"Buying stage: {account_intel.STAGE_LABELS.get(prev, prev)} → {j['label']}"}], "$slice": -100}},
+                    }
+            update["journey_moves"] = ((c.get("journey_moves") or []) + [{"from": prev, "to": j["stage"], "at": now_iso()}])[-20:]
+        writes.append(UpdateOne({"id": c["id"]}, {"$set": update, **push}))
         out.append({**c, **update})
     await db.companies.bulk_write(writes, ordered=False)
     cache.bump("radar_companies")

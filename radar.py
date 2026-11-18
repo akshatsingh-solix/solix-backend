@@ -53,11 +53,13 @@ class RadarFilters(BaseModel):
     ready_only: bool = False
     verified_only: bool = False  # every core fact verified (data_quality.py)
     industry: Optional[str] = None  # a Solix industry slug (data_quality.industry_slug)
+    stage: Optional[str] = None  # buying stage (account_intel.STAGES)
 
 
 def filters_dep(q: Optional[str] = None, competitor: Optional[str] = None, strength: Optional[str] = None, country: Optional[str] = None, state: Optional[str] = None,
                 territory: Optional[str] = None, owner: Optional[str] = None, status: Optional[str] = None, line: Optional[str] = None, segment: Optional[str] = None,
-                tab: str = "all", ready_only: bool = False, verified_only: bool = False, industry: Optional[str] = None) -> RadarFilters:
+                tab: str = "all", ready_only: bool = False, verified_only: bool = False, industry: Optional[str] = None,
+                stage: Optional[str] = None) -> RadarFilters:
     return RadarFilters(**{k: v for k, v in locals().items()})
 
 
@@ -112,6 +114,8 @@ def _passes(c: dict, f: RadarFilters, fresh: str, *, with_tab: bool = True) -> b
         return False
     if f.industry and c.get("industry_slug") != f.industry:
         return False
+    if f.stage and (c.get("journey") or {}).get("stage") != f.stage:
+        return False
     if not with_tab or f.tab in ("all", "territory"):
         return True
     if f.tab == "new":
@@ -126,11 +130,18 @@ def _passes(c: dict, f: RadarFilters, fresh: str, *, with_tab: bool = True) -> b
         return bool(c.get("surge"))
     if f.tab == "excluded":
         return bool(c.get("excluded_reason"))
+    if f.tab == "lookalikes":  # resemble the accounts that said yes (learning.py, weekly)
+        return (c.get("lookalike") or {}).get("score", 0) >= LOOKALIKE_MIN and not c.get("excluded_reason")
     want = TAB_TYPES.get(f.tab)
     return bool(want & set(c.get("signal_types") or [])) if want else True
 
 
+LOOKALIKE_MIN = 60  # keep in step with learning.LOOKALIKE_MIN
+
+
 def _sort_key(sort: str):
+    if sort == "lookalike":
+        return lambda c: (-((c.get("lookalike") or {}).get("score") or 0), c.get("name") or "")
     if sort == "score":
         return lambda c: (-(c.get("score") or 0), c.get("name") or "")
     if sort == "recent":
@@ -171,7 +182,7 @@ def _live_sources() -> dict:
     import providers as pv
     import radar_intel
     chains = {cap: sum(1 for s in pv.SPECS if s.capability == cap and pv.configured(s)) for cap in pv.CAPABILITIES}
-    return {**radar_intel.sources_available(), "web_provider": radar_intel.web_provider(), "ai_model": bool(llm.pii_providers()),
+    return {**radar_intel.sources_available(), "web_provider": radar_intel.web_provider(), "ai_model": _privacy().status()["on"], "ai_mode": _privacy().status(),
             "crustdata": bool(os.environ.get("CRUSTDATA_API_KEY")), "chains": chains}
 
 
@@ -187,7 +198,18 @@ async def _meta() -> dict:
         "segments": [{"key": k, "label": rm.SEGMENT_LABELS[k]} for k in rm.SEGMENTS], "signal_labels": rm.SIGNAL_LABELS,
         "products": [{"key": k, "label": v["label"]} for k, v in sorted(_pf().PRODUCTS.items(), key=lambda kv: kv[1]["label"])],
         "industries": [{"key": k, "label": v} for k, v in _dq().INDUSTRY_LABELS.items()], "data_fields": _dq().FIELDS,
+        "stages": [{"key": k, "label": v} for k, v in _ai().STAGE_LABELS.items()],
     }
+
+
+def _ai():
+    import account_intel
+    return account_intel
+
+
+def _privacy():
+    import privacy
+    return privacy
 
 
 def _pf():
@@ -259,7 +281,7 @@ async def summary(f: RadarFilters = Depends(filters_dep), user: dict = Depends(g
         "competitors": [{"product": k, "signals": v} for k, v in sorted(comp_counts.items(), key=lambda kv: -kv[1])[:8]],
         "scope": [{"id": c["id"], "name": c["name"], "strength": c.get("strength"), "signals": c.get("signal_count") or 0, "dive": c.get("research_score"), "surge": c.get("surge"), "fresh": fresh[c["id"]]} for c in base],
         "territories": [{**t, "reps": sorted(t["reps"].values(), key=lambda r: -r["accounts"])} for t in sorted(terr.values(), key=lambda t: rm.TERRITORY_ORDER.index(t["territory"]) if t["territory"] in rm.TERRITORY_ORDER else 99)],
-        "tabs": {tab: sum(1 for c in base if _passes(c, RadarFilters(tab=tab), fresh[c["id"]])) for tab in ("new", "todo", "dives", "jobs", "problems", "linkedin", "dns", "news", "tenders", "website", "intent", "ready", "surge", "excluded")},
+        "tabs": {tab: sum(1 for c in base if _passes(c, RadarFilters(tab=tab), fresh[c["id"]])) for tab in ("new", "todo", "dives", "jobs", "problems", "linkedin", "dns", "news", "tenders", "website", "intent", "ready", "surge", "excluded", "lookalikes")},
         "trend": {"weeks": weeks, "series": [{"key": k, "product": (rm.COMPETITOR_BY_KEY.get(k) or {}).get("product", k), "counts": [v.get(w, 0) for w in weeks]}
                                              for k, v in sorted(trend.items(), key=lambda kv: -sum(kv[1].values()))[:6]]},
         "last_run": last,
@@ -281,6 +303,8 @@ async def list_accounts(f: RadarFilters = Depends(filters_dep), sort: str = "str
             rows.append(_card(c, fr))
     if f.tab == "dives" and sort == "strength":
         sort = "dives"
+    if f.tab == "lookalikes" and sort == "strength":
+        sort = "lookalike"
     rows.sort(key=_sort_key(sort), reverse=(sort == "recent"))
     start = (page - 1) * page_size
     return {"items": rows[start:start + page_size], "total": len(rows), "page": page, "page_size": page_size}
