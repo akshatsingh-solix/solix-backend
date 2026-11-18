@@ -134,6 +134,8 @@ import home  # noqa: E402
 import permissions  # noqa: E402
 app.include_router(permissions.router)
 app.include_router(home.router)
+import intelligence  # noqa: E402
+app.include_router(intelligence.router)
 
 # Compress JSON/CSV responses; tiny responses aren't worth the CPU.
 app.add_middleware(GZipMiddleware, minimum_size=800)

@@ -58,6 +58,8 @@ DEFAULT_RADAR = {
     "countries": ["United States", "Canada", "United Kingdom"],
     "tender_countries": [],   # ISO3 codes for TED, empty = all EU
     "weights": {},            # learned multipliers per signal type (outbound.learn)
+    "product_weights": {},    # learned multipliers for product-fit evidence (learning.py), bounded 0.5-1.5
+    "accuracy_target": 0.98,  # a fact counts as verified when a person confirmed it or its sources push it past this (data_quality.py)
 }
 
 
@@ -367,9 +369,11 @@ async def _context(terr: Optional[dict] = None, members: Optional[list] = None, 
     """Territories, team, Radar settings and the score half-life, shared by every recompute and cached briefly."""
     async def produce():
         half = (await _db().settings.find_one({"key": "scoring"}, {"_id": 0}) or {}).get("half_life_days", scoring.DEFAULT_SETTINGS["half_life_days"])
-        return {"terr": await territories(), "members": await team_members(), "settings": await radar_settings(), "half": half}
+        import data_quality as dq
+        return {"terr": await territories(), "members": await team_members(), "settings": await radar_settings(), "half": half, "acc": await dq.stats()}
     ctx = await cache.memo("radar_ctx", "ctx", 30, produce)
-    return terr or ctx["terr"], ctx["members"] if members is None else members, settings or ctx["settings"], ctx["half"] if half_life is None else half_life
+    return (terr or ctx["terr"], ctx["members"] if members is None else members, {**(settings or ctx["settings"]), "_acc": ctx.get("acc")},
+            ctx["half"] if half_life is None else half_life)
 
 
 def _website_intent(leads: list) -> Optional[dict]:
@@ -421,6 +425,23 @@ def _compute(company: dict, signals: list, research: Optional[dict], pending: bo
         if target in rank and rank[target] > rank.get(status, -1):
             status = target
     update["status"] = status
+    # Data quality (data_quality.py): how likely each core fact is right, from its sources and their measured accuracy.
+    import data_quality as dq
+    q = dq.account_quality({**company, **update}, settings.get("_acc"), float(settings.get("accuracy_target") or dq.TARGET))
+    update["data_quality"] = {k: q[k] for k in ("score", "verified", "core", "meets_target", "conflicting", "missing")}
+    update["industry_slug"] = q["industry_slug"]
+    if not (company.get("confirmed") or {}).get("industry") and q["fields"]["industry"]["value"]:
+        update["industry"] = q["fields"]["industry"]["value"]
+    # What to pitch, cross-sell and up-sell (product_fit.py), from the same evidence.
+    import product_fit
+    lead_products: dict = {}
+    for l in leads:
+        for slug, pts in (l.get("product_scores") or {}).items():
+            lead_products[slug] = lead_products.get(slug, 0) + float(pts or 0)
+    fit = product_fit.recommend({**company, **update}, signals, lead_products=lead_products, weights=settings.get("product_weights") or {})
+    update["product_fit"] = fit["plays"][:4]
+    update["pitch_product"] = fit["plays"][0]["product"] if fit["plays"] else None
+    update["pitch_summary"] = fit["summary"]
     update["stamp"] = rm.freshness_stamp({**company, **update})
     words = {str(sig.get(k)).strip().lower() for sig in signals for k in SEARCH_FIELDS if sig.get(k)}
     update["search_text"] = " | ".join(sorted(words))[:6000]
@@ -591,6 +612,12 @@ async def patch_company(company: dict, body: dict, user: dict) -> dict:
     if body.get("notes") is not None and body["notes"] != company.get("notes"):
         sets["notes"] = body["notes"][:5000]
         notes.append(("notes", "Notes updated"))
+    if body.get("products_owned") is not None:
+        import product_fit
+        owned = sorted({p for p in body["products_owned"] if p in product_fit.PRODUCTS})
+        if owned != sorted(company.get("products_owned") or []):
+            sets["products_owned"] = owned
+            notes.append(("products", "Products owned → " + (", ".join(product_fit.label(p) for p in owned) or "none")))
     for k in ("is_customer", "revenue_band", "industry"):
         if k in body and body[k] is not None and body[k] != company.get(k):
             sets[k] = body[k]
@@ -614,6 +641,7 @@ async def patch_company(company: dict, body: dict, user: dict) -> dict:
         notes.append(("exclusion", f"Excluded: {sets['manual_exclusion']}" if sets["manual_exclusion"] else "Exclusion removed"))
     if not sets:
         return company
+    sets.update(await _confirm_edits(company, sets, user))
     sets["updated_at"] = now_iso()
     await _db().companies.update_one({"id": company["id"]}, {"$set": sets})
     if notes:
@@ -622,6 +650,54 @@ async def patch_company(company: dict, body: dict, user: dict) -> dict:
     if sets.get("domains"):
         await link_by_domain({**company, **sets})
     return await recompute(company["id"])
+
+
+async def _confirm_edits(company: dict, sets: dict, user: dict) -> dict:
+    """A person typing a fact is the truth for it: score the sources that reported it and keep it as confirmed."""
+    import data_quality as dq
+    by = user.get("email", "system")
+    edits = {}
+    hq_before = rm.country_norm((company.get("hq") or {}).get("country")) if (company.get("hq") or {}).get("country") else None
+    # Only values a person actually changed are checks; re-saving the prefilled form confirms nothing.
+    if sets.get("industry") and sets["industry"] != company.get("industry"):
+        edits["industry"] = sets["industry"]
+    if sets.get("revenue_band") and sets["revenue_band"] != company.get("revenue_band"):
+        edits["revenue"] = sets["revenue_band"]
+    if (sets.get("hq") or {}).get("country") and rm.country_norm(sets["hq"]["country"]) != hq_before:
+        edits["country"] = rm.country_norm(sets["hq"]["country"])
+    if sets.get("domains") and sets["domains"][0] != (company.get("domains") or [None])[0]:
+        edits["domain"] = sets["domains"][0]
+    if sets.get("employees") and sets["employees"] != company.get("employees"):
+        edits["employees"] = sets["employees"]
+    out = {}
+    for field, value in edits.items():
+        await dq.record_check(company, field, value, by=by, how="person_correct")
+        if field != "employees":  # headcount keeps its own manual source (employees_source)
+            out[f"confirmed.{field}"] = {"value": value, "by": by, "at": now_iso()}
+    return out
+
+
+async def confirm_fields(company: dict, fields: List[str], user: dict, *, audit: bool = False) -> dict:
+    """A person checked the shown values and they're right: they become verified and every source is scored."""
+    import data_quality as dq
+    q = dq.account_quality(company, await dq.stats())
+    sets, done = {}, []
+    by = user.get("email", "system")
+    for f in fields:
+        v = q["fields"].get(f)
+        if not v or v["value"] in (None, ""):
+            continue
+        await dq.record_check(company, f, v["value"], by=by, how="audit" if audit else "person_confirm")
+        if f == "employees":
+            sets.update({"employees": int(v["value"]), "employees_source": {"via": "manual", "match": "manual", "confidence": "high", "by": by, "at": now_iso(),
+                                                                           "confirmed_from": v["sources"]}})
+        else:
+            sets[f"confirmed.{f}"] = {"value": v["value"], "by": by, "at": now_iso()}
+        done.append(f)
+    if sets:
+        await _db().companies.update_one({"id": company["id"]}, {"$set": sets})
+        await add_history(company["id"], by, "confirmed", "Confirmed " + ", ".join(dq.FIELDS[f] for f in done))
+    return await recompute(company["id"]) or company
 
 
 # --- Leads <-> companies ---------------------------------------------------------------------

@@ -264,6 +264,9 @@ async def enrich_company(client: httpx.AsyncClient, c: dict, *, bulk: bool = Fal
                                                           "linkedin_url", "public", "fields_from", "candidates") if f.get(k) not in (None, "", {}, [])}, "at": now_iso()}
         if f.get("candidates"):
             sets["size_candidates"] = rm.merge_candidates(c.get("size_candidates"), f["candidates"])
+        if f.get("observations"):
+            import data_quality as dq
+            sets["facts"] = dq.merge_facts(c.get("facts"), f["observations"])
         for k in ("revenue_usd", "revenue_band", "industry"):
             if f.get(k) not in (None, "") and c.get(k) in (None, ""):
                 sets[k] = f[k]

@@ -306,7 +306,7 @@ def test_enroll_approve_send_reply_flow(client, monkeypatch):
     monkeypatch.setattr(outbound, "_in_window", lambda s, n: True)
     contact = run(_mock_db.contacts.find_one({"email": "jordan@acmemutual.example"}, {"_id": 0}))
     seqs = client.get("/api/admin/outbound/sequences").json()
-    assert len(seqs) == 2
+    assert len(seqs) == 3 and any(s["name"].startswith("Persona-led") for s in seqs)  # EU, US and the persona-led sequence
     eu = next(s for s in seqs if s["region"] == "eu")
     us = next(s for s in seqs if s["region"] == "us")
     wrong = client.post("/api/admin/outbound/enrollments", json={"contact_ids": [contact["id"]], "sequence_id": eu["id"]}).json()

@@ -51,11 +51,13 @@ class RadarFilters(BaseModel):
     segment: Optional[str] = None
     tab: str = "all"
     ready_only: bool = False
+    verified_only: bool = False  # every core fact verified (data_quality.py)
+    industry: Optional[str] = None  # a Solix industry slug (data_quality.industry_slug)
 
 
 def filters_dep(q: Optional[str] = None, competitor: Optional[str] = None, strength: Optional[str] = None, country: Optional[str] = None, state: Optional[str] = None,
                 territory: Optional[str] = None, owner: Optional[str] = None, status: Optional[str] = None, line: Optional[str] = None, segment: Optional[str] = None,
-                tab: str = "all", ready_only: bool = False) -> RadarFilters:
+                tab: str = "all", ready_only: bool = False, verified_only: bool = False, industry: Optional[str] = None) -> RadarFilters:
     return RadarFilters(**{k: v for k, v in locals().items()})
 
 
@@ -105,6 +107,10 @@ def _passes(c: dict, f: RadarFilters, fresh: str, *, with_tab: bool = True) -> b
         if f.segment not in ("unknown", "target") and c.get("segment") != f.segment:
             return False
     if f.ready_only and (not c.get("research_id") or rm.verdict_class({"score": c.get("research_score"), "verdict": c.get("research_verdict")}) != "ready"):
+        return False
+    if f.verified_only and not (c.get("data_quality") or {}).get("meets_target"):
+        return False
+    if f.industry and c.get("industry_slug") != f.industry:
         return False
     if not with_tab or f.tab in ("all", "territory"):
         return True
@@ -179,7 +185,19 @@ async def _meta() -> dict:
         "countries": sorted(c for c in countries if c), "states": sorted(x for x in states if x), "reps": sorted({na["rep"] for na in terr.get("named_accounts", [])} | set((terr.get("us_states") or {}).values()) | set((terr.get("territory_owners") or {}).values())),
         "settings": {k: settings[k] for k in ("research_per_run", "refresh_days", "collectors", "target_segments", "segments", "min_employees")}, "ready_score": rm.READY_SCORE,
         "segments": [{"key": k, "label": rm.SEGMENT_LABELS[k]} for k in rm.SEGMENTS], "signal_labels": rm.SIGNAL_LABELS,
+        "products": [{"key": k, "label": v["label"]} for k, v in sorted(_pf().PRODUCTS.items(), key=lambda kv: kv[1]["label"])],
+        "industries": [{"key": k, "label": v} for k, v in _dq().INDUSTRY_LABELS.items()], "data_fields": _dq().FIELDS,
     }
+
+
+def _pf():
+    import product_fit
+    return product_fit
+
+
+def _dq():
+    import data_quality
+    return data_quality
 
 
 @router.get("/summary")
@@ -285,7 +303,16 @@ async def get_account(company_id: str, user: dict = Depends(get_current_admin)):
     signals.sort(key=lambda s: (rm.STRENGTH_RANK.get(s.get("role_strength") or "Unrated", 3) if s["type"] == "competitor_job" else 4, str(s.get("posted_at") or s.get("first_seen_at") or "")), reverse=False)
     for e in enrollments:  # the rendered copy stays out of the drawer payload; only its length is shown
         e["steps_total"] = len(e.pop("steps", None) or [])
-    return {"account": _card(c, rs.freshness(c, seen)), "signals": signals, "research": research, "leads": leads, "contacts": contacts, "enrollments": enrollments}
+    import data_quality as dq
+    quality = dq.account_quality(c, await dq.stats(), float((await rs._context())[2].get("accuracy_target") or dq.TARGET))
+    import product_fit
+    lead_products: dict = {}
+    for l in await _db().leads.find({"id": {"$in": c.get("lead_ids") or []}}, {"_id": 0, "product_scores": 1}).to_list(100):
+        for slug, pts in (l.get("product_scores") or {}).items():
+            lead_products[slug] = lead_products.get(slug, 0) + float(pts or 0)
+    fit = product_fit.recommend(c, signals, lead_products=lead_products, weights=(await rs._context())[2].get("product_weights") or {})
+    return {"account": _card(c, rs.freshness(c, seen)), "signals": signals, "research": research, "leads": leads, "contacts": contacts, "enrollments": enrollments,
+            "quality": quality, "fit": fit}
 
 
 # --- Writes --------------------------------------------------------------------------------
@@ -302,6 +329,7 @@ class AccountPatch(BaseModel):
     hq: Optional[Dict[str, Optional[str]]] = None
     domains: Optional[List[str]] = Field(default=None, max_length=20)
     manual_exclusion: Optional[str] = Field(default=None, max_length=200)
+    products_owned: Optional[List[str]] = Field(default=None, max_length=30)  # Solix products a customer already has (up-sell, not re-pitch)
 
 
 @router.patch("/accounts/{company_id}", dependencies=[can_work])
@@ -342,6 +370,49 @@ class AccountIn(BaseModel):
     country: Optional[str] = Field(default=None, max_length=80)
     state: Optional[str] = Field(default=None, max_length=80)
     zip: Optional[str] = Field(default=None, max_length=12)
+
+
+class ConfirmIn(BaseModel):
+    fields: List[str] = Field(min_length=1, max_length=5)
+    audit: bool = False  # checked as part of the random accuracy audit
+
+
+@router.post("/accounts/{company_id}/confirm", dependencies=[can_work])
+async def confirm_account_fields(company_id: str, body: ConfirmIn, user: dict = Depends(get_current_admin)):
+    """'These values are right': they become verified, and every source that reported them is scored."""
+    import data_quality as dq
+    c = await _db().companies.find_one({"id": company_id}, {"_id": 0})
+    if not c:
+        raise HTTPException(status_code=404, detail="Account not found")
+    bad = [f for f in body.fields if f not in dq.FIELDS]
+    if bad:
+        raise HTTPException(status_code=422, detail=f"Unknown field: {', '.join(bad)}")
+    if not body.audit:  # an audit check is part of measuring accuracy, open to anyone working the Radar
+        await _may_edit_account(c, {"confirm": True}, user)
+    updated = await rs.confirm_fields(c, body.fields, user, audit=body.audit)
+    return {"account": _card(updated, "seen"), "quality": dq.account_quality(updated, await dq.stats())}
+
+
+@router.get("/accuracy")
+async def accuracy_report(days: int = Query(90, ge=7, le=730)):
+    """Measured accuracy of what MarkHub shows, by field and by source, with 95% intervals and the target."""
+    import data_quality as dq
+    target = float((await rs._context())[2].get("accuracy_target") or dq.TARGET)
+    rep = await dq.report(days, target)
+    rows = await _db().companies.find({}, {"_id": 0, "data_quality": 1}).to_list(None)
+    scored = [r["data_quality"] for r in rows if r.get("data_quality")]
+    rep["accounts"] = {"total": len(rows), "meets_target": sum(1 for q in scored if q.get("meets_target")),
+                       "conflicting": sum(1 for q in scored if q.get("conflicting")), "avg_score": round(sum(q["score"] for q in scored) / len(scored)) if scored else None}
+    return rep
+
+
+@router.get("/accuracy/audit", dependencies=[can_work])
+async def accuracy_audit(n: int = Query(15, ge=1, le=50), user: dict = Depends(get_current_admin)):
+    """A random sample of shown values no person has confirmed: check them against the company's own site or filings.
+    Random, so the measured accuracy isn't biased towards the accounts people already looked at."""
+    import data_quality as dq
+    companies = await _db().companies.find({"excluded_reason": None, **(await _visible(user))}, {"_id": 0, "history": 0, "search_text": 0}).to_list(None)
+    return {"items": dq.audit_sample(companies, n), "fields": dq.FIELDS}
 
 
 @router.post("/accounts", status_code=201, dependencies=[can_work])

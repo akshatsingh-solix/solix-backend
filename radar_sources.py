@@ -720,7 +720,10 @@ FIRMO_ADAPTERS = {"wikidata": _firmo_wikidata, "gleif": _firmo_gleif, "sec": _fi
 
 
 def _merge_firmo(into: dict, got: dict, via: str, name: str = "") -> None:
+    import data_quality as dq
     import radar_model as rm
+    for field, o in dq.observations_from(got, via).items():  # every source's answer, for corroboration (data_quality.py)
+        into.setdefault("observations", {}).setdefault(field, []).append(o)
     if got.get("employees"):
         into.setdefault("candidates", []).append(rm.size_candidate(got["employees"], via, got.get("match") or "name", name=name, url=got.get("source_url")))
     for k in ("employees", "revenue_usd", "industry", "domain", "revenue_band", "linkedin_url", "legal_name", "public"):
@@ -738,8 +741,10 @@ def _merge_firmo(into: dict, got: dict, via: str, name: str = "") -> None:
 
 
 async def firmographics(client: httpx.AsyncClient, name: str, domain: Optional[str] = None, country: Optional[str] = None, *, bulk: bool = False,
-                        problems: Optional[List[str]] = None) -> dict:
-    """Employees, revenue, industry, HQ and domain, merged along the chain until the essentials are known."""
+                        problems: Optional[List[str]] = None, corroborate: bool = True) -> dict:
+    """Employees, revenue, industry, HQ and domain, merged along the chain until the essentials are known.
+    With `corroborate`, the free (keyless) registries are still asked once the essentials are in, so most facts have
+    a second, independent source: that is what lets data_quality call a value verified."""
     import radar_model as rm
     out: dict = {"hq": {}}
 
@@ -749,8 +754,8 @@ async def firmographics(client: httpx.AsyncClient, name: str, domain: Optional[s
         sized = any(c and c.get("confidence") in ("medium", "high") for c in out.get("candidates") or [])  # a name-only headcount isn't enough
         return bool(sized and located and (out.get("domain") or domain) and out.get("industry"))
     for spec in await pv.plan("firmographics"):
-        if complete():
-            break
+        if complete() and not (corroborate and spec.keyless):
+            continue
         if not (await pv.ready(spec, bulk))[0]:
             continue
         country_now = out["hq"].get("country") or country

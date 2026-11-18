@@ -48,6 +48,10 @@ DEFAULT_OUTBOUND = {
     "instantly_campaign_id": None, "blocked_countries": ["Germany", "Poland"], "postal_address": "", "sender_name": "Solix Technologies",
     "daily_cap": 50, "send_days": [0, 1, 2, 3, 4], "send_hours_utc": [8, 17], "min_account_score": 30, "require_verified_email": True,
     "max_touches": 4, "ai_disclosure": "", "bounce_pause_pct": 3.0, "ab_min_sends": 50,
+    # Data accuracy gate (data_quality.py): "conflicts" blocks accounts whose size or industry sources disagree;
+    # "verified" also blocks until every core fact is verified; "off" only warns.
+    "data_gate": "conflicts",
+    "site_url": "https://www.solix.com",  # product pages linked from persona emails
 }
 
 
@@ -194,6 +198,17 @@ async def gate(contact: dict, company: Optional[dict], settings: Optional[dict] 
             reasons.append(f"Account status is {rm.STATUS_LABELS.get(company['status'], company['status'])}")
         if not company.get("research_id"):
             warnings.append("No deep dive on this account yet")
+        dq = company.get("data_quality") or {}
+        mode = settings.get("data_gate") or "conflicts"
+        names = {"employees": "company size", "industry": "industry", "country": "HQ country", "domain": "website domain", "revenue": "revenue"}
+        conflicts = [names.get(f, f) for f in dq.get("conflicting") or []] or (["company size"] if company.get("size_status") == "doubtful" else [])
+        if conflicts and mode in ("conflicts", "verified"):
+            reasons.append(f"Sources disagree on the {', '.join(conflicts)}: confirm or correct it on the account first")
+        elif conflicts:
+            warnings.append(f"Sources disagree on the {', '.join(conflicts)}")
+        if dq and not dq.get("meets_target") and not conflicts:
+            msg = f"{dq.get('verified', 0)} of {dq.get('core', 4)} core company facts verified (data quality {dq.get('score')}%)"
+            (reasons if mode == "verified" else warnings).append(msg + (": confirm them on the account" if mode == "verified" else ""))
     if not await lia_signed(region):
         reasons.append(f"No signed Legitimate Interest Assessment for region '{region}'")
     if contact.get("id"):
