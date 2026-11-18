@@ -1,8 +1,30 @@
-# Production stack for a single VM (Oracle Always Free, or any small VPS).
+# Production stack for one VM (Oracle Always Free ARM, or any small VPS): API + MongoDB + HTTPS.
 #   docker compose up -d --build
-# Needs: .env (copy of .env.example, filled in) and API_DOMAIN in the same file,
-# e.g. API_DOMAIN=solix-api.duckdns.org
+# Needs .env next to this file (copy .env.example, fill it in). See docs/MIGRATION.md.
 services:
+  mongo:
+    image: mongo:8.0
+    restart: unless-stopped
+    command: ["mongod", "--wiredTigerCacheSizeGB", "1.5"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+    volumes:
+      - mongo_data:/data/db
+      - ./backups:/backups
+    # No "ports:" on purpose: the database is reachable only from the API container.
+    # To browse it from your laptop use an SSH tunnel (docs/MIGRATION.md, step 11).
+    mem_limit: 3g
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
   api:
     build: .
     restart: unless-stopped
@@ -10,6 +32,10 @@ services:
     environment:
       PORT: "8000"
       KEEP_AWAKE: "0"          # always-on host: no self-ping needed
+      MONGO_URL: mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PASSWORD}@mongo:27017/?authSource=admin
+    depends_on:
+      mongo:
+        condition: service_healthy
     expose:
       - "8000"
     mem_limit: 2g              # a runaway Radar run restarts the API, not the whole VM
@@ -39,5 +65,6 @@ services:
       - caddy_config:/config
 
 volumes:
+  mongo_data:
   caddy_data:
   caddy_config:

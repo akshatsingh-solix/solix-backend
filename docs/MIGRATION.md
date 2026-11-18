@@ -1,190 +1,195 @@
-# Moving solix-backend off Render (free tier)
+# Moving solix-backend to Oracle Cloud (API + MongoDB)
 
-## Why Render keeps restarting the API
+## Why
 
-Render's free instance has **512 MB RAM**. This service is heavy for that size:
+Render's free instance has **512 MB RAM** and this API runs everything in one process: the Radar daily run, scoring,
+the outbox/sender loop, PDF and Excel exports, site migration jobs. The "exceeded its memory limit" email came at
+10:31 IST, one minute after `RADAR_DAILY_UTC=05:00` (10:30 IST), so the Radar run is the likely trigger.
+MongoDB Atlas M0 caps storage at 512 MB and has no backups.
 
-- the Radar daily run, Radar scoring, the outbox/sender loop, PDF (reportlab) and Excel exports and the site
-  migration jobs all run **inside the one API process** (`ops.py`, `radar_run.py`, `migrate.py`);
-- the Mongo driver pool defaults to 100 connections;
-- the "exceeded its memory limit" email arrived at 10:31 IST, one minute after `RADAR_DAILY_UTC=05:00`
-  (05:00 UTC = 10:30 IST). That is the likely trigger. Confirm in Render > Metrics > Memory and Logs around that time.
+## Target
 
-A bigger host fixes the cause. A different 512 MB host would repeat it.
-
-## What stays, what moves
-
-| Part | Today | Plan |
+| Part | Before | After |
 |---|---|---|
-| API (FastAPI) | Render free, 512 MB, sleeps | **Oracle Cloud Always Free ARM VM** (up to 4 CPU / 24 GB, always on) |
-| Database | MongoDB Atlas M0 (512 MB) | Keep for now. Optional later: Mongo on the VM (200 GB) with nightly backups |
-| Website | GitHub Pages | Keep (free, static, fast) |
-| Daily jobs | in-process loop | Keep (VM is always on, so nothing is missed) |
-| HTTPS | Render | Caddy in Docker, automatic Let's Encrypt |
-| Uptime alerts | none | UptimeRobot or Better Stack free |
+| API | Render free, 512 MB, sleeps | Docker on an **Oracle Always Free ARM VM** (2-4 CPU, 12-24 GB), always on |
+| Database | MongoDB Atlas M0, 512 MB | **MongoDB 8 in Docker on the same VM**, 2 GB+ cache, ~150 GB of disk available |
+| HTTPS | Render | Caddy, automatic Let's Encrypt |
+| Backups | none | nightly `mongodump`, 14 days on the VM + copy to Oracle Object Storage (20 GB free) |
+| Website | GitHub Pages | unchanged |
 
-Fallback if Oracle will not give you a VM (see step 1): Google Cloud Run + Cloud Scheduler, section B at the end.
+Everything runs from `docker-compose.yml`. The database has no public port: only the API container can reach it.
 
-Free-tier facts below were checked on 2026-11-18 against Oracle's and Google's docs. Re-check the pricing pages before you rely on them.
+**What you take on by self-hosting the database:** backups, disk space and updates are now yours. Steps 9 and 10
+cover them. Do not skip the off-VM backup copy. Oracle can reclaim Always Free instances it considers idle, and a
+backup kept only on the VM's disk would go with it.
+
+The app was checked for Atlas-only features (Atlas Search, vector search, change streams, transactions). It uses none,
+so plain MongoDB works with no code changes.
 
 ---
 
-## A. Oracle Always Free VM (recommended)
+## Phase 1: Build the server (about 30 min, nothing changes for users)
 
-Oracle gives 200 GB block storage, and "idle Always Free compute instances may be reclaimed". This API pings itself and runs loops, so it is not idle, but still keep backups (step 9).
+### 1. Create the VM
 
-### 1. Create the VM (about 20 min)
+1. oracle.com/cloud/free. Pick the **home region** closest to your users (Mumbai or Hyderabad). It cannot be changed.
+2. Compute > Instances > Create instance:
+   - Image **Ubuntu 24.04** (aarch64)
+   - Shape **VM.Standard.A1.Flex**, **2 OCPU / 12 GB** (you can use up to 4 / 24 in total)
+   - Boot volume **100 GB** (of the 200 GB free; leaves room for a second VM or volume later)
+   - Add your SSH public key, or download the one Oracle generates
+3. "Out of host capacity" is common. Try another availability domain or try again later.
+4. Note the **public IP**. Then Networking > your VCN > Security List > add Ingress TCP **80** and **443** from
+   `0.0.0.0/0`. Do **not** open 27017.
 
-1. Sign up at oracle.com/cloud/free. A card is needed for identity checks and is not charged on Always Free.
-   Choose the **home region closest to your users** (Mumbai or Hyderabad for India). It cannot be changed later.
-2. Compute > Instances > Create instance.
-   - Image: **Ubuntu 22.04 or 24.04** (aarch64).
-   - Shape: Ampere **VM.Standard.A1.Flex**, 2 OCPU / 12 GB RAM is plenty. You can go to 4 / 24.
-   - Boot volume: 50 GB (default).
-   - Add your SSH public key (or let Oracle generate one and download it).
-3. If you get "Out of host capacity", retry later or in another availability domain. This is common.
-4. Note the **public IP**.
-5. Networking: VCN > Security List > add **Ingress** rules for TCP **80** and **443** from `0.0.0.0/0`. Leave 22 as is.
+### 2. Get a hostname
 
-### 2. Get a free hostname
-
-Pick one:
-- **DuckDNS** (duckdns.org): create `solix-api.duckdns.org`, point it at the VM's public IP.
-- Or a domain you own: add an `A` record `api.yourdomain.com` to the VM IP (Cloudflare DNS, proxy off).
+DuckDNS (free): create `solix-api.duckdns.org` pointing at the VM IP. Or, on a domain you own, an `A` record
+`api.yourdomain.com` (Cloudflare DNS with the proxy off).
 
 ### 3. Prepare the server
 
 ```bash
 ssh ubuntu@<VM_PUBLIC_IP>
-sudo apt-get update && sudo apt-get install -y docker.io docker-compose-v2 git
+sudo apt-get update && sudo apt-get install -y docker.io docker-compose-v2 git rclone
 sudo usermod -aG docker ubuntu && newgrp docker
-# Ubuntu images on Oracle block ports with iptables even after the security list is open:
+# Oracle's Ubuntu images also block ports with iptables:
 sudo iptables -I INPUT -p tcp --dport 80 -j ACCEPT
 sudo iptables -I INPUT -p tcp --dport 443 -j ACCEPT
 sudo apt-get install -y iptables-persistent && sudo netfilter-persistent save
 ```
 
-### 4. Get the code and secrets onto the VM
+### 4. Code and settings
 
 ```bash
-git clone https://github.com/akshatsingh-solix/solix-backend.git
+git clone -b claude/amazing-albattani-euy7ja https://github.com/akshatsingh-solix/solix-backend.git
 cd solix-backend
-cp .env.example .env
+mkdir -p backups            # create it as your user, so the backup script can rotate files
+cp .env.example .env && chmod 600 .env
+openssl rand -hex 24        # use the output as MONGO_ROOT_PASSWORD (hex: no characters that break the URL)
 nano .env
 ```
 
-Fill `.env` from the Render dashboard (Environment tab). Copy every value that has one, especially:
-`MONGO_URL`, `DB_NAME`, `JWT_SECRET`, `UNSUBSCRIBE_SECRET`, `OPS_TOKEN`, `INSTANTLY_WEBHOOK_SECRET`,
-`ADMIN_EMAIL`, `ADMIN_PASSWORD`, all provider keys.
+In `.env`:
 
-**Copy the generated secrets exactly** (`JWT_SECRET`, `UNSUBSCRIBE_SECRET`, `INSTANTLY_WEBHOOK_SECRET`, `OPS_TOKEN`).
-New values would log everyone out and break unsubscribe links already sent in emails.
+1. Copy every value from Render > solix-backend > Environment. **Copy these exactly**, because new values would log
+   everyone out and break unsubscribe links already sent: `JWT_SECRET`, `UNSUBSCRIBE_SECRET`,
+   `INSTANTLY_WEBHOOK_SECRET`, `OPS_TOKEN`.
+2. Add:
+   ```
+   MONGO_ROOT_USER=solix
+   MONGO_ROOT_PASSWORD=<the hex value>
+   DB_NAME=solix
+   API_DOMAIN=solix-api.duckdns.org
+   PUBLIC_API_URL=https://solix-api.duckdns.org
+   KEEP_AWAKE=0
+   ```
+3. Leave `MONGO_URL` as anything: `docker-compose.yml` points the API at the local database and overrides it.
+   Keep the Atlas string somewhere safe; step 6 needs it once.
 
-Then set these for the new host:
+### 5. Start the database only
 
+```bash
+docker compose up -d mongo
+docker compose ps           # mongo should become "healthy" within ~30 s
 ```
-API_DOMAIN=solix-api.duckdns.org
-PUBLIC_API_URL=https://solix-api.duckdns.org
-KEEP_AWAKE=0
+
+### 6. Let the VM read Atlas, then copy the data
+
+Atlas > Network Access > Add IP Address > the VM's public IP.
+
+```bash
+ATLAS_URL='mongodb+srv://USER:PASS@cluster0.xxxxx.mongodb.net' scripts/copy_from_atlas.sh
 ```
 
-Keep the file private: `chmod 600 .env`. Never commit it.
+It dumps Atlas into `backups/atlas-<date>.gz`, restores it locally, then compares document counts per collection.
+"OK: every collection has the same count" means the copy is complete. Small differences are expected while Render
+is still taking writes. The final copy in step 8 fixes that.
 
-### 5. Let the new host reach Mongo Atlas
-
-Atlas > Network Access > add the VM's public IP. (While testing, `0.0.0.0/0` works, then tighten it.)
-
-### 6. Start it
+### 7. Start the API and test it
 
 ```bash
 docker compose up -d --build
-docker compose logs -f api
+docker compose logs -f api            # wait for "Application startup complete"
+curl https://solix-api.duckdns.org/api/   # from your laptop; first call may take ~30 s for the certificate
 ```
 
-Wait for "Application startup complete", then from your laptop:
+Test against the new URL: admin login, leads list, a Sol chat question, a PDF or Excel export. Then run
+`docker stats` and check memory.
+
+The API starts its background loops here too (sender, outbox, Radar at 05:00 UTC). It writes only to the local
+copy, which step 8 replaces. Two things to avoid while both servers run:
+
+- **Real outbound email.** Keep `OUTBOUND_LIVE_SENDING` empty on the VM until cutover, or the same email could leave twice.
+- **Running the Radar by hand** on the VM before cutover.
+
+## Phase 2: Cutover (about 15 min of downtime, pick a quiet hour)
+
+### 8. Freeze, final copy, switch
+
+1. **Render > solix-backend > Suspend.** Atlas now stops receiving writes, so nothing is lost after the copy.
+2. On the VM, run the final copy and restart the API on the fresh data:
+   ```bash
+   ATLAS_URL='mongodb+srv://...' scripts/copy_from_atlas.sh   # must end with "OK"
+   docker compose restart api
+   ```
+3. Set `OUTBOUND_LIVE_SENDING` in `.env` to whatever it was on Render, then `docker compose up -d`.
+4. Point everything at the new address:
+   - Website repo > Settings > Secrets and variables > Actions > **Variables**: `BACKEND_URL=https://solix-api.duckdns.org`,
+     then re-run the Pages deploy workflow.
+   - `Website/empower/src/lib/api.js`: the hard-coded Render fallback URL.
+   - Instantly webhook URL (Admin > Outbound).
+   - Any external cron calling `/api/ops/tick` (not needed any more on an always-on VM: delete it).
+5. Check the live site: form submission and lead alert, chat, gated download email, unsubscribe link.
+
+**Rollback** (if something is wrong in the first days): resume Render and set `BACKEND_URL` back. Data written to the
+VM since cutover would need copying back with `mongodump`/`mongorestore` (the same commands in reverse).
+
+### 9. Backups (same day)
 
 ```bash
-curl https://solix-api.duckdns.org/api/
+crontab -e
+# add:
+15 2 * * * /home/ubuntu/solix-backend/scripts/backup.sh >> /home/ubuntu/backup.log 2>&1
 ```
 
-The first HTTPS request can take about 30 seconds while Caddy gets the certificate.
+Off-VM copy (strongly recommended): Oracle Console > Storage > Buckets > create `solix-backups`. Identity > your user
+> Customer Secret Keys > generate one. Then `rclone config` to add an **S3 / Oracle Cloud** remote named
+`ocibucket` with endpoint `https://<namespace>.compat.objectstorage.<region>.oraclecloud.com`, and add to `.env`:
 
-### 7. Test before switching anything
+```
+BACKUP_REMOTE=ocibucket:solix-backups
+```
 
-The old Render service keeps running during all of this, so nothing breaks yet.
+Run `scripts/backup.sh` once by hand and check the file appears in the bucket.
+**Test a restore once:** `docker compose exec -T mongo mongorestore --uri "<local uri>" --gzip --archive=/backups/<file> --nsFrom='solix.*' --nsTo='restoretest.*'`.
 
-- Open `https://<new-host>/api/` and `/docs` if enabled.
-- Log in to the admin using the new base URL.
-- Submit a test lead from a dev build of the site pointed at the new URL. Check the lead and email alert arrive.
-- Ask Sol a question in the chat widget.
-- Watch memory: `docker stats` (run Radar once from Admin > Radar and watch it stay well under 2 GB).
+### 10. Monitoring
 
-Both servers share one database, so do not run two copies of the Radar at the same time. If you test the Radar,
-do it near the cutover, then stop Render.
+- UptimeRobot (free): HTTPS check on `https://solix-api.duckdns.org/api/` every 5 minutes, email alerts.
+- Disk: `df -h` now and then. MongoDB data lives in a Docker volume on the boot disk.
 
-### 8. Cut over (10 min, low traffic hour)
+## Phase 3: Clean up (after a week of no problems)
 
-1. Website repo > Settings > Secrets and variables > Actions > **Variables**: set `BACKEND_URL` to
-   `https://solix-api.duckdns.org`. Re-run the Pages deploy workflow.
-2. `Website/empower/src/lib/api.js` still has the Render URL as a fallback. Change it to the new URL too.
-3. Update every external caller of the old address:
-   - Instantly webhook URL (Admin > Outbound), it must use `PUBLIC_API_URL`.
-   - Any external cron (cron-job.org etc.) that calls `/api/ops/tick`.
-   - GitHub Actions secrets for the manual Radar workflow (`MONGO_URL`, `DB_NAME`), only if you use it.
-4. Check the live site: forms, chat, downloads, unsubscribe link.
-5. In Render, **suspend** the service (do not delete yet). Keep it a week as a rollback.
-   To roll back: set `BACKEND_URL` back and resume Render.
-6. Update `render.yaml`, `README.md` ("Deploy (Render, free tier)") and `docs/GO-LIVE.md` to describe the new host,
-   and delete `render.yaml` once Render is gone.
+1. Delete the Render service.
+2. Atlas: keep the cluster paused or delete it, after one last `mongodump` kept in the bucket.
+3. GitHub Actions secrets `MONGO_URL` / `DB_NAME` for the manual Radar workflow point at Atlas. Remove them. The
+   workflow cannot reach the VM's database (no public port), and the API already runs the Radar daily.
+4. Update `README.md` ("Deploy (Render, free tier)"), `docs/GO-LIVE.md`, and delete `render.yaml`.
 
-### 9. Backups and monitoring (do not skip)
-
-Atlas M0 has no backups. Add a nightly dump to free object storage (OCI Object Storage 20 GB free, or Cloudflare R2 10 GB free):
+## Day-to-day
 
 ```bash
-# /home/ubuntu/backup.sh  (chmod +x), then: crontab -e  ->  15 2 * * * /home/ubuntu/backup.sh
-docker run --rm -v /home/ubuntu/backups:/out mongo:7 \
-  mongodump --uri "$MONGO_URL" --db solix --gzip --archive=/out/solix-$(date +%F).gz
-find /home/ubuntu/backups -mtime +14 -delete
-# then rclone/oci-cli copy /home/ubuntu/backups to the bucket
+cd ~/solix-backend && git pull && docker compose up -d --build   # deploy a new version
+docker compose logs -f api                                        # logs
+docker compose exec mongo mongosh -u solix -p                     # database shell
 ```
 
-Uptime: UptimeRobot free, HTTPS check on `/api/` every 5 minutes, alerts to your email.
-Errors: Sentry free tier (5k events/month) if you want stack traces.
-
-### 10. Updating the app later
+### 11. Browse the database from your laptop (Compass)
 
 ```bash
-cd ~/solix-backend && git pull && docker compose up -d --build
+ssh -L 27017:localhost:27017 ubuntu@<VM_IP> \
+  "docker run --rm -p 127.0.0.1:27017:27017 --network solix-backend_default alpine/socat TCP-LISTEN:27017,fork TCP:mongo:27017"
 ```
 
-Optional: a GitHub Actions workflow that runs that command over SSH on every push to main (store the SSH key as a repo secret).
-
----
-
-## B. Fallback: Google Cloud Run
-
-Free per month: 2M requests, 180,000 vCPU-seconds, 360,000 GiB-seconds. Needs a billing account (card) on file.
-The existing `Dockerfile` works unchanged.
-
-Catch: Cloud Run scales to zero, and this app's background loops only run while an instance is alive. So:
-
-1. `gcloud run deploy solix-backend --source . --region asia-south1 --memory 1Gi --cpu 1 --allow-unauthenticated`
-   and set the env vars (use Secret Manager for the keys).
-2. Use **Cloud Scheduler** (3 free jobs) to call `POST /api/ops/tick` every 5 minutes with `OPS_TOKEN`
-   (the app already supports this, see `docs/GO-LIVE.md`), plus one job at 05:00 UTC for the Radar.
-3. `KEEP_AWAKE=0`.
-
-Cold starts are a few seconds, much better than Render's up to 60 s. Setting `--min-instances 1` makes it always on but is billed.
-
-## Not recommended
-
-- **Fly.io, Railway**: no real free tier any more.
-- **Cloudflare Workers**: cannot run FastAPI + Motor.
-- **Koyeb / Hugging Face Spaces free**: also sleep, and Spaces are meant for demos.
-
-## Optional clean-ups that cut memory on any host
-
-`requirements.txt` ships dev tools (`black`, `mypy`, `flake8`, `pytest`, `pytest-xdist`, `isort`) and `pandas`/`numpy`
-which no app module imports (checked with grep). Moving them to a `requirements-dev.txt` makes builds faster and the
-image smaller. Setting `MONGO_MAX_POOL_SIZE=20` lowers connection memory. Neither is required for the move.
+Then connect Compass to `mongodb://solix:<password>@localhost:27017/?authSource=admin`.
