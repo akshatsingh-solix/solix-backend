@@ -433,7 +433,7 @@ def revenue_of(band) -> Optional[float]:
 # company is never filed as a small business on the strength of one doubtful number.
 SIZE_CONFIDENCE = {"high": 3, "medium": 2, "low": 1}
 SOURCE_LABELS = {"manual": "entered by a person", "wikidata": "Wikidata", "pdl_company": "People Data Labs", "hunter_company": "Hunter", "sec": "SEC EDGAR",
-                 "theirstack": "TheirStack job listing", "crustdata": "Crustdata", "intent": "intent data", "unknown": "an earlier lookup (source not recorded)"}
+                 "theirstack": "TheirStack job listing", "gleif": "GLEIF", "companies_house": "Companies House", "crustdata": "Crustdata", "intent": "intent data", "unknown": "an earlier lookup (source not recorded)"}
 DOUBT_REVENUE_PER_EMPLOYEE = 5_000_000   # more than $5M revenue per employee is not a real headcount
 LISTED_MIN_EMPLOYEES = 100               # a stock-exchange-listed company with fewer staff is almost certainly a wrong match
 

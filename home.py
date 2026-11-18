@@ -70,6 +70,8 @@ async def _manager(user: dict, access: dict) -> dict:
             "sizes_to_check": await db.companies.count_documents({"size_status": {"$in": ["doubtful", "unverified"]}}),
             "ready_not_contacted": await db.companies.count_documents({"status": "ready"}),
         }
+        brief = await db.intelligence.find_one({}, {"_id": 0, "at": 1, "insights": 1}, sort=[("at", -1)])
+        out["brief"] = brief
         segs = await db.companies.aggregate([{"$group": {"_id": "$segment", "n": {"$sum": 1}}}]).to_list(10)
         out["segments"] = {(s["_id"] or "unknown"): s["n"] for s in segs}
     if permissions.RANK[access.get("leads", "none")] >= 1:

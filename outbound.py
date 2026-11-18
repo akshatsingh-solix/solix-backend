@@ -119,9 +119,18 @@ async def verify_email(email: str) -> dict:
     return res
 
 
+async def score_email_source(contact: dict, correct: bool, how: str) -> None:
+    """Measured accuracy of whoever supplied this address (data_quality.py): a verification, bounce or reply is a check."""
+    import data_quality as dq
+    via = contact.get("source_email") or contact.get("source") or "unknown"
+    await dq.log("email", "email", via, correct, how=how, contact_id=contact.get("id"), company_id=contact.get("company_id"))
+
+
 async def set_verification(contact: dict) -> dict:
     v = await verify_email(contact.get("email"))
     await _db().contacts.update_one({"id": contact["id"]}, {"$set": {"email_status": v["status"], "verify_detail": v["detail"], "verified_at": now_iso()}})
+    if v["status"] in ("valid", "invalid"):
+        await score_email_source(contact, v["status"] == "valid", "verification")
     return {**contact, "email_status": v["status"], "verify_detail": v["detail"]}
 
 
@@ -164,9 +173,36 @@ DEFAULT_SEQUENCES = [
 ]
 
 
+PERSONA_SEQUENCE = {"name": "Persona-led: explore, then buy", "region": "global", "steps": [
+    {"day": 0, "subject_a": "{company} and {product}", "subject_b": "A thought for {company}'s {team}",
+     "body_a": "Hi {first_name},\n\n{opener}\n\n{explore_cta}\n\nBest,\n{rep_name}",
+     "body_b": "Hi {first_name},\n\n{opener}\n\nIf it helps, here's how it works: {resource_link}\n\nBest,\n{rep_name}"},
+    {"day": 4, "subject_a": "Re: {company} and {product}", "subject_b": "Re: A thought for {company}'s {team}",
+     "body_a": "Hi {first_name},\n\nA different angle: in {industry}, {team} usually feel it as {pain}. The teams that fix it {outcome} first, then expand from there.\n\nThe short version is here if useful: {resource_link}\n\nBest,\n{rep_name}",
+     "body_b": "Hi {first_name},\n\nOne question rather than a pitch: how much of {company}'s estate is kept running only for its records?\n\nIf the answer is \"more than we'd like\", {resource_link} shows how others approached it.\n\nBest,\n{rep_name}"},
+    {"day": 9, "subject_a": "A working session for {company}", "subject_b": "A working session for {company}",
+     "body_a": "Hi {first_name},\n\n{buy_cta}\n\nYou'd leave with a first-wave shortlist and a rough saving, whether or not we work together.\n\nBest,\n{rep_name}",
+     "body_b": "Hi {first_name},\n\n{buy_cta} I'll bring a draft plan based on what we can see from outside; you correct it.\n\nBest,\n{rep_name}"},
+    {"day": 14, "subject_a": "Closing the loop", "subject_b": "Closing the loop",
+     "body_a": "Hi {first_name},\n\nI'll leave it here. If someone else at {company} owns this, a pointer would be appreciated.\n\nBest,\n{rep_name}",
+     "body_b": "Hi {first_name},\n\nLast note from me. If {product} becomes a priority, just reply and I'll pick it up.\n\nBest,\n{rep_name}"},
+]}
+
+
+def _step_objects():
+    import messaging
+    return [{"intent": o["intent"], "objective": o["ask"]} for o in messaging.STEP_OBJECTIVES]
+
+
+STEP_OBJECTS = _step_objects()
+
+
 async def ensure_default_sequences() -> None:
+    if not await _db().sequences.find_one({"name": PERSONA_SEQUENCE["name"]}, {"_id": 1}) and await _db().sequences.count_documents({}) > 0:
+        await _db().sequences.insert_one({"id": str(uuid.uuid4()), **PERSONA_SEQUENCE, "active": True, "provider": None, "instantly_campaign_id": None, "ab_winner": None,
+                                          "created_by": "system", "created_at": now_iso(), "updated_at": now_iso()})
     if await _db().sequences.count_documents({}) == 0:
-        for s in DEFAULT_SEQUENCES:
+        for s in DEFAULT_SEQUENCES + [PERSONA_SEQUENCE]:
             await _db().sequences.insert_one({"id": str(uuid.uuid4()), **s, "active": True, "provider": None, "instantly_campaign_id": None, "ab_winner": None,
                                               "created_by": "system", "created_at": now_iso(), "updated_at": now_iso()})
 
@@ -183,28 +219,33 @@ OPENER_SYSTEM = ("You write the first two sentences of a B2B cold email for Soli
 
 
 async def write_opener(contact: dict, company: Optional[dict]) -> dict:
-    """A signal-grounded opener. Falls back to the approved deep dive, then to a neutral line."""
+    """A first-touch opener for this person (messaging.py): the account's trigger, said in their role's terms, for their
+    industry and the account's lead product. A model writes it when one is set up; every draft is checked and a generic,
+    off-brief or risky one falls back to the approved deep dive, then to the rule-based persona opener."""
+    import messaging
     company = company or {}
     research = await _db().radar_research.find_one({"company_id": company.get("id"), "status": "approved"}, {"_id": 0}, sort=[("created_at", -1)]) if company.get("id") else None
-    sig = None
+    sig, sigs = None, []
     if company.get("id"):
-        sigs = await _db().company_signals.find({"company_id": company["id"]}, {"_id": 0}).to_list(200)
+        sigs = await _db().company_signals.find({"company_id": company["id"]}, {"_id": 0, "raw": 0}).to_list(200)
         sigs.sort(key=lambda s: (rm.STRENGTH_RANK.get(s.get("role_strength") or "Unrated", 3), str(s.get("posted_at") or "")), reverse=False)
         sig = sigs[0] if sigs else None
+    settings = await compliance.outbound_settings()
+    b = messaging.brief(contact, company, signal=sig, research=research, site_url=settings.get("site_url") or "https://www.solix.com", signals=sigs)
     evidence = []
     if research:
         evidence.append(f"Research headline: {research.get('headline')}\nTrigger: {research.get('trigger')}")
     if sig:
         evidence.append(f"Signal ({sig['type'].replace('_', ' ')}): {sig.get('title') or ''} - {sig.get('evidence_text') or ''}")
-    opener, provider = None, "rules"
-    if evidence:
+    opener, provider, quality = None, "rules", None
+    if evidence or b.get("industry_reason"):
         import llm
         providers = llm.pii_providers()
         if providers:
             text = []
             try:
-                async for ev in llm.stream_completion([{"role": "system", "content": OPENER_SYSTEM},
-                                                       {"role": "user", "content": f"Prospect: {contact.get('title') or ''} at {company.get('name') or contact.get('company')}\n\n" + "\n\n".join(evidence)}],
+                async for ev in llm.stream_completion([{"role": "system", "content": messaging.OPENER_SYSTEM},
+                                                       {"role": "user", "content": messaging.prompt(b) + "\n\nEvidence:\n" + ("\n\n".join(evidence) or "none")}],
                                                       max_tokens=160, temperature=0.4, providers=providers):
                     if ev["type"] == "text":
                         text.append(ev["text"])
@@ -213,17 +254,17 @@ async def write_opener(contact: dict, company: Optional[dict]) -> dict:
                 opener = re.sub(r"\s+", " ", "".join(text)).strip().strip('"')
             except llm.ProviderError:
                 opener = None
-    if opener and (rm.find_competitors(opener) or len(opener.split()) > 70 or re.search(r"\[\d+\]", opener)):
+    if opener and (rm.find_competitors(opener) or len(opener.split()) > 70 or re.search(r"\[\d+\]", opener) or not messaging.check(opener, b)["ok"]):
         opener, provider = None, "rules"
     if not opener and research and (research.get("first_touch") or {}).get("body"):
         body = research["first_touch"]["body"]
         paras = [p.strip() for p in body.split("\n\n") if p.strip() and not p.strip().lower().startswith(("hi ", "best", "regards"))]
-        if paras and not rm.find_competitors(paras[0]):
+        if paras and not rm.find_competitors(paras[0]) and messaging.check(paras[0], b)["ok"]:
             opener, provider = paras[0], "deep_dive"
     if not opener:
-        what = "archiving, records retention and retiring legacy applications" if sig else "keeping records from older systems"
-        opener, provider = f"I noticed {company.get('name') or 'your team'} is investing in {what}.", "rules"
-    return {"opener": opener, "provider": provider, "signal_id": (sig or {}).get("id"), "research_id": (research or {}).get("id")}
+        opener, provider = messaging.rule_opener(b), "rules"
+    quality = messaging.check(opener, b)
+    return {"opener": opener, "provider": provider, "signal_id": (sig or {}).get("id"), "research_id": (research or {}).get("id"), "brief": b, "quality": quality}
 
 
 def render_steps(sequence: dict, variant: str, ctx: dict) -> List[dict]:
@@ -272,14 +313,19 @@ async def enroll(contact: dict, sequence: dict, by: str, *, force_variant: Optio
     op = await write_opener(contact, company)
     variant = force_variant or await _variant(sequence)
     rep_name = (company or {}).get("owner_name") or settings.get("sender_name") or "Solix"
+    b = op["brief"]
     ctx = {"first_name": contact.get("first_name") or "there", "last_name": contact.get("last_name") or "", "company": (company or {}).get("name") or contact.get("company") or "your team",
-           "title": contact.get("title") or "", "opener": op["opener"], "rep_name": rep_name}
+           "title": contact.get("title") or "", "opener": op["opener"], "rep_name": rep_name,
+           # Persona placeholders (messaging.py) for sequences written to them.
+           "pain": b["pain"], "outcome": b["outcome"], "product": b.get("product_label") or "Solix", "resource_link": b["resource_link"], "explore_offer": b["explore_offer"],
+           "explore_cta": b["explore_cta"], "buy_cta": b["buy_cta"], "industry": (b.get("industry_label") or "your industry").lower(), "team": b["team"]}
     steps = render_steps(sequence, variant, ctx)
     now = now_iso()
     doc = {
         "id": str(uuid.uuid4()), "contact_id": contact["id"], "company_id": contact.get("company_id"), "sequence_id": sequence["id"], "sequence_name": sequence["name"],
         "email": contact["email"], "contact_name": contact.get("name"), "company_name": ctx["company"], "variant": variant, "opener": op["opener"], "opener_provider": op["provider"],
-        "signal_id": op["signal_id"], "research_id": op["research_id"], "steps": steps, "step_index": 0, "channel": "email",
+        "signal_id": op["signal_id"], "research_id": op["research_id"], "steps": steps,
+        "persona": b["persona"], "seniority_band": b["seniority"], "industry_slug": b.get("industry"), "pitch_product": b.get("product"), "opener_quality": op["quality"]["score"], "step_index": 0, "channel": "email",
         "provider": sequence.get("provider") or settings.get("provider"), "status": "pending_approval" if settings.get("approval_required") else "scheduled",
         "next_send_at": now, "gate": g, "created_by": by, "created_at": now, "updated_at": now, "history": [{"at": now, "by": by, "action": "enrolled", "detail": f"Variant {variant}"}],
     }
@@ -438,6 +484,8 @@ async def tick() -> dict:
                 await learn()
             except Exception:  # noqa: BLE001
                 logger.exception("weekly learning failed")
+    import learning as intel
+    await intel.weekly_if_due()  # the self-review runs after signal weights are re-learned
     await _db().ops_runs.delete_many({"job": "outbound_tick", "started_at": {"$lt": (now - timedelta(days=3)).isoformat()}})
     async with ops.run("outbound_tick") as run:
         await bounce_check(settings)
@@ -626,7 +674,14 @@ async def handle_reply(contact: dict, text: str, *, source: str, label: Optional
     rec = {"id": str(uuid.uuid4()), "contact_id": contact["id"], "company_id": contact.get("company_id"), "email": contact.get("email"), "enrollment_id": (enr or {}).get("id"),
            "sequence_id": (enr or {}).get("sequence_id"), "variant": (enr or {}).get("variant"), "step": (enr or {}).get("step_index"), "label": label, "reason": cls.get("reason"),
            "classified_by": cls.get("by"), "text": (text or "")[:5000], "source": source, "meta": meta or {}, "received_at": now_iso()}
+    first = not await _db().reply_log.count_documents({"contact_id": contact["id"]})
     await _db().reply_log.insert_one(dict(rec))
+    if first:  # the first reply proves the address reaches a person, and says whether it's the right one
+        import data_quality as dq
+        await score_email_source(contact, True, "reply")
+        if label in ("referral", "interested", "meeting", "objection", "not_interested"):
+            await dq.log("contact", "current_role", contact.get("source") or "unknown", label != "referral", how="reply", contact_id=contact["id"],
+                         company_id=contact.get("company_id"))
     owner = (company or {}).get("owner")
     who = f"{contact.get('name') or contact.get('email')} ({contact.get('title') or 'unknown title'}) at {(company or {}).get('name') or contact.get('company') or 'unknown company'}"
     if label in POSITIVE:
@@ -879,6 +934,25 @@ async def delete_contact(contact_id: str):
     await _db().contacts.delete_one({"id": contact_id})
 
 
+@router.get("/contacts/{contact_id}/brief")
+async def contact_brief(contact_id: str):
+    """The first-touch plan for this person (messaging.py) and the email it would produce, before anyone enrols them."""
+    c = await _db().contacts.find_one({"id": contact_id}, {"_id": 0})
+    if not c:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    company = await _db().companies.find_one({"id": c.get("company_id")}, {"_id": 0}) if c.get("company_id") else None
+    op = await write_opener(c, company)
+    b = op["brief"]
+    settings = await compliance.outbound_settings()
+    ctx = {"first_name": c.get("first_name") or "there", "company": (company or {}).get("name") or c.get("company") or "your team", "opener": op["opener"],
+           "rep_name": (company or {}).get("owner_name") or settings.get("sender_name") or "Solix", "pain": b["pain"], "outcome": b["outcome"],
+           "product": b.get("product_label") or "Solix", "resource_link": b["resource_link"], "explore_offer": b["explore_offer"], "explore_cta": b["explore_cta"],
+           "buy_cta": b["buy_cta"], "industry": (b.get("industry_label") or "your industry").lower(), "team": b["team"]}
+    steps = render_steps(PERSONA_SEQUENCE, "A", ctx)
+    return {"brief": b, "opener": op["opener"], "provider": op["provider"], "quality": op["quality"],
+            "steps": [{**st, **STEP_OBJECTS[i]} for i, st in enumerate(steps) if i < len(STEP_OBJECTS)]}
+
+
 @router.post("/contacts/{contact_id}/verify", dependencies=[can_work])
 async def verify_contact(contact_id: str):
     c = await _db().contacts.find_one({"id": contact_id}, {"_id": 0})
@@ -916,6 +990,8 @@ async def find_email(contact_id: str):
         await _db().contacts.update_one({"id": contact_id}, {"$set": {"email": hit["email"], "email_status": status, "verified_at": now_iso() if status == "valid" else None,
                                                                     "verify_detail": detail, "source_email": "hunter" if via == "hunter" else via,
                                                                     "email_source_url": hit.get("source_url")}})
+        if v["status"] in ("valid", "invalid"):  # the finder's answer checked by an independent verifier
+            await score_email_source({**c, "source_email": "hunter" if via == "hunter" else via}, v["status"] == "valid", "verification")
         return {"found": hit["email"], "tried": [{"email": hit["email"], "status": status, "detail": f"{label} Email Finder"}]}
     for cand in guess_emails(c.get("first_name"), c.get("last_name"), domain)[:6]:
         v = await verify_email(cand)
@@ -1183,6 +1259,7 @@ async def instantly_webhook(request: Request, x_solix_webhook_secret: Optional[s
     elif event == "email_bounced":
         await _db().sends.update_many({"contact_id": contact["id"]}, {"$set": {"bounced": True}})
         await _db().contacts.update_one({"id": contact["id"]}, {"$set": {"email_status": "invalid", "verify_detail": "Hard bounce"}})
+        await score_email_source(contact, False, "bounce")
         await compliance.suppress(email, "bounced", source="instantly", by="instantly")
     elif event in ("reply_received", "lead_interested", "lead_meeting_booked", "lead_not_interested", "lead_out_of_office", "lead_wrong_person", "lead_unsubscribed"):
         text = p.get("reply_text") or p.get("reply_text_snippet") or ""

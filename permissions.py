@@ -33,7 +33,7 @@ LEVELS = ["none", "view", "edit", "full"]
 RANK = {lv: i for i, lv in enumerate(LEVELS)}
 
 FEATURES: Dict[str, dict] = {
-    "dashboard": {"label": "Dashboard and reports", "paths": ("reports", "stats", "notifications", "home")},
+    "dashboard": {"label": "Dashboard and reports", "paths": ("reports", "stats", "notifications", "home", "intelligence")},
     "leads": {"label": "Leads", "paths": ("leads", "leads-export", "views", "scoring")},
     "radar": {"label": "Radar (accounts, signals, deep dives)", "paths": ("radar",)},
     "outbound": {"label": "Outbound (contacts, sequences, sending)", "paths": ("outbound",)},
