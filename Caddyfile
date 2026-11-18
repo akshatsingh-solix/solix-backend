@@ -1,0 +1,5 @@
+# Automatic HTTPS (Let's Encrypt) for the API. API_DOMAIN comes from docker-compose.yml.
+{$API_DOMAIN} {
+	encode gzip
+	reverse_proxy api:8000
+}
