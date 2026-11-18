@@ -149,14 +149,24 @@ STAFFING = re.compile(r"\b(staffing|recruit\w*|talent|consult\w*|teksystems|kfor
                       r"infosys|cognizant|accenture|deloitte|capgemini|wipro|hcl\w*|tata consultancy|tcs|ltimindtree|kpmg|pwc|ernst|genpact|dice|jobot|motion recruitment)\b", re.I)
 
 
+MIN_KEY_CHARS = 3  # a key shorter than this ("rs") would merge every "RS ..." company into one account
+
+
 def company_key(name: str) -> str:
-    """'The Hartford' == 'Hartford'; 'Kiewit Corp' == 'Kiewit'; 'TD Bank Group' keeps 'td bank'."""
+    """'The Hartford' == 'Hartford'; 'Kiewit Corp' == 'Kiewit'; 'TD Bank Group' keeps 'td bank'.
+
+    Legal and group words are dropped only while what is left still identifies the company:
+    'RS Group plc' keeps 'rs group', so it never merges with 'RS Ltd' or 'The RS Company'."""
     k = (name or "").strip().lower()
     k = re.sub(r"[.,'’\"()|]", " ", k)
     k = re.sub(r"\s+", " ", k).strip()
+    k = re.sub(r"\b([a-z0-9]) (?=[a-z0-9]\b)", r"\1", k)  # 'r s group' (from 'R.S. Group') -> 'rs group'
     k = re.sub(r"^the ", "", k)
     for _ in range(2):
-        k = _SUFFIX.sub("", k).strip()
+        shorter = _SUFFIX.sub("", k).strip()
+        if len(shorter.replace(" ", "")) < MIN_KEY_CHARS:
+            break
+        k = shorter
     return k
 
 
@@ -411,6 +421,106 @@ def revenue_of(band) -> Optional[float]:
     if not m:
         return None
     return float(m.group(1)) * {"": 1, "k": 1e3, "m": 1e6, "b": 1e9, "t": 1e12}[m.group(2)]
+
+
+# --- Company size you can trust ----------------------------------------------------------------
+# Every headcount the Radar sees is kept as a *candidate* with where it came from and how it was matched.
+# The account shows the most trustworthy one, never a guess dressed as a fact:
+#   high    a person typed it, or two independent sources agree (within 2x)
+#   medium  one source matched by the company's own website domain, or a registry matched by a distinctive name
+#   low     matched by name only, or recorded before these checks existed
+# A low-confidence or implausible size is shown as "Size unverified" and gives no segment, so a large
+# company is never filed as a small business on the strength of one doubtful number.
+SIZE_CONFIDENCE = {"high": 3, "medium": 2, "low": 1}
+SOURCE_LABELS = {"manual": "entered by a person", "wikidata": "Wikidata", "pdl_company": "People Data Labs", "hunter_company": "Hunter", "sec": "SEC EDGAR",
+                 "theirstack": "TheirStack job listing", "crustdata": "Crustdata", "intent": "intent data", "unknown": "an earlier lookup (source not recorded)"}
+DOUBT_REVENUE_PER_EMPLOYEE = 5_000_000   # more than $5M revenue per employee is not a real headcount
+LISTED_MIN_EMPLOYEES = 100               # a stock-exchange-listed company with fewer staff is almost certainly a wrong match
+
+
+def distinctive_name(name: str) -> bool:
+    """Whether a name alone identifies a company well enough to trust a registry match on it."""
+    key = company_key(name)
+    words = [w for w in key.split() if w]
+    return len(key.replace(" ", "")) >= 8 or any(len(w) >= 5 for w in words) or len(words) >= 3
+
+
+def size_candidate(value, via: str, match: str, *, name: Optional[str] = None, url: Optional[str] = None, at: Optional[str] = None) -> Optional[dict]:
+    """One reported headcount. match: "manual" | "domain" (looked up by the company's own website) | "name" | "unknown"."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    if match == "manual":
+        conf = "high"
+    elif match == "domain":
+        conf = "medium"
+    elif match == "name" and via in ("wikidata", "sec") and name and distinctive_name(name):
+        conf = "medium"
+    else:
+        conf = "low"
+    return {"value": n, "via": via, "match": match, "confidence": conf, **({"url": url} if url else {}), "at": at or datetime.now(timezone.utc).isoformat()}
+
+
+def merge_candidates(existing: Optional[List[dict]], new: List[dict]) -> List[dict]:
+    """Newest report per source wins; at most 8 kept."""
+    out = {c["via"]: c for c in existing or [] if c}
+    for c in new:
+        if c:
+            out[c["via"]] = c
+    return sorted(out.values(), key=lambda c: c.get("at") or "", reverse=True)[:8]
+
+
+def size_doubts(employees: Optional[int], revenue=None, listed: bool = False, candidates: Optional[List[dict]] = None) -> List[str]:
+    """Reasons a headcount can't be right, in words a rep can act on."""
+    out = []
+    if not employees:
+        return out
+    rev = revenue_of(revenue)
+    if listed and employees < LISTED_MIN_EMPLOYEES:
+        out.append(f"A stock-exchange-listed company with only {employees:,} employees")
+    if rev and rev / employees > DOUBT_REVENUE_PER_EMPLOYEE:
+        out.append(f"{employees:,} employees doesn't fit revenue of ${rev / 1e9:.1f}B" if rev >= 1e9 else f"{employees:,} employees doesn't fit revenue of ${rev / 1e6:.0f}M")
+    solid = [c for c in candidates or [] if SIZE_CONFIDENCE.get(c.get("confidence"), 0) >= 2]
+    if len(solid) >= 2:
+        lo, hi = min(solid, key=lambda c: c["value"]), max(solid, key=lambda c: c["value"])
+        if hi["value"] > 5 * lo["value"]:
+            out.append(f"Sources disagree: {lo['value']:,} ({SOURCE_LABELS.get(lo['via'], lo['via'])}) vs {hi['value']:,} ({SOURCE_LABELS.get(hi['via'], hi['via'])})")
+    return out
+
+
+def size_view(company: dict, cfg: Optional[dict] = None) -> dict:
+    """The size the account shows: employees, where they came from, how sure, any doubts, and the segment."""
+    revenue = company.get("revenue_usd") or company.get("revenue_band")
+    listed = bool((company.get("firmographics") or {}).get("public"))
+    src = company.get("employees_source") or {}
+    if src.get("match") == "manual" and company.get("employees"):
+        return {"employees": company["employees"], "employees_source": src, "size_status": "verified", "size_flags": [],
+                "segment": segment_of(company["employees"], revenue, cfg)}
+    cands = [c for c in company.get("size_candidates") or [] if c and c.get("value")]
+    if not cands and company.get("employees"):  # recorded before sources were kept
+        cands = [{"value": company["employees"], "via": src.get("via") or "unknown", "match": src.get("match") or "unknown",
+                  "confidence": src.get("confidence") or "low", "at": src.get("at")}]
+    best = max(cands, key=lambda c: (SIZE_CONFIDENCE.get(c.get("confidence"), 0), c.get("match") == "domain", c.get("at") or ""), default=None)
+    if not best:
+        seg = segment_of(None, revenue, cfg)
+        return {"employees": None, "employees_source": None, "size_status": "estimated" if seg else None, "size_flags": [], "segment": seg}
+    conf = best["confidence"]
+    agree = [c for c in cands if c is not best and SIZE_CONFIDENCE.get(c.get("confidence"), 0) >= 2 and max(c["value"], best["value"]) <= 2 * min(c["value"], best["value"])]
+    if agree and conf != "low":
+        conf = "high"
+    source = {k: best.get(k) for k in ("via", "match", "url", "at") if best.get(k)}
+    source["confidence"] = conf
+    flags = size_doubts(best["value"], revenue, listed, cands)
+    if flags:
+        status, seg = "doubtful", segment_of(None, revenue, cfg)
+    elif conf == "low":
+        status, seg = "unverified", segment_of(None, revenue, cfg)
+    else:
+        status, seg = ("confirmed" if conf == "high" else "estimated"), segment_of(best["value"], revenue, cfg)
+    return {"employees": best["value"], "employees_source": source, "size_status": status, "size_flags": flags, "segment": seg}
 
 
 def segment_of(employees=None, revenue=None, cfg: Optional[dict] = None) -> Optional[str]:

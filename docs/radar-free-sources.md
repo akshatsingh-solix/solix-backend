@@ -103,6 +103,25 @@ People Data Labs (`PDL_API_KEY`, 100 a month), Hunter (`HUNTER_API_KEY`). Merged
 HQ (with state or ZIP for the US and Canada), domain and industry are known. Values a person typed
 are never overwritten.
 
+**Sizes you can trust.** Every headcount the Radar sees is kept with its source and how it was matched,
+and the account shows the most trustworthy one:
+
+| Confidence | When | Shown as |
+|---|---|---|
+| Verified | a person typed it (Account details → Employees) | the segment; no lookup ever replaces it |
+| High | two independent sources agree within 2x | the segment ("sources agree") |
+| Medium | one source looked up by the company's own website, or a registry matched by a distinctive name | the segment ("one source") |
+| Low | matched by name only, or recorded before these checks | **Size unverified**, no segment |
+
+A size is also **doubted** and kept out of the segment when it can't be right: a stock-exchange-listed
+company with fewer than 100 employees, more than $5M revenue per employee, or sources that disagree more
+than 5x. The account then says why (for example *"A stock-exchange-listed company with only 11
+employees"*), and the revenue sizes it if known. Job listings and intent exports can only add a size when
+their company domain is the account's; a name match (a small "RS Ltd" posting jobs) never sizes an account.
+Names keep enough words to stay distinct ("RS Group plc" is no longer merged with every "RS ..." company).
+Doubtful and unverified sizes are looked up again first each day; **Setup → Run → Re-check doubtful
+sizes** does it now.
+
 Every account gets a **segment**: Enterprise (1,000+ employees or $1B+ revenue), Mid-market (200+ or
 $50M+), Small business, or unknown. Thresholds are the `segments` Radar setting; `target_segments`
 (enterprise and mid-market by default) get deep dives first. Filter the account list with

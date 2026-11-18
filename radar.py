@@ -555,6 +555,22 @@ async def import_intent(body: IntentIn, user: dict = Depends(get_current_admin))
     return r["counts"]
 
 
+@router.post("/size/recheck", dependencies=[admin_only])
+async def recheck_sizes(user: dict = Depends(get_current_admin)):
+    """Look up again every account whose size is doubtful or unverified, now, in the background (sizes a person entered are kept)."""
+    import radar_run
+    import ops
+    n = await _db().companies.count_documents({"size_status": {"$in": ["doubtful", "unverified"]}})
+    await _db().companies.update_many({"size_status": {"$in": ["doubtful", "unverified"]}}, {"$set": {"firmo_checked_at": None}})
+
+    async def go():
+        async with ops.run("radar_size_recheck", by=user["email"]) as r:
+            touched = await radar_run.enrich(r, per_run=min(max(n, 1), 300))
+            r["counts"]["recomputed"] = await rs.recompute_many(touched)
+    _spawn(go())
+    return {"queued": n}
+
+
 # --- Data sources (providers.py): every chain, what's set up, what's left ------------------------
 
 @router.get("/providers")

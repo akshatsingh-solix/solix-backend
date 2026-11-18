@@ -300,15 +300,22 @@ def test_enrichment_sizes_locates_and_routes_an_account(client, monkeypatch):
         async with mock(_firmo_handler) as http:
             return await radar_run.enrich_company(http, c)
     sets = run(go())
-    assert sets["employees"] == 12000 and sets["industry"] == "insurance"
-    assert sets["hq"]["state"] == "CA" and sets["hq"]["zip"] == "94105"
+    assert sets["industry"] == "insurance" and sets["hq"]["state"] == "CA" and sets["hq"]["zip"] == "94105"
+    assert [(x["value"], x["via"], x["match"], x["confidence"]) for x in sets["size_candidates"]] == [(12000, "wikidata", "name", "medium")]
     acct = run(rs.recompute(c["id"]))
+    assert acct["employees"] == 12000 and acct["size_status"] == "estimated" and acct["employees_source"]["via"] == "wikidata"
     assert acct["segment"] == "enterprise" and acct["domains"] == ["contoso.example"]
     assert acct["territory"] == "USA" and acct["route_rep"] == "Hameed Hemmat"  # Northern California by HQ ZIP
     assert {s["via"] for s in sets["firmographics"]["sources"]} == {"wikidata", "gleif"}
     # A person's value is never overwritten.
     client.patch(f"/api/admin/radar/accounts/{c['id']}", json={"employees": 450})
-    assert run(rs.recompute(c["id"]))["segment"] == "mid_market"
+    acct = run(rs.recompute(c["id"]))
+    assert acct["segment"] == "mid_market" and acct["size_status"] == "verified" and acct["employees_source"]["match"] == "manual"
+    async def again():
+        async with mock(_firmo_handler) as http:
+            return await radar_run.enrich_company(http, acct)
+    run(again())
+    assert run(rs.recompute(c["id"]))["employees"] == 450  # a later lookup never replaces what a person entered
     seg = client.get("/api/admin/radar/accounts", params={"segment": "mid_market", "q": "Contoso Holdings"}).json()["items"]
     assert [x["id"] for x in seg] == [c["id"]]
 
@@ -584,3 +591,86 @@ def test_visitors_reading_about_a_competitor_on_our_site_carry_it(client):
     assert sig["competitor_key"] in ("opentext-documentum", "opentext-infoarchive") and ", researching OpenText" in sig["title"]
     assert "/resources/documentum-migration-guide" in sig["evidence_text"] and "search “infoarchive alternative”" in sig["evidence_text"]
     assert set(sig["meta"]["competitors"]) == {"opentext-documentum", "opentext-infoarchive"}
+
+
+# --- Company sizes you can trust (a listed group once showed as a small business with 11 employees) -------------------
+
+def test_short_names_keep_distinct_keys():
+    assert rm.company_key("QX Group plc") == rm.company_key("Q.X. Group Ltd") == "qx group"
+    assert rm.company_key("QX Ltd") == "qx ltd" and rm.company_key("The QX Company") == "qx company"
+    assert rm.company_key("IBM Corp") == rm.company_key("IBM") == "ibm" and rm.company_key("Kiewit Corp") == "kiewit"
+
+
+def test_implausible_sizes_are_doubted_not_segmented():
+    listed = rm.size_view({"employees": 11, "size_candidates": [rm.size_candidate(11, "pdl_company", "domain")], "firmographics": {"public": True}})
+    assert listed["size_status"] == "doubtful" and listed["segment"] is None and listed["size_flags"] == ["A stock-exchange-listed company with only 11 employees"]
+    rich = rm.size_view({"size_candidates": [rm.size_candidate(11, "hunter_company", "domain")], "revenue_usd": 2_880_000_000})
+    assert rich["size_status"] == "doubtful" and rich["segment"] == "enterprise" and "$2.9B" in rich["size_flags"][0]  # the revenue still sizes it
+    name_only = rm.size_view({"size_candidates": [rm.size_candidate(11, "pdl_company", "name", name="QX Group plc")]})
+    assert name_only["size_status"] == "unverified" and name_only["segment"] is None
+    agree = rm.size_view({"size_candidates": [rm.size_candidate(8600, "pdl_company", "domain"), rm.size_candidate(9100, "hunter_company", "domain")]})
+    assert agree["size_status"] == "confirmed" and agree["segment"] == "enterprise"
+    split = rm.size_view({"size_candidates": [rm.size_candidate(40, "pdl_company", "domain"), rm.size_candidate(9100, "hunter_company", "domain")]})
+    assert split["size_status"] == "doubtful" and split["size_flags"][0].startswith("Sources disagree")
+
+
+def test_repair_unmerges_short_keys_and_rechecks_old_sizes_with_a_better_source(client, monkeypatch):
+    db = database.db
+    c = run(rs.get_or_create_company("QX Group plc", domain="qxgroup.example", source="manual"))
+    # As left by the old rules: key "qx" (shared with every "QX ..." company) and 11 employees from nowhere recorded.
+    run(db.companies.update_one({"id": c["id"]}, {"$set": {"key": "qx", "employees": 11, "firmographics": {"public": True}}, "$unset": {"employees_source": ""}}))
+    run(db.settings.update_one({"key": "radar_migrations"}, {"$pull": {"done": "size_v2"}}))
+    assert run(rs.ensure_size_migration())["sizes_to_recheck"] >= 1
+    assert run(rs.ensure_size_migration()) is None  # once only
+    acct = run(db.companies.find_one({"id": c["id"]}, {"_id": 0}))
+    assert acct["key"] == "qx group" and acct["size_status"] == "doubtful" and acct["segment"] is None and acct["firmo_checked_at"] is None
+    assert run(rs.Resolver.load()).resolve("QX Ltd")["id"] != c["id"]  # the small namesake no longer merges into the group
+    # The re-check: Wikidata knows the group (listed, two websites, the old one first) but not its headcount; PDL by its own domain does.
+    monkeypatch.setenv("RADAR_KEYLESS_SOURCES", "on")
+    monkeypatch.setenv("PDL_API_KEY", "pk")
+    monkeypatch.setitem(srcs.FIRMO_ADAPTERS, "sec", lambda *a: _skip())
+    monkeypatch.setitem(srcs.FIRMO_ADAPTERS, "gleif", lambda *a: _skip())
+    pdl_asked = []
+
+    def handler(request):
+        if request.url.host == "www.wikidata.org":
+            if request.url.params["action"] == "wbsearchentities":
+                return httpx.Response(200, json={"search": [{"id": "Q77"}]})
+            if request.url.params.get("props") == "labels":
+                return httpx.Response(200, json={"entities": {"Q145": {"labels": {"en": {"value": "United Kingdom"}}}}})
+            return httpx.Response(200, json={"entities": {"Q77": {"labels": {"en": {"value": "QX Group plc"}}, "descriptions": {"en": {"value": "British distributor"}},
+                "claims": {"P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q891723"}}}}], "P414": [{"mainsnak": {"datavalue": {"value": {"id": "Q171240"}}}}],
+                           "P17": [{"mainsnak": {"datavalue": {"value": {"id": "Q145"}}}}],
+                           "P856": [{"mainsnak": {"datavalue": {"value": "http://www.qx-components.example"}}}, {"mainsnak": {"datavalue": {"value": "https://www.qxgroup.example/"}}}]}}}})
+        pdl_asked.append(dict(request.url.params))
+        return httpx.Response(200, json={"status": 200, "name": "qx group", "website": "qxgroup.example", "employee_count": 8600, "industry": "wholesale"})
+
+    async def go():
+        async with mock(handler) as http:
+            return await radar_run.enrich_company(http, acct)
+    sets = run(go())
+    assert pdl_asked == [{"website": "qxgroup.example"}]  # asked by the account's own domain, not the old website or the name
+    assert sets["firmographics"]["public"] is True
+    fixed = run(rs.recompute(c["id"]))
+    assert fixed["employees"] == 8600 and fixed["segment"] == "enterprise" and fixed["size_status"] == "estimated" and fixed["size_flags"] == []
+    assert fixed["employees_source"] == {**fixed["employees_source"], "via": "pdl_company", "match": "domain", "confidence": "medium"}
+
+
+def test_name_only_sources_cannot_size_an_account(client, monkeypatch):
+    monkeypatch.setenv("PDL_API_KEY", "pk")
+
+    def handler(request):
+        assert request.url.params["min_likelihood"] == "6"
+        return httpx.Response(200, json={"status": 200, "name": "qx systems", "website": "qxsystems.example", "employee_count": 11})
+
+    async def go():
+        async with mock(handler) as http:
+            return await srcs.FIRMO_ADAPTERS["pdl_company"](http, "QX Group plc", None, None)
+    assert run(go()) == {}  # PDL's fuzzy best guess is another company: rejected
+    r = client.post("/api/admin/radar/intent/import", json={"source": "G2", "csv": "Company,Domain,Topic,Employees\n"
+                                                             "Vexmoor Group plc,,Documentum,11\nTallowind Systems,tallowind.example,Documentum,3100\n"}).json()
+    assert r["signals_new"] == 2
+    vex = client.get("/api/admin/radar/accounts", params={"q": "Vexmoor"}).json()["items"][0]
+    tal = client.get("/api/admin/radar/accounts", params={"q": "tallowind.example"}).json()["items"][0]
+    assert vex["employees"] is None and vex["segment"] is None  # a name-only row never sizes an account
+    assert tal["employees"] == 3100 and tal["segment"] == "enterprise" and tal["employees_source"]["match"] == "domain"

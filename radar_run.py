@@ -129,8 +129,11 @@ async def collect(run: dict) -> set:
         company = resolver.resolve(sig["company"], sig.get("domain"), sig.get("source") or "radar")
         if sig.get("public_sector") and not company.get("industry"):
             resolver.set(company, {"industry": "Public sector"})
-        if sig.get("employees") and not company.get("employees"):
-            resolver.set(company, {"employees": int(sig["employees"])})
+        # A headcount from a job listing counts only when the listing's company domain is this account's
+        # (never on a name match: "RS Ltd" with 11 staff must not size "RS Group plc").
+        if sig.get("employees") and sig.get("domain") and rm.domain_of(sig["domain"]) in (company.get("domains") or []):
+            cand = rm.size_candidate(sig["employees"], sig.get("source") or "jobs", "domain")
+            resolver.set(company, {"size_candidates": rm.merge_candidates(company.get("size_candidates"), [cand])})
         ops.append(rs._signal_op(company, sig, run["id"]))
         touched.add(company["id"])
     await resolver.flush()
@@ -249,15 +252,19 @@ async def subdomain_scan(client: httpx.AsyncClient, settings: dict) -> list:
 # --- Enrichment: size (mid-market vs enterprise), HQ and domain ------------------------------------
 
 async def enrich_company(client: httpx.AsyncClient, c: dict, *, bulk: bool = False, problems: Optional[list] = None) -> dict:
-    """Fill what the account lacks from the firmographics chain; never overwrites a value a person set."""
+    """Fill what the account lacks from the firmographics chain. Headcounts are added as candidates with their source;
+    the account shows the most trustworthy one (rm.size_view), so a better source can replace a weaker one, a doubtful
+    one shows as unverified, and a value a person set is never replaced."""
     import radar_intel
     domain = (c.get("domains") or [None])[0]
     f = await srcs.firmographics(client, c["name"], domain, (c.get("hq") or {}).get("country"), bulk=bulk, problems=problems)
     sets: dict = {"firmo_checked_at": now_iso()}
     if f:
         sets["firmographics"] = {**{k: f.get(k) for k in ("employees", "revenue_usd", "revenue_band", "industry", "domain", "hq", "ids", "sources", "legal_name",
-                                                          "linkedin_url", "public", "fields_from") if f.get(k) not in (None, "", {}, [])}, "at": now_iso()}
-        for k in ("employees", "revenue_usd", "revenue_band", "industry"):
+                                                          "linkedin_url", "public", "fields_from", "candidates") if f.get(k) not in (None, "", {}, [])}, "at": now_iso()}
+        if f.get("candidates"):
+            sets["size_candidates"] = rm.merge_candidates(c.get("size_candidates"), f["candidates"])
+        for k in ("revenue_usd", "revenue_band", "industry"):
             if f.get(k) not in (None, "") and c.get(k) in (None, ""):
                 sets[k] = f[k]
         hq = {k: v for k, v in (c.get("hq") or {}).items() if v}
@@ -281,8 +288,13 @@ async def enrich(run: dict, per_run: Optional[int] = None) -> set:
     touched: set = set()
     if not n:
         return touched
-    cands = await _db().companies.find({"excluded_reason": None, "$or": [{"firmo_checked_at": None}, {"firmo_checked_at": {"$lt": stale}}]},
-                                       {"_id": 0, "history": 0}).sort("score", -1).to_list(n)
+    due = {"excluded_reason": None, "$or": [{"firmo_checked_at": None}, {"firmo_checked_at": {"$lt": stale}}]}
+    # Doubtful and unverified sizes first: a wrong size misfiles an account; a missing one only leaves it unsorted.
+    cands = await _db().companies.find({**due, "size_status": {"$in": ["doubtful", "unverified"]}}, {"_id": 0, "history": 0}).sort("score", -1).to_list(n)
+    if len(cands) < n:
+        seen = {c["id"] for c in cands}
+        more = await _db().companies.find(due, {"_id": 0, "history": 0}).sort("score", -1).to_list(n)
+        cands += [c for c in more if c["id"] not in seen][:n - len(cands)]
     enriched = sized = 0
     async with httpx.AsyncClient(headers=srcs.UA, follow_redirects=True) as client:
         for c in cands:
@@ -395,6 +407,9 @@ async def daily(steps: Iterable[str] = ("collect", "enrich", "score", "research"
     steps = tuple(steps)
     async with ops.run("radar_daily", by=by) as run:
         run["counts"]["steps"] = ",".join(steps)
+        repaired = await rs.ensure_size_migration()
+        if repaired:
+            run["counts"].update({f"migration_{k}": v for k, v in repaired.items()})
         touched: set = set()
         if "collect" in steps:
             touched = await collect(run)
