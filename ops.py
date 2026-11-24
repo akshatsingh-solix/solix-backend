@@ -233,6 +233,10 @@ async def watchdog() -> list:
     await check("unassigned", unrouted == 0, "Unassigned strong accounts", f"{unrouted} strong account(s) without an owner for over 24h")
     await check("needs_routing", conflicts == 0, "Accounts needing routing", f"{conflicts} account(s) the territory rules couldn't place")
     await check("outbox_failed", failed == 0, "Deliveries", f"{failed} Slack/Digiprise/email deliveries failed in the last 24h")
+    rss = memory_mb()
+    limit = int(os.environ.get("MEMORY_LIMIT_MB") or 512)
+    if rss:
+        await check("memory", rss < 0.8 * limit, "API memory", f"{rss} MB of {limit} MB" + (" (over 80%: the host restarts the API at 100%)" if rss >= 0.8 * limit else ""))
 
     # EchoLocate spec additions: model shutdowns, human queues, uncertain sends, LLM volume.
     import deliverability
@@ -263,6 +267,15 @@ async def watchdog() -> list:
         await check("llm_budget", calls <= budget, "Model calls (24h)", f"{calls} of a {budget} daily budget")
     await _deadman()
     return checks
+
+
+def memory_mb() -> Optional[int]:
+    """This process's resident memory (Linux), for the health page and the memory check."""
+    try:
+        with open("/proc/self/status") as f:
+            return int(f.read().split("VmRSS:")[1].split()[0]) // 1024
+    except (OSError, IndexError, ValueError):
+        return None
 
 
 async def _deadman() -> None:

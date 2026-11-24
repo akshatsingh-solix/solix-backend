@@ -247,7 +247,8 @@ class Resolver:
 
     @classmethod
     async def load(cls) -> "Resolver":
-        return cls(await _db().companies.find({}, {"_id": 0}).to_list(None))
+        # Only what resolving needs: history (up to 100 entries) and search_text (6 KB) per account are never read here.
+        return cls(await _db().companies.find({}, {"_id": 0, "history": 0, "search_text": 0, "product_fit": 0, "data_quality": 0}).to_list(None))
 
     def resolve(self, name: str, domain: Optional[str] = None, source: str = "radar") -> dict:
         name = (name or "").strip()
