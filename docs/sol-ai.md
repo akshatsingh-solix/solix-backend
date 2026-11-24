@@ -100,6 +100,34 @@ that fits the stage (guide → case study or assessment → demo or pricing call
 The public `GET /api/chat/status` now says only whether AI is on; provider and
 model details are admin-only.
 
+## 6b. Quality fix (24 Nov 2026) and how Sol now uses tools
+
+The 17 Nov update lowered answer quality in three ways, all fixed:
+
+* **The input screen refused real buying questions.** "Can it run on your infrastructure?", "Can I run a SQL
+  query on archived data?", "How do you prevent SQL injection?" and "Which models are behind Solix EAI?" got a
+  canned refusal and never reached a model. On 23 realistic buyer questions the guard blocked 43%. The patterns
+  now separate a *request for code* from a *question about the product*, and a security question asked from
+  the defender's side from an attack. Result: 0% false positives on those 23, and every attack in
+  `evals/sol_golden.json` is still refused (`python3 evals/sol_eval.py --offline`).
+* **The prompt narrowed Sol to "Solix only" and forced a five-step sales script** with a discovery question on
+  every turn. It now restores Sol's general expertise ("two sources of knowledge"), answers first, and asks a
+  discovery question only when the need is genuinely vague. Temperature default 0.5 and answer length 900 tokens
+  (were 0.35 and 700; admins who saved Control earlier keep their saved values).
+* **The answer cache ignored word order and "not"** ("migrate from SAP to Oracle" = "from Oracle to SAP"). The
+  key now keeps order and negation, and includes the prompt version, so answers written under the old prompt
+  are never served again.
+
+Retrieval is now **sharded and hybrid**: keyword (BM25) plus an in-process semantic pass over shards (products,
+solutions, industries, services, resources, news, company, learned answers), fused on normalised scores. Exact
+questions keep their keyword order; paraphrases and typos improve (offline eval: 100% on exact questions,
+93.8% on paraphrases and typos vs 87.5% keyword-only; p95 under 2 ms). A race that could answer from the old
+index right after a publish is fixed.
+
+Sol's tools go through the shared tool registry ([`ai-tools-mcp.md`](ai-tools-mcp.md)): only the tools a turn
+needs are loaded, and a booking or contact request with an invalid email is refused by its dry-run validation
+before anything is saved.
+
 ## 7. Running Sol on your own model (near-zero token cost, data stays with you)
 
 Any OpenAI-compatible server works. Ollama is the simplest:

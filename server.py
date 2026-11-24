@@ -264,6 +264,10 @@ async def on_startup():
         db.mcp_tokens.create_index("user_id"),
     )
     await seed_admin()
+    # Build the tool router's indexes now, so the first request routes in well under a millisecond, not ~13 ms.
+    import tool_registry
+    for surface in ("sol", "mcp"):
+        tool_registry.REGISTRY.route("warm up", surface)
     import radar_service  # Settings → Sales team becomes the Leads Radar's reps, once
     if await radar_service.ensure_sales_team():
         asyncio.create_task(radar_service.recompute_all())

@@ -134,6 +134,27 @@ match, and also excludes it from automated outreach (the rep is working it).
 9. **Learning**: every Monday, with 20 or more outcomes, signal-type weights are
    re-learned from which accounts replied or booked meetings.
 
+## 7b. Hardening from the EchoLocate engineering spec (Nov 2026)
+
+The engineering spec for EchoLocate reviewed this implementation's design against its own; these came from it.
+
+| Area | What MarkHub does now | Code |
+|---|---|---|
+| Exactly-once sending | A send row is written *before* the provider call under a unique (enrollment, step) key. A send that may have gone out is never repeated; a refused one retries on the same row. Instantly gets a deterministic `idempotency_key` | `deliverability.py`, `outbound.send_step` |
+| Webhooks | Instantly and Dripify events get a derived de-duplication key (they carry no event id); the hand-off row becomes step 1 rather than a second send; a bounce marks only the email that bounced; Instantly's own label after our classification is noted, and acted on only to stop contact | `outbound.instantly_webhook`, `dripify_webhook` |
+| Deliverability | Bounce and complaint rates per sending domain, 7 days, judged only after 30 sends: 1% bounce or 0.1% complaints holds new enrollments; 2% bounce or 0.3% complaints pauses sending. Mailboxes verified 30+ days ago are re-checked before the first email | `deliverability.py` |
+| Grounding | Every claim in an opener (model draft or human edit) is checked: each figure and named product or system must appear in its evidence (signals and deep dive for the prospect, Solix's published content for Solix), and claims about the prospect need semantic support. An unsupported claim blocks approval. `GROUNDING_JUDGE=1` adds a model judge | `grounding.py` |
+| AI Act evidence (C-17) | Every enrollment and send carries the drafting model, prompt version (content hash) and approving reviewer; every model call is in `llm_calls` | `llm_log.py` |
+| Replies | Opt-out phrases win over everything, without a model. A reply with mixed intents, low confidence or a colleague named in an auto-reply goes to **Outbound > Review** and pauses that person's sequences until someone decides | `outbound.classify`, `_hold_for_review` |
+| Country rules | Allow-list per country (opt-out / role-relevant / generic address / consent), UK corporate subscribers only, logged role relevance and consent records; unknown countries take the strictest rule. Rows not confirmed by counsel are marked | `country_policy.py` |
+| One channel per person | A shared ledger keyed on LinkedIn id and hashed email: the first channel owns the person for 90 days. Touches made outside MarkHub can be logged | `ledger.py` |
+| LinkedIn | Dripify hand-off into campaigns built in Dripify's UI; 15 a day and 80 a week per seat; any seat error pauses the channel | `linkedin.py` |
+| Seamless.AI | Research by LinkedIn URL, email or name plus company; only gate fields are kept, tagged by vendor and purgeable; do-not-email goes to suppression | `seamless.py` |
+| Art. 14 and retention | The first email carries the notice with the named source. Sourced contacts with no notice by day 30, and non-responders after the retention period, are purged. **Report-only until switched on** in Compliance | `retention.py` |
+| A/B | Sample size declared up front from a two-proportion power calculation (about 1,140 per variant to detect a doubling from 2%), then a significance test; otherwise the control stays | `outbound.ab_update` |
+| Learning | "Contacted, no reply" counts as a no only 21 days after the first send | `outbound.learn` |
+| Watchdog | Adds: model shutdown dates, approval backlog over 48 h, review lane over 24 h, sends stuck mid-call, daily model-call budget, and a ping to an external dead-man's switch (`DEADMAN_URL`) | `ops.watchdog` |
+
 ## 8. Compliance
 
 - **Suppression**: unsubscribes, bounces, not-interested replies, rep DNCs and
@@ -143,7 +164,7 @@ match, and also excludes it from automated outreach (the rep is working it).
   history, and queues deletion in Instantly and Digiprise.
 - **LIA register**: sending to a region stays blocked until its LIA is signed by
   an admin or a user with the Compliance role.
-- **Blocked countries**: Germany and Poland by default (UWG §7, PKE Art. 398).
+- **Blocked countries**: Germany and Poland by default (UWG §7, PKE Art. 398), on top of the country policy engine (7b).
 
 ## 9. Running it
 

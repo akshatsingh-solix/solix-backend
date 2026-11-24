@@ -175,6 +175,22 @@ Set the `SMTP_*` variables to that mailbox, then choose Provider **SMTP / Resend
 Emails carry a one-click unsubscribe header and link. Log replies in
 **Outbound → Replies** (or forward them there), since there is no webhook.
 
+## 9b. Before the first live send: what the spec review added (Compliance and admin)
+
+1. **Country rules** (Outbound > Compliance): have counsel confirm each row marked unconfirmed; tick it once done.
+   Unknown countries are blocked until a contact's country is set.
+2. **Retention** (Outbound > Compliance): check the "due now" counts, then switch the purge on.
+3. **Privacy notice URL**: set `privacy_notice_url` if it isn't `<site>/privacy`; the first email links it.
+4. **Deliverability** (Outbound > Deliverability & channels): sending domains with SPF, DKIM and DMARC; watch the
+   per-domain table during warm-up.
+5. **LinkedIn** (optional): `DRIPIFY_API_KEY` and `DRIPIFY_WEBHOOK_SECRET`; build and start a campaign in Dripify on
+   a seat whose owner agrees; put its id on a LinkedIn sequence; point the campaign's reply webhook at
+   `/api/outbound/webhooks/dripify` with the `X-Solix-Webhook-Secret` header.
+6. **Seamless.AI** (optional): `SEAMLESS_API_KEY` (Public API licence); try a few contacts with the Seamless button
+   and check the credits logged in `vendor_usage`.
+7. **Dead-man's switch** (recommended): a free healthchecks.io check, its ping URL in `DEADMAN_URL`.
+8. **AI assistants** (optional): Admin > AI tools > Connect an AI assistant. Start with read-only tokens.
+
 ## 10. Every day
 
 - **Reps**: Radar → pick your name → open new accounts → add contacts from the
