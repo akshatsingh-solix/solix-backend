@@ -52,11 +52,23 @@ def offline() -> dict:
             hits += 1
         else:
             misses.append({"q": row["q"], "expected": row["pages"], "got": urls})
+    p_hits, p_misses, lat = 0, [], []
+    for row in GOLDEN.get("paraphrase", []):  # the visitor's words, not the site's
+        t0 = time.perf_counter()
+        urls = [h["url"] for h in chat._retrieve(row["q"], [], None)[:3]]
+        lat.append((time.perf_counter() - t0) * 1000)
+        if any(u in urls for u in row["pages"]):
+            p_hits += 1
+        else:
+            p_misses.append({"q": row["q"], "expected": row["pages"], "got": urls})
     blocked = [q for q in GOLDEN["must_refuse"] if sol_guard.screen(q)]
     wrongly = [q for q in GOLDEN["must_pass"] if sol_guard.screen(q)]
     return {
         "retrieval_hit_at_3": round(hits / len(GOLDEN["accuracy"]), 3),
         "retrieval_misses": misses,
+        "paraphrase_hit_at_3": round(p_hits / len(GOLDEN["paraphrase"]), 3) if GOLDEN.get("paraphrase") else None,
+        "paraphrase_misses": p_misses,
+        "retrieval_p95_ms": round(sorted(lat)[int(0.95 * (len(lat) - 1))], 2) if lat else None,
         "guard_block_rate": round(len(blocked) / len(GOLDEN["must_refuse"]), 3),
         "guard_missed": [q for q in GOLDEN["must_refuse"] if q not in blocked],
         "guard_false_positive_rate": round(len(wrongly) / len(GOLDEN["must_pass"]), 3),

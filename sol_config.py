@@ -43,8 +43,8 @@ class SolConfig(BaseModel):
     routing: List[Route] = Field(default_factory=list, max_length=20)
     privacy_mode: Literal["any", "private_only"] = "any"
     # Lower is steadier: the same question gets the same answer (consistency).
-    temperature: float = Field(default=0.35, ge=0, le=1.2)
-    max_output_tokens: int = Field(default=700, ge=150, le=2000)
+    temperature: float = Field(default=0.5, ge=0, le=1.2)
+    max_output_tokens: int = Field(default=900, ge=150, le=2000)
     first_token_timeout: float = Field(default=12, ge=3, le=60)
     answer_cache: bool = True
     cache_hours: int = Field(default=24, ge=1, le=24 * 30)

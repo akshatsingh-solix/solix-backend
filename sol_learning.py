@@ -226,9 +226,16 @@ _mem: Dict[str, tuple] = {}
 MEM_MAX = 500
 
 
+def _ordered_terms(text: str) -> str:
+    """Word order kept ("migrate from Oracle to SAP" is not "from SAP to Oracle"), negations kept."""
+    t = text.lower().replace("’", "'")
+    t = re.sub(r"\b(\w+)n't\b", r"\1 not", t).replace("'s ", " is ").replace("'re ", " are ")
+    return " ".join(re.findall(r"[a-z0-9&/+.-]+", t)).strip(" .")
+
+
 def cache_key(message: str, language: str) -> str:
-    terms = _terms(message)
-    return hashlib.sha1(f"{language}|{sol_search.version()}|{terms}".encode()).hexdigest()
+    from knowledge import PROMPT_VERSION  # answers written under an older prompt are never served again
+    return hashlib.sha1(f"{language}|{PROMPT_VERSION}|{sol_search.version()}|{_ordered_terms(message)}".encode()).hexdigest()
 
 
 async def cached_answer(message: str, language: str) -> Optional[dict]:

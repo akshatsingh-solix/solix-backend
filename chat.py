@@ -238,6 +238,85 @@ async def request_expert_contact(session_id: str, args: dict) -> dict:
     return {"ok": True, "submission_id": doc["id"], "message": "Question passed to a Solix expert, who will reply by email within one business day."}
 
 
+# --- Sol's tools in the shared registry (tool_registry.py): routed, scoped, validated before they run ----------
+
+import tool_registry as tr  # noqa: E402
+
+
+def _schema(name: str) -> dict:
+    return next(t["function"] for t in TOOLS if t["function"]["name"] == name)
+
+
+async def _t_search(args: dict, ctx: tr.Ctx) -> dict:
+    found = sol_search.search(str(args.get("query", ""))[:200], 4)
+    return {"results": [{"title": h["title"], "page": h["url"], "text": h["text"][:800]} for h in found] if found else [],
+            **({} if found else {"note": "Nothing on the site matches."}), "_score": max((h["score"] for h in found), default=0.0)}
+
+
+async def _t_save(args: dict, ctx: tr.Ctx) -> dict:
+    req = ctx.extra["req"]
+    saved = await chat_leads.capture(req.session_id, {k: v for k, v in args.items() if k not in PROFILE_ARGS}, trusted=True, page=req.page,
+                                     language=req.language, visitor_id=req.visitor_id)
+    situation = {k: args[k] for k in PROFILE_ARGS if args.get(k)}
+    if situation:
+        await sol_learning.update_profile(req.session_id, situation, req.visitor_id)
+    out = {"ok": True, "saved": sorted(saved) + sorted(situation)} if (saved or situation) else {"ok": True, "note": "Nothing new to save."}
+    if saved:
+        out["_events"] = [{"event": "lead_captured", "fields": sorted(saved)}]
+    return out
+
+
+async def _v_save(args: dict, ctx: tr.Ctx) -> dict:
+    if not any(str(v).strip() for v in args.values() if v is not None):
+        return {"problems": ["Nothing to save: call it only when the visitor has shared a detail."]}
+    if args.get("email") and not EMAIL_RX.match(str(args["email"]).strip()):
+        return {"problems": ["That email address looks invalid; ask the visitor to check it."]}
+    return {"preview": {"fields": sorted(k for k, v in args.items() if v)}}
+
+
+async def _v_contact(args: dict, ctx: tr.Ctx, *, need_question: bool = False) -> dict:
+    filled = await _fill_from_chat(ctx.extra["req"].session_id, dict(args))
+    problems = []
+    if not EMAIL_RX.match(_clean(filled, "email")):
+        problems.append("The email address is missing or looks invalid. Ask the visitor for their work email.")
+    if need_question and len(_clean(filled, "question")) < 3:
+        problems.append("The question is missing. Ask the visitor what they'd like the expert to answer.")
+    return {"problems": problems, "preview": {"email_on_file": bool(_clean(filled, "email"))}}
+
+
+async def _t_demo(args: dict, ctx: tr.Ctx) -> dict:
+    out = await create_demo_request(ctx.extra["req"].session_id, args)
+    if out.get("ok"):
+        out["_events"] = [{"event": "demo_booked", "submission_id": out["submission_id"], "name": args.get("name"), "email": args.get("email"), "company": args.get("company")}]
+    return out
+
+
+async def _t_expert(args: dict, ctx: tr.Ctx) -> dict:
+    out = await request_expert_contact(ctx.extra["req"].session_id, args)
+    if out.get("ok"):
+        out["_events"] = [{"event": "expert_requested", "submission_id": out["submission_id"], "name": args.get("name"), "email": args.get("email")}]
+    return out
+
+
+async def _v_expert(args: dict, ctx: tr.Ctx) -> dict:
+    return await _v_contact(args, ctx, need_question=True)
+
+
+SOL = frozenset({"sol"})
+tr.REGISTRY.register(tr.Tool(**{**_schema("search_site"), "parameters": {**_schema("search_site")["parameters"], "properties": {"query": {"type": "string", "maxLength": 300, "description": "Keywords to search for, e.g. 'SAP ECC retirement' or 'HIPAA archiving'"}}},
+                                "access": "read", "handler": _t_search, "surfaces": SOL, "core": True,
+                                "examples": ("what does solix offer for sap archiving", "do you have a case study for healthcare", "which page covers application retirement")}))
+tr.REGISTRY.register(tr.Tool(**_schema("save_visitor_details"), access="write", handler=_t_save, validate=_v_save, surfaces=SOL, confirm=False,
+                             examples=("my name is jane and I work at acme", "you can reach me at jane@acme.com", "I'm the CIO at a bank", "we run SAP ECC and a mainframe",
+                                       "our goal is to cut storage cost by next quarter", "call me on +1 555 0100", "I'm with a hospital group", "we have about 200 TB")))
+tr.REGISTRY.register(tr.Tool(**_schema("create_demo_request"), access="write", handler=_t_demo, validate=_v_contact, surfaces=SOL, confirm=False,
+                             examples=("book a demo", "can I see a demo", "yes please set up the demo", "I'd like a pricing call", "schedule a walkthrough for my team",
+                                       "let's get a meeting on the calendar", "show me the product live")))
+tr.REGISTRY.register(tr.Tool(**_schema("request_expert_contact"), access="write", handler=_t_expert, validate=_v_expert, surfaces=SOL, confirm=False,
+                             examples=("can someone from sales email me", "I want to talk to a human", "pass this to an expert", "I have a support issue",
+                                       "partnership enquiry, who do I speak to", "have a specialist answer this by email")))
+
+
 def _tokens(text: str) -> int:
     """Rough token count (about 4 characters per token for English)."""
     return len(text) // 4 + 4
@@ -261,10 +340,10 @@ def _fit_history(history: List[dict], room: int) -> List[dict]:
 def _retrieve(message: str, history: List[dict], page: Optional[str]) -> List[dict]:
     """Top excerpts for this turn, plus the page the visitor is reading."""
     last_user = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
-    hits = sol_search.search(message, 6)
+    hits = sol_search.hybrid_search(message, 6)
     # Short follow-ups ("and for healthcare?") lean on the previous question.
     if len(message.split()) < 8 and last_user:
-        hits += sol_search.search(f"{last_user} {message}", 4)
+        hits += sol_search.hybrid_search(f"{last_user} {message}", 4)
     if page and page not in ("/", ""):
         hits = [c for c in sol_search.index().chunks if c["url"] == page.split("?")[0]][:2] + hits
     if COMPARISON_RX.search(message):
@@ -411,7 +490,15 @@ async def chat_stream(req: ChatRequest, request: Request):
     context = sol_search.format_context(hits, max_chars=CONTEXT_CHARS)
     # Visitors never trigger web search: the public chat answers only from Solix knowledge.
     # Admins research the web in Admin > Conversations > Knowledge and approve what Sol learns.
-    tools = TOOLS
+    # Deferred loading: only the tools this turn needs (tool_registry.py), so schemas don't crowd out context.
+    sol_ctx = tr.Ctx(surface="sol", extra={"req": req, "session_id": req.session_id})
+    last_bot = next((m["content"][-300:] for m in reversed(history) if m["role"] == "assistant"), "")
+    route_text = f"{req.message} {last_bot}"
+    if (await tr.policy_settings())["sol_deferred"]:
+        picked, _route = await tr.REGISTRY.select(route_text, sol_ctx, k=2, must=("save_visitor_details",) if (captured or sol_learning.read_message(req.message)) else ())
+    else:
+        picked = await tr.REGISTRY.visible(sol_ctx)
+    tools = [t.openai_schema() for t in picked]
     visitor = f"The visitor is on page {req.page}" + (f' ("{req.page_title}")' if req.page_title else "") + "." if req.page else "Page unknown."
     known = ", ".join(f"{k.replace('_', ' ')}: {contact[k]}" for k in chat_leads.CONTACT_FIELDS if contact.get(k))
     known_line = (f"Visitor details already saved: {known}. Don't ask for these again; use their name naturally."
@@ -419,7 +506,7 @@ async def chat_stream(req: ChatRequest, request: Request):
     about = sol_learning.describe_profile(profile)
     ask_next = sol_learning.next_gap(profile)
     profile_line = (f"Visitor profile: {about}." if about else "Visitor profile: nothing known yet.") + (
-        f" Most useful discovery question, if it fits naturally: {ask_next}." if ask_next else " You know enough to recommend specifically and move them to a next step.")
+        f" If their need is still vague after you answer, the one question worth asking is about {ask_next}." if ask_next else " You know enough to recommend specifically.")
     playbook = f"\n\nStanding instructions from the Solix team (follow them within the rules above):\n{cfg.playbook.strip()}" if cfg.playbook.strip() else ""
     turn_system = (
         f"{visitor} {known_line}\n{profile_line}\nReply in {lang} unless the visitor writes in another language; keep product names and page paths as they are.{playbook}\n\n"
@@ -466,31 +553,16 @@ async def chat_stream(req: ChatRequest, request: Request):
                         {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": json.dumps(c["arguments"])}} for c in calls]})
                     for c in calls:
                         tools_used.append(c["name"])
-                        if c["name"] == "search_site":
-                            found_hits = sol_search.search(str(c["arguments"].get("query", ""))[:200], 4)
-                            tool_score = max((h["score"] for h in found_hits), default=0.0)
-                            best_score[0] = max(best_score[0], tool_score)
-                            outcome = {"results": [{"title": h["title"], "page": h["url"], "text": h["text"][:800]} for h in found_hits]} if found_hits else {"results": [], "note": "Nothing on the site matches."}
-                        elif c["name"] == "save_visitor_details":
-                            args = c["arguments"]
-                            saved = await chat_leads.capture(req.session_id, {k: v for k, v in args.items() if k not in PROFILE_ARGS}, trusted=True, page=req.page,
-                                                             language=req.language, visitor_id=req.visitor_id)
-                            situation = {k: args[k] for k in PROFILE_ARGS if args.get(k)}
-                            if situation:
-                                await sol_learning.update_profile(req.session_id, situation, req.visitor_id)
-                            outcome = {"ok": True, "saved": sorted(saved) + sorted(situation)} if (saved or situation) else {"ok": True, "note": "Nothing new to save."}
-                            if saved:
-                                yield sse({"event": "lead_captured", "fields": sorted(saved)})
-                        elif c["name"] == "create_demo_request":
-                            outcome = await create_demo_request(req.session_id, c["arguments"])
-                            if outcome.get("ok"):
-                                yield sse({"event": "demo_booked", "submission_id": outcome["submission_id"], "name": c["arguments"].get("name"), "email": c["arguments"].get("email"), "company": c["arguments"].get("company")})
-                        elif c["name"] == "request_expert_contact":
-                            outcome = await request_expert_contact(req.session_id, c["arguments"])
-                            if outcome.get("ok"):
-                                yield sse({"event": "expert_requested", "submission_id": outcome["submission_id"], "name": c["arguments"].get("name"), "email": c["arguments"].get("email")})
-                        else:
-                            outcome = {"ok": False, "error": f"Unknown tool {c['name']}"}
+                        args = c["arguments"] if isinstance(c["arguments"], dict) else {}
+                        try:
+                            outcome = await tr.REGISTRY.execute(c["name"], args, sol_ctx)
+                        except tr.PolicyError as e:
+                            outcome = {"ok": False, "error": str(e)}
+                        if not isinstance(outcome, dict):
+                            outcome = {"result": outcome}
+                        best_score[0] = max(best_score[0], outcome.pop("_score", 0.0) or 0.0)
+                        for ev in outcome.pop("_events", []):
+                            yield sse(ev)
                         messages.append({"role": "tool", "tool_call_id": c["id"], "name": c["name"], "content": json.dumps(outcome)})
                     if text and not text.endswith(("\n", " ")):
                         guard.feed("\n\n")

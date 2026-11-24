@@ -30,6 +30,7 @@ from radar import router as radar_router
 from outbound import router as outbound_router, webhooks as outbound_webhooks
 from compliance import router as compliance_router, public as outbound_public
 import ops
+import mcp_server
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("solix")
@@ -130,6 +131,8 @@ app.include_router(outbound_public)
 app.include_router(compliance_router)
 app.include_router(ops.router)
 app.include_router(ops.public)
+app.include_router(mcp_server.public)
+app.include_router(mcp_server.router)
 import home  # noqa: E402
 import permissions  # noqa: E402
 app.include_router(permissions.router)
@@ -238,6 +241,14 @@ async def on_startup():
         db.sol_answer_cache.create_index("key", unique=True),
         db.sol_answer_cache.create_index("expires_at", expireAfterSeconds=0),
         db.chat_messages.create_index([("role", 1), ("created_at", -1)]),
+        # Tool registry, MCP and the policy layer.
+        db.tool_audit.create_index([("at", -1)]),
+        db.tool_audit.create_index([("user", 1), ("at", -1)]),
+        db.tool_audit.create_index("at_dt", expireAfterSeconds=365 * 86400),
+        db.tool_confirmations.create_index("nonce", unique=True),  # a confirmation token works once
+        db.tool_confirmations.create_index("expires_at", expireAfterSeconds=0),
+        db.mcp_tokens.create_index("jti", unique=True),
+        db.mcp_tokens.create_index("user_id"),
     )
     await seed_admin()
     import radar_service  # Settings → Sales team becomes the Leads Radar's reps, once

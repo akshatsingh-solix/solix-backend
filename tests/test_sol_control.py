@@ -111,7 +111,42 @@ def test_visitors_never_get_web_search(chat_app, monkeypatch):
     calls = recording(chat, monkeypatch)
     TestClient(app).post("/api/chat/stream", json={"session_id": "sess-web", "message": "What did the EU change in the AI Act last month?"})
     names = {t["function"]["name"] for t in calls[0]["tools"]}
-    assert "search_web" not in names and names == {"search_site", "save_visitor_details", "create_demo_request", "request_expert_contact"}
+    # Deferred loading sends only what the turn needs; whatever is sent, it is never web search.
+    assert "search_web" not in names and "search_site" in names
+    assert names <= {"search_site", "save_visitor_details", "create_demo_request", "request_expert_contact"}
+
+
+@pytest.mark.parametrize("message,expected", [
+    ("I'd like to book a demo for my team", "create_demo_request"),
+    ("Can a human from sales email me about partnership terms?", "request_expert_contact"),
+    ("I'm Dana, CIO at Initech, dana@initech.example", "save_visitor_details"),
+])
+def test_sol_loads_the_tool_the_turn_needs(chat_app, monkeypatch, message, expected):
+    chat, app, _ = chat_app
+    calls = recording(chat, monkeypatch)
+    TestClient(app).post("/api/chat/stream", json={"session_id": "sess-route-" + expected, "message": message})
+    names = [t["function"]["name"] for t in calls[0]["tools"]]
+    assert expected in names and len(names) < 4  # the right tool, without every schema
+
+
+def test_sol_tool_validation_blocks_a_bad_demo_booking(chat_app, monkeypatch):
+    """A model that calls create_demo_request without a usable email books nothing (dry-run validation)."""
+    chat, app, fake_db = chat_app
+    rounds = []
+
+    async def fake(messages, tools=None, **kw):
+        rounds.append(messages)
+        if len(rounds) == 1:
+            yield {"type": "tool_calls", "calls": [{"id": "c1", "name": "create_demo_request", "arguments": {"email": "not-an-email"}}]}
+        else:
+            yield {"type": "text", "text": "What's the best work email to send the invite to?"}
+        yield {"type": "meta", "provider": "a", "model": "m"}
+
+    monkeypatch.setattr(chat, "stream_completion", fake)
+    TestClient(app).post("/api/chat/stream", json={"session_id": "sess-bad-demo", "message": "book a demo please"})
+    tool_msg = next(m for m in rounds[1] if m.get("role") == "tool")
+    assert '"ok": false' in tool_msg["content"] and "email" in tool_msg["content"]
+    assert run_sync(fake_db.submissions.count_documents({"type": "demo"})) == 0
 
 
 # ---------- admin control of routing ----------

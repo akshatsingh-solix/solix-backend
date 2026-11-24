@@ -1265,6 +1265,14 @@ class EnrollmentPatch(BaseModel):
     reason: Optional[str] = Field(default=None, max_length=300)
 
 
+@router.get("/enrollments/{enr_id}")
+async def get_enrollment(enr_id: str):
+    e = await _db().enrollments.find_one({"id": enr_id}, {"_id": 0})
+    if not e:
+        raise HTTPException(status_code=404, detail="Enrollment not found")
+    return e
+
+
 @router.patch("/enrollments/{enr_id}", dependencies=[can_work])
 async def patch_enrollment(enr_id: str, body: EnrollmentPatch, user: dict = Depends(get_current_admin)):
     e = await _db().enrollments.find_one({"id": enr_id}, {"_id": 0})
