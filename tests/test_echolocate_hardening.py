@@ -192,3 +192,204 @@ def test_first_touch_carries_the_art14_notice_with_the_source():
     later = outbound.footer_html("x@initech.example", s, contact={"source": "seamless"}, first=False)
     assert "Seamless.AI" in first and "legitimate interest" in first and "privacy notice" in first
     assert "Seamless.AI" not in later and "Unsubscribe" in later
+
+
+# --- country policy engine -------------------------------------------------------------------------------------------
+
+import country_policy as cp  # noqa: E402
+
+
+@pytest.mark.parametrize("country,title,email,ok", [
+    ("United States", "Chief Information Officer", "cio@acme.example", True),
+    ("France", "Chief Information Officer", "dsi@acme.example", True),          # role-relevant: allowed
+    ("France", "Head of Catering", "chef@acme.example", False),                 # not role-relevant: blocked
+    ("Netherlands", "Chief Information Officer", "cio@acme.example", False),    # opt-in country
+    ("Norway", "Chief Information Officer", "cio@acme.example", False),         # named address
+    ("Norway", "Chief Information Officer", "it@acme.example", True),           # generic address
+    ("Portugal", "Chief Information Officer", "cio@acme.example", False),       # EU, not reviewed: strictest
+    (None, "Chief Information Officer", "cio@acme.example", False),             # unknown country: strictest
+])
+def test_country_policy_engine(country, title, email, ok):
+    contact = {"email": email, "title": title, "persona": outbound.persona_of(title)}
+    reasons, _, _ = cp.evaluate(contact, {"name": "Acme Holdings"}, {country} if country else set(), {})
+    assert (not reasons) is ok, reasons
+
+
+def test_uk_needs_a_corporate_subscriber_and_consent_unlocks_opt_in():
+    c = {"email": "cio@shop.example", "title": "Chief Information Officer", "persona": "target"}
+    reasons, _, _ = cp.evaluate(c, {"name": "Jo's Shop"}, {"United Kingdom"}, {})
+    assert any("entity type" in r for r in reasons)
+    reasons, _, _ = cp.evaluate(c, {"name": "Jo's Shop", "entity_type": "company"}, {"United Kingdom"}, {})
+    assert not reasons
+    nl = {**c, "consent": {"at": "2026-11-01", "proof": "https://forms.example/123", "wording": "Yes, email me"}}
+    assert not cp.evaluate(nl, {}, {"Netherlands"}, {})[0]
+
+
+def test_admin_override_changes_a_country_row():
+    reasons, _, decision = cp.evaluate({"email": "a@b.example", "title": "CIO", "persona": "target"}, {}, {"Spain"},
+                                       {"country_policies": {"Spain": {"policy": "ALLOW_OPT_OUT", "basis": "counsel confirmed"}}})
+    assert not reasons and decision["countries"][0]["basis"] == "counsel confirmed"
+
+
+# --- grounding and approval ----------------------------------------------------------------------------------------
+
+import grounding  # noqa: E402
+
+
+def test_grounding_rejects_invented_figures_names_and_claims():
+    pro = ["ECM Platform Engineer: Administer OpenText Documentum D2 and xPlore.", "Acme is consolidating content platforms."]
+    sol = ["Application Retirement keeps retired data searchable; customers cut run cost by up to 70%."]
+    ok = grounding.check("Acme is consolidating its content platforms. Solix retires the old ones and cuts run cost by up to 70%.",
+                         prospect_evidence=pro, solix_evidence=sol, company="Acme Mutual")
+    assert ok["ok"], ok
+    wrong_number = grounding.check("Solix cuts run cost by 90%.", prospect_evidence=pro, solix_evidence=sol, company="Acme Mutual")
+    invented = grounding.check("Acme is moving to SharePoint Online this quarter.", prospect_evidence=pro, solix_evidence=sol, company="Acme Mutual")
+    assert not wrong_number["ok"] and "90%" in wrong_number["problems"][0]
+    assert not invented["ok"] and "SharePoint Online" in invented["problems"][0]
+
+
+def test_an_edit_with_a_wrong_figure_blocks_approval(client):
+    run(db().enrollments.insert_one({"id": "h-ground", "contact_id": "h-rep-c", "status": "pending_approval", "opener": "Acme is consolidating content platforms.",
+                                     "steps": [{"day": 0, "subject": "s", "body": "Hi"}], "history": [], "company_name": "Acme Mutual",
+                                     "evidence": {"prospect": ["Acme is consolidating content platforms."], "solix": ["Solix cuts run cost by up to 70%."]},
+                                     "grounding": {"ok": True, "problems": []}}))
+    r = client.patch("/api/admin/outbound/enrollments/h-ground", json={"action": "edit", "opener": "Acme is consolidating content platforms; Solix saved peers 95%."})
+    assert r.status_code == 200 and r.json()["grounding"]["ok"] is False
+    a = client.patch("/api/admin/outbound/enrollments/h-ground", json={"action": "approve"})
+    assert a.status_code == 422
+
+
+# --- reply classification and the review lane ------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text,label,review", [
+    ("Interested in learning more, but please remove me from this mailing list.", "unsubscribe", False),
+    ("Sounds interesting, but not right now, maybe next year.", None, True),
+    ("I'm out of the office until Monday. For anything urgent, reach out to Sam Lee at sam@initech.example", None, True),
+    ("Tell me more, sounds timely.", "interested", False),
+])
+def test_rules_first_classifier_and_review_triggers(text, label, review):
+    out = run(outbound.classify(text))
+    if label:
+        assert out["label"] == label
+    assert out["needs_review"] is review
+
+
+def test_a_held_reply_pauses_then_a_person_resolves_it(client):
+    run(db().contacts.insert_one({"id": "h-mix-c", "email": "mix@initech.example", "name": "Mix Ed", "verified_at": "2099-01-01T00:00:00+00:00"}))
+    run(db().enrollments.insert_one({"id": "h-mix-e", "contact_id": "h-mix-c", "status": "active", "sequence_id": "s", "variant": "A", "step_index": 1,
+                                     "steps": [{"day": 0, "subject": "a", "body": "b"}, {"day": 3, "subject": "c", "body": "d"}], "history": []}))
+    rep = client.post("/api/admin/outbound/replies", json={"contact_id": "h-mix-c", "text": "Sounds interesting, but not right now."}).json()
+    assert rep["label"] == "needs_review"
+    assert run(db().enrollments.find_one({"id": "h-mix-e"}))["status"] == "paused"
+    q = client.get("/api/admin/outbound/review").json()
+    assert any(i["id"] == rep["id"] for i in q["items"])
+    done = client.post(f"/api/admin/outbound/replies/{rep['id']}/resolve", json={"label": "objection"}).json()
+    assert done["label"] == "objection"
+    assert run(db().reply_log.find_one({"id": rep["id"]}))["review"]["status"] == "resolved"
+    assert not any(i["id"] == rep["id"] for i in client.get("/api/admin/outbound/review").json()["items"])
+
+
+# --- retention -------------------------------------------------------------------------------------------------------
+
+import retention  # noqa: E402
+
+
+def test_retention_reports_first_and_only_purges_when_switched_on(client):
+    old = "2020-01-01T00:00:00+00:00"
+    run(db().contacts.insert_many([{"id": "r-silent", "email": "silent@ret.example", "created_at": old, "source": "deep_dive"},
+                                   {"id": "r-lead", "email": "lead@ret.example", "created_at": old, "source": "deep_dive", "lead_id": "L1"},
+                                   {"id": "r-inbound", "email": "in@ret.example", "created_at": old, "source": "form"}]))
+    s = run(compliance.outbound_settings())
+    report = run(retention.run({**s, "retention_enforce": False}, record=False))
+    assert report["notice_deadline"] >= 1 and not report["enforced"]
+    assert run(db().contacts.find_one({"id": "r-silent"}))  # nothing deleted in report mode
+    run(retention.run({**s, "retention_enforce": True}))
+    assert run(db().contacts.find_one({"id": "r-silent"})) is None
+    assert run(db().contacts.find_one({"id": "r-lead"})) and run(db().contacts.find_one({"id": "r-inbound"}))  # leads and inbound are never purged
+    assert not run(compliance.is_suppressed("silent@ret.example"))  # a purge is not an objection
+
+
+# --- A/B ---------------------------------------------------------------------------------------------------------------
+
+def test_ab_needs_a_real_sample_and_a_significant_difference():
+    assert 1100 < outbound.ab_sample_size(2.0, 2.0) < 1200
+    assert outbound.ab_significant(1200, 24, 1200, 48) and not outbound.ab_significant(1200, 24, 1200, 30)
+
+
+# --- LinkedIn through Dripify ------------------------------------------------------------------------------------------
+
+import linkedin  # noqa: E402
+
+
+def _li_enrollment(eid, cid, url):
+    run(db().contacts.insert_one({"id": cid, "email": f"{cid}@initech.example", "name": "Link Din", "first_name": "Link", "linkedin_url": url}))
+    run(db().enrollments.insert_one({"id": eid, "contact_id": cid, "company_id": None, "sequence_id": "li-seq", "variant": "A", "step_index": 0, "status": "scheduled",
+                                     "channel": "linkedin", "provider": "dripify", "campaign": "camp-li", "opener": "Opening.", "steps": [{"day": 0, "subject": "", "body": "x"}],
+                                     "history": []}))
+    return run(db().enrollments.find_one({"id": eid}, {"_id": 0}))
+
+
+def test_linkedin_handoff_paces_per_seat_and_pauses_on_a_seat_problem(client, monkeypatch):
+    monkeypatch.setenv("OUTBOUND_LIVE_SENDING", "1")
+    monkeypatch.setenv("DRIPIFY_API_KEY", "k")
+    pushed = []
+
+    async def push(contact, enr, campaign):
+        pushed.append(contact["linkedin_url"])
+        return "dl-1"
+
+    monkeypatch.setattr(linkedin, "push", push)
+    s = {**run(compliance.outbound_settings()), "linkedin_daily_cap": 1, "linkedin_paused": False}
+    e1 = _li_enrollment("li-1", "li-c1", "https://www.linkedin.com/in/one-person")
+    assert run(outbound.send_step(e1, s)) == "handed_off" and pushed == ["https://www.linkedin.com/in/one-person"]
+    assert run(ledger.conflict({"linkedin_url": "https://linkedin.com/in/one-person", "email": "li-c1@initech.example"}, "email"))
+    e2 = _li_enrollment("li-2", "li-c2", "https://www.linkedin.com/in/two-person")
+    assert run(outbound.send_step(e2, s)) == "held" and len(pushed) == 1  # the seat's daily cap
+    run(db().sends.delete_many({"channel": "linkedin"}))
+
+    async def restricted(contact, enr, campaign):
+        raise linkedin.SeatProblem("Dripify 423: account restricted")
+
+    monkeypatch.setattr(linkedin, "push", restricted)
+    run(db().enrollments.update_one({"id": "li-2"}, {"$set": {"claim_until": None}}))
+    assert run(outbound.send_step(run(db().enrollments.find_one({"id": "li-2"}, {"_id": 0})), s)) == "held"
+    assert run(compliance.outbound_settings())["linkedin_paused"]
+    run(compliance.save_outbound_settings({"linkedin_paused": False, "linkedin_pause_reason": None}))
+
+
+def test_dripify_reply_webhook_is_authenticated_deduplicated_and_classified(client, monkeypatch):
+    monkeypatch.setenv("DRIPIFY_WEBHOOK_SECRET", "dsecret")
+    body = {"event": "reply_received", "eventId": "e-1", "lead": {"id": "dl-9", "linkedinProfileUrl": "https://www.linkedin.com/in/one-person/"},
+            "message": "Sounds interesting, tell me more."}
+    assert client.post("/api/outbound/webhooks/dripify", json=body).status_code == 401
+    r = client.post("/api/outbound/webhooks/dripify", json=body, headers={"X-Solix-Webhook-Secret": "dsecret"}).json()
+    assert r["matched"]
+    assert client.post("/api/outbound/webhooks/dripify", json=body, headers={"X-Solix-Webhook-Secret": "dsecret"}).json().get("duplicate")
+    assert run(db().reply_log.find_one({"contact_id": "li-c1", "source": "dripify"}))["label"] == "interested"
+
+
+# --- Seamless.AI ----------------------------------------------------------------------------------------------------
+
+import seamless  # noqa: E402
+
+
+def test_seamless_keeps_only_tagged_fields_honours_do_not_email_and_can_be_purged(client):
+    run(db().contacts.insert_one({"id": "sm-c", "name": "Sea Mless", "company_id": None}))
+    c = run(db().contacts.find_one({"id": "sm-c"}, {"_id": 0}))
+    found = seamless._minimal({"id": "s-1", "emails": [{"email": "SEA@Hooli.example", "validation": "valid"}], "title": "CIO", "doNotEmail": True,
+                               "linkedInUrl": "https://linkedin.com/in/sea"})
+    out = run(seamless.apply(c, found, "admin@example.com"))
+    assert out["email"] == "sea@hooli.example" and out["email_status"] == "valid" and out["vendor_fields"]["email"] == "seamless"
+    assert run(compliance.is_suppressed("sea@hooli.example")) == "dnc"
+    assert run(seamless.purge_vendor("seamless")) == 1
+    after = run(db().contacts.find_one({"id": "sm-c"}, {"_id": 0}))
+    assert "email" not in after and "title" not in after and after["name"] == "Sea Mless"
+
+
+# --- watchdog ---------------------------------------------------------------------------------------------------------
+
+def test_watchdog_warns_about_a_model_past_its_shutdown(client):
+    import llm_log
+    run(llm_log.record("opener", prompt_version="opener@x", provider="openai", model="gpt-4.1-nano", ok=True))
+    checks = {c["code"]: c for c in client.get("/api/admin/ops/health").json()["checks"]}
+    assert not checks["model_shutdown"]["ok"] and "gpt-4.1-nano" in checks["model_shutdown"]["detail"] and checks["model_shutdown"]["severity"] == "fail"

@@ -272,3 +272,30 @@ api_tool("content_search", "Search published and draft content (blogs, white pap
 api_tool("ops_health", "Watchdog health checks: Radar run, outbound sender, data sources, deliveries, bounce pause, model shutdown dates.",
          access="read", feature="settings", method="GET", path="/api/admin/ops/health", props={},
          examples=("is everything healthy", "what is broken", "watchdog status", "any alerts", "is the sender running"))
+
+
+# --- EchoLocate hardening (review lane, deliverability, ledger) -----------------------------------------------------
+
+REVIEW = (r"\breview\b", r"needs? a (person|human)", r"ambiguous", r"unclear", r"mixed")
+api_tool("outbound_review_queue", "Replies whose intent is mixed or uncertain, waiting for a person to decide (the sequence is paused meanwhile).",
+         access="read", feature="outbound", method="GET", path="/api/admin/outbound/review", props={}, objects=REVIEW + REPLY,
+         examples=("which replies need a human to read them", "review lane", "ambiguous replies waiting", "replies the classifier wasn't sure about"))
+api_tool("outbound_resolve_reply", "Decide what a held reply means (interested, meeting, objection, referral, forward, ooo, not_interested, unsubscribe, neutral); "
+         "the usual actions then run.", access="write", feature="outbound", method="POST", path="/api/admin/outbound/replies/{reply_id}/resolve",
+         props={"reply_id": ID, "label": {"type": "string", "enum": ["interested", "meeting", "objection", "referral", "forward", "ooo", "not_interested", "unsubscribe", "neutral"]}},
+         required=("reply_id", "label"), objects=REVIEW + REPLY,
+         examples=("mark that held reply as interested", "resolve the review as not interested", "that ambiguous reply is an unsubscribe"))
+api_tool("outbound_deliverability", "Bounce and complaint rates per sending domain (7 days), warn/pause state, uncertain sends and LinkedIn channel status.",
+         access="read", feature="outbound", method="GET", path="/api/admin/outbound/deliverability", props={},
+         objects=(r"deliverab", r"domain", r"bounce", r"complaint", r"spam", r"sending health", r"warm"),
+         examples=("is our sending domain healthy", "complaint rate by domain", "why are enrollments on hold", "deliverability"))
+api_tool("outbound_ledger_record", "Record a touch made outside MarkHub (a rep's own email, LinkedIn or call) in the shared outreach ledger, so automation won't double up.",
+         access="write", feature="outbound", method="POST", path="/api/admin/outbound/ledger",
+         props={"email": {"type": "string", "maxLength": 200}, "linkedin_url": {"type": "string", "maxLength": 300},
+                "channel": {"type": "string", "enum": ["email", "linkedin", "phone", "event"]}, "note": {"type": "string", "maxLength": 300}},
+         required=("channel",), objects=(r"ledger", r"i (already )?(emailed|messaged|called|contacted)", r"outside markhub", r"my own campaign"),
+         examples=("I already messaged her on LinkedIn, log it", "record that I called this prospect", "add my own email to the ledger"))
+api_tool("compliance_country_policies", "The cold-outreach rule per country (opt-out, role-relevant only, generic addresses only, consent needed) and its legal basis.",
+         access="read", feature="compliance", method="GET", path="/api/admin/compliance/country-policies", props={},
+         objects=(r"countr", r"france|germany|netherlands|uk\b|ireland|spain|italy", r"opt[- ]?in", r"allowed in"),
+         examples=("can we cold email in the Netherlands", "country rules for outreach", "which countries need consent"))

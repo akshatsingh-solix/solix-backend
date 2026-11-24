@@ -238,6 +238,13 @@ async def on_startup():
         db.outreach_ledger.create_index("id", unique=True),
         db.outreach_ledger.create_index("keys"),
         db.suppression.create_index([("reason", 1), ("added_at", -1)]),
+        db.reply_log.create_index([("label", 1), ("received_at", 1)]),
+        db.llm_calls.create_index([("at", -1)]),
+        db.llm_calls.create_index([("agent", 1), ("at", -1)]),
+        db.llm_calls.create_index("at_dt", expireAfterSeconds=400 * 86400),
+        db.contacts.create_index("linkedin_url", sparse=True),
+        db.contacts.create_index([("created_at", 1), ("notice_sent_at", 1)]),
+        db.sends.create_index([("channel", 1), ("campaign", 1), ("sent_at", -1)]),
         # Sol: learning, personalisation, answer cache, quality insights.
         db.sol_gaps.create_index("key", unique=True),
         db.sol_gaps.create_index([("status", 1), ("count", -1)]),

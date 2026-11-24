@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from html import escape
@@ -281,7 +282,18 @@ async def write_opener(contact: dict, company: Optional[dict]) -> dict:
         evidence.append(f"Research headline: {research.get('headline')}\nTrigger: {research.get('trigger')}")
     if sig:
         evidence.append(f"Signal ({sig['type'].replace('_', ' ')}): {sig.get('title') or ''} - {sig.get('evidence_text') or ''}")
-    opener, provider, quality = None, "rules", None
+    opener, provider, quality, model = None, "rules", None, None
+    import grounding
+    import llm_log
+    import messaging as _m
+    started = time.monotonic()
+    prompt_version = llm_log.version("opener", _m.OPENER_SYSTEM)
+    prospect_ev = evidence + [f"{x.get('title') or ''} {x.get('evidence_text') or ''}" for x in sigs[:6]] + ([b.get("hook") or ""] if b.get("hook") else [])
+    solix_ev = [b.get(k) or "" for k in ("outcome", "pain", "product_label", "industry_reason", "explore_offer", "team")] + _solix_facts(b)
+
+    def grounded(text: str) -> dict:
+        return grounding.check(text, prospect_evidence=prospect_ev, solix_evidence=solix_ev, company=company.get("name"), person=contact.get("name"))
+
     if evidence or b.get("industry_reason"):
         import llm
         import privacy
@@ -298,21 +310,37 @@ async def write_opener(contact: dict, company: Optional[dict]) -> dict:
                     if ev["type"] == "text":
                         text.append(ev["text"])
                     elif ev["type"] == "meta":
-                        provider = ev.get("provider")
+                        provider, model = ev.get("provider"), ev.get("model")
                 opener = re.sub(r"\s+", " ", "".join(text)).strip().strip('"')
             except llm.ProviderError:
                 opener = None
-    if opener and (rm.find_competitors(opener) or len(opener.split()) > 70 or re.search(r"\[\d+\]", opener) or not messaging.check(opener, b)["ok"]):
-        opener, provider = None, "rules"
+    g = None
+    if opener:
+        g = await grounding.judge(grounded(opener), prospect_ev, solix_ev)
+        await llm_log.record("opener", prompt_version=prompt_version, provider=provider, model=model, ms=round((time.monotonic() - started) * 1000),
+                             ok=g["ok"], outcome="; ".join(g["problems"])[:200] or "grounded", ref={"contact_id": contact.get("id"), "company_id": company.get("id")})
+    if opener and (rm.find_competitors(opener) or len(opener.split()) > 70 or re.search(r"\[\d+\]", opener) or not messaging.check(opener, b)["ok"] or not g["ok"]):
+        opener, provider, model = None, "rules", None
     if not opener and research and (research.get("first_touch") or {}).get("body"):
         body = research["first_touch"]["body"]
         paras = [p.strip() for p in body.split("\n\n") if p.strip() and not p.strip().lower().startswith(("hi ", "best", "regards"))]
-        if paras and not rm.find_competitors(paras[0]) and messaging.check(paras[0], b)["ok"]:
+        if paras and not rm.find_competitors(paras[0]) and messaging.check(paras[0], b)["ok"] and grounded(paras[0])["ok"]:
             opener, provider = paras[0], "deep_dive"
     if not opener:
         opener, provider = messaging.rule_opener(b), "rules"
     quality = messaging.check(opener, b)
-    return {"opener": opener, "provider": provider, "signal_id": (sig or {}).get("id"), "research_id": (research or {}).get("id"), "brief": b, "quality": quality}
+    g = grounded(opener)
+    return {"opener": opener, "provider": provider, "model": model if provider not in ("rules", "deep_dive") else None,
+            "prompt_version": prompt_version if provider not in ("rules", "deep_dive") else f"{provider}@{_m.RULES_VERSION if hasattr(_m, 'RULES_VERSION') else '1'}",
+            "signal_id": (sig or {}).get("id"), "research_id": (research or {}).get("id"), "brief": b, "quality": quality, "grounding": g,
+            "evidence": {"prospect": prospect_ev[:8], "solix": [e for e in solix_ev if e][:8]}}
+
+
+def _solix_facts(b: dict) -> list:
+    """What Solix's own published content says about the product being pitched: the only source for Solix claims."""
+    import sol_search
+    q = " ".join(x for x in (b.get("product_label"), b.get("outcome")) if x)
+    return [f"{h['title']}: {h['text'][:700]}" for h in sol_search.hybrid_search(q, 3)] if q else []
 
 
 def render_steps(sequence: dict, variant: str, ctx: dict) -> List[dict]:
@@ -358,7 +386,13 @@ async def enroll(contact: dict, sequence: dict, by: str, *, force_variant: Optio
     if settings.get("enroll_hold"):
         raise HTTPException(status_code=422, detail={"message": "New enrollments are on hold for deliverability.", "reasons": [settings.get("enroll_hold_reason") or "Deliverability warning"],
                                                      "warnings": []})
-    g = await compliance.gate(contact, company, settings)
+    channel = sequence.get("channel") or "email"
+    g = await compliance.gate(contact, company, settings, channel=channel)
+    if channel == "linkedin":
+        if not contact.get("linkedin_url"):
+            g["ok"], g["reasons"] = False, g["reasons"] + ["No LinkedIn profile URL for this person"]
+        if not sequence.get("dripify_campaign_id"):
+            g["ok"], g["reasons"] = False, g["reasons"] + ["This LinkedIn sequence has no Dripify campaign id"]
     if not g["ok"]:
         raise HTTPException(status_code=422, detail={"message": "This contact can't be enrolled yet.", "reasons": g["reasons"], "warnings": g["warnings"]})
     seq_region = sequence.get("region") or "global"
@@ -383,8 +417,10 @@ async def enroll(contact: dict, sequence: dict, by: str, *, force_variant: Optio
         "id": str(uuid.uuid4()), "contact_id": contact["id"], "company_id": contact.get("company_id"), "sequence_id": sequence["id"], "sequence_name": sequence["name"],
         "email": contact["email"], "contact_name": contact.get("name"), "company_name": ctx["company"], "variant": variant, "opener": op["opener"], "opener_provider": op["provider"],
         "signal_id": op["signal_id"], "research_id": op["research_id"], "steps": steps,
-        "persona": b["persona"], "seniority_band": b["seniority"], "industry_slug": b.get("industry"), "pitch_product": b.get("product"), "opener_quality": op["quality"]["score"], "step_index": 0, "channel": "email",
-        "provider": sequence.get("provider") or settings.get("provider"), "status": "pending_approval" if settings.get("approval_required") else "scheduled",
+        "persona": b["persona"], "seniority_band": b["seniority"], "industry_slug": b.get("industry"), "pitch_product": b.get("product"), "opener_quality": op["quality"]["score"],
+        "opener_model": op.get("model"), "prompt_version": op.get("prompt_version"), "grounding": op["grounding"], "evidence": op.get("evidence"),
+        "step_index": 0, "channel": channel, "campaign": sequence.get("dripify_campaign_id") if channel == "linkedin" else None,
+        "provider": "dripify" if channel == "linkedin" else (sequence.get("provider") or settings.get("provider")), "status": "pending_approval" if settings.get("approval_required") else "scheduled",
         "next_send_at": now, "gate": g, "created_by": by, "created_at": now, "updated_at": now, "history": [{"at": now, "by": by, "action": "enrolled", "detail": f"Variant {variant}"}],
     }
     await _db().enrollments.insert_one(dict(doc))
@@ -484,6 +520,8 @@ async def send_step(enr: dict, settings: dict) -> str:
     if reason:
         await _set_status(enr, "stopped", "system", f"Blocked at send time: {reason}")
         return "stopped"
+    if (enr.get("channel") or "email") == "linkedin":
+        return await _send_linkedin(enr, contact, company, settings)
     step = enr["steps"][enr["step_index"]]
     provider = enr.get("provider") or settings.get("provider") or "dry_run"
     if provider != "dry_run" and not compliance.live_sending_allowed():
@@ -549,6 +587,51 @@ async def send_step(enr: dict, settings: dict) -> str:
     return send["status"]
 
 
+async def _send_linkedin(enr: dict, contact: dict, company: Optional[dict], settings: dict) -> str:
+    """Hand an approved person to a running Dripify campaign (it runs the LinkedIn steps), paced per seat."""
+    import deliverability as dl
+    import ledger
+    import linkedin
+    release = {"claim_until": None}
+    if settings.get("linkedin_paused"):
+        await _db().enrollments.update_one({"id": enr["id"]}, {"$set": release})
+        return "held"
+    if not compliance.live_sending_allowed() or not linkedin.ready():
+        await _db().enrollments.update_one({"id": enr["id"]}, {"$set": release})
+        return "held"
+    campaign = enr.get("campaign")
+    full = await linkedin.seat_room(campaign, settings)
+    if full:
+        tomorrow = (_now() + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0).isoformat()
+        await _db().enrollments.update_one({"id": enr["id"]}, {"$set": {**release, "next_send_at": tomorrow}})
+        return "held"
+    send = {"id": str(uuid.uuid4()), "enrollment_id": enr["id"], "contact_id": contact["id"], "company_id": enr.get("company_id"), "sequence_id": enr["sequence_id"],
+            "variant": enr["variant"], "step": 1, "email": contact.get("email"), "subject": "LinkedIn sequence", "provider": "dripify", "channel": "linkedin",
+            "campaign": campaign, "sent_at": now_iso(), "sending_domain": "linkedin", "model": enr.get("opener_model"), "prompt_version": enr.get("prompt_version"),
+            "approved_by": enr.get("approved_by")}
+    claimed = await dl.claim_send(send)
+    if not claimed:
+        await _set_status(enr, enr["status"], "system", "Already handed to Dripify: not sent again", release)
+        return "skipped"
+    try:
+        ref = await linkedin.push(contact, enr, campaign)
+    except linkedin.SeatProblem as e:
+        await dl.finish_send(claimed["idem_key"], "failed")
+        await linkedin.pause_channel(str(e))
+        await _db().enrollments.update_one({"id": enr["id"]}, {"$set": release})
+        return "held"
+    except Exception:
+        await dl.finish_send(claimed["idem_key"], "failed")
+        raise
+    await dl.finish_send(claimed["idem_key"], "handed_off", provider_ref=ref)
+    await ledger.record(contact, "linkedin", enr["id"], by="echolocate")
+    await _set_status(enr, "active", "system", "Handed to Dripify (it runs the LinkedIn steps)", {"step_index": len(enr["steps"]), "handed_off_at": now_iso(), **release})
+    if company and company.get("status") in rm.SYSTEM_STATUSES:
+        await _db().companies.update_one({"id": company["id"]}, {"$set": {"status": "contacted"}})
+        rs.companies_changed()
+    return "handed_off"
+
+
 def _stale(iso: Optional[str], days: int) -> bool:
     if not iso:
         return True
@@ -588,6 +671,11 @@ async def tick() -> dict:
                 await learn()
             except Exception:  # noqa: BLE001
                 logger.exception("weekly learning failed")
+    try:
+        import retention
+        await retention.run_if_due(settings)
+    except Exception:  # noqa: BLE001
+        logger.exception("retention run failed")
     import learning as intel
     await intel.weekly_if_due()  # the self-review runs after signal weights are re-learned
     await _db().ops_runs.delete_many({"job": "outbound_tick", "started_at": {"$lt": (now - timedelta(days=3)).isoformat()}})
@@ -641,36 +729,71 @@ _KW = [
 ]
 CLASSIFY_SYSTEM = ("Classify this reply to a B2B sales email. Labels: interested (wants to learn more), meeting (agrees a time or books), objection (engaged but not now / concern), "
                    "referral (points to another person), forward (has forwarded or cc'd a colleague), ooo (auto-reply / away), not_interested (clear no), unsubscribe (asks to stop), neutral. "
-                   'Reply with JSON only: {"label": "...", "reason": "one short sentence", "resume_on": "YYYY-MM-DD or null"}')
+                   "A reply can carry more than one intent (an out-of-office that names a colleague; interest plus 'take me off this list'): list them all. "
+                   'Reply with JSON only: {"label": "primary label", "intents": ["every label that applies"], "confidence": 0.0-1.0, '
+                   '"reason": "one short sentence", "resume_on": "YYYY-MM-DD or null"}')
+REVIEW_CONFIDENCE = 0.6
+POSITIVE_SET, NEGATIVE_SET = {"interested", "meeting"}, {"not_interested", "unsubscribe", "objection"}
+
+
+def _rule_intents(t: str) -> list:
+    found = []
+    for label, rx in _KW:
+        if rx.search(t) and label not in found:
+            found.append(label)
+    return found
 
 
 async def classify(text: str) -> dict:
+    """Primary intent, every intent present, and whether a person should look.
+
+    Rules first: an opt-out anywhere in the reply wins over everything and needs no model (it must reach the
+    suppression list even if the model is down or wrong). A reply whose intents pull in opposite directions
+    ("interested, but not this year"), or that a model labels with low confidence or against the rules, goes
+    to the review lane instead of being acted on: about one reply in ten is misread by any classifier."""
+    import llm_log
     t = text or ""
-    for label, rx in _KW[:2]:
-        if rx.search(t):
-            return {"label": label, "reason": "Matched a clear phrase", "by": "rules"}
+    rules = _rule_intents(t)
+    if "unsubscribe" in rules:
+        return {"label": "unsubscribe", "intents": rules, "by": "rules", "reason": "Asked to stop", "needs_review": False}
+    if rules[:1] == ["ooo"] and len(rules) == 1:
+        return {"label": "ooo", "intents": rules, "by": "rules", "reason": "Auto-reply", "needs_review": False}
     import llm
     import privacy
     providers, mode = privacy.providers_for("classify")
-    if mode == "redacted":  # a reply is personal: drop the signature and every identifier before a free tier sees it
-        t = privacy.Redactor().redact(t, strip_signature=True)
+    tm = privacy.Redactor().redact(t, strip_signature=True) if mode == "redacted" else t
+    model_out = None
     if providers:
-        out = []
+        out, meta, started = [], {}, time.monotonic()
         try:
-            async for ev in llm.stream_completion([{"role": "system", "content": CLASSIFY_SYSTEM}, {"role": "user", "content": t[:4000]}], max_tokens=150, temperature=0,
+            async for ev in llm.stream_completion([{"role": "system", "content": CLASSIFY_SYSTEM}, {"role": "user", "content": tm[:4000]}], max_tokens=180, temperature=0,
                                                   providers=providers):
                 if ev["type"] == "text":
                     out.append(ev["text"])
+                elif ev["type"] == "meta":
+                    meta = ev
             raw = "".join(out)
             data = json.loads(raw[raw.find("{"): raw.rfind("}") + 1])
             if data.get("label") in REPLY_LABELS:
-                return {"label": data["label"], "reason": data.get("reason") or "", "resume_on": data.get("resume_on"), "by": "model"}
+                model_out = data
+            await llm_log.record("reply_classifier", prompt_version=llm_log.version("classify", CLASSIFY_SYSTEM), provider=meta.get("provider"), model=meta.get("model"),
+                                 ms=round((time.monotonic() - started) * 1000), ok=model_out is not None, outcome=(model_out or {}).get("label") or "unparsed")
         except Exception:  # noqa: BLE001
-            pass
-    for label, rx in _KW[2:]:
-        if rx.search(t):
-            return {"label": label, "reason": "Matched a phrase", "by": "rules"}
-    return {"label": "neutral", "reason": "No clear intent", "by": "rules"}
+            model_out = None
+    if model_out:
+        intents = [i for i in dict.fromkeys([model_out["label"], *[x for x in model_out.get("intents") or [] if x in REPLY_LABELS], *rules]) if i != "neutral"] or ["neutral"]
+        if "unsubscribe" in intents:
+            return {"label": "unsubscribe", "intents": intents, "by": "model", "reason": model_out.get("reason") or "", "needs_review": False}
+        conf = float(model_out.get("confidence") or 0.5)
+        mixed = bool(set(intents) & POSITIVE_SET and set(intents) & NEGATIVE_SET)
+        disagrees = bool(rules) and model_out["label"] not in rules and not (model_out["label"] in POSITIVE_SET and set(rules) & POSITIVE_SET)
+        hidden_referral = "ooo" in intents and bool({"referral", "forward"} & set(intents))  # a colleague named inside an auto-reply
+        return {"label": model_out["label"], "intents": intents, "reason": model_out.get("reason") or "", "resume_on": model_out.get("resume_on"), "by": "model",
+                "confidence": conf, "needs_review": mixed or conf < REVIEW_CONFIDENCE or disagrees or hidden_referral}
+    if rules:
+        mixed = bool(set(rules) & POSITIVE_SET and set(rules) & NEGATIVE_SET) or ("ooo" in rules and bool({"referral", "forward"} & set(rules)))
+        return {"label": rules[0], "intents": rules, "reason": "Matched a phrase", "by": "rules", "needs_review": mixed}
+    return {"label": "neutral", "intents": ["neutral"], "reason": "No clear intent", "by": "rules", "needs_review": False}
 
 
 async def promote_to_lead(company: Optional[dict], person: dict, *, reason: str, by: str, stage: str = "mql", source: str = "radar") -> dict:
@@ -774,13 +897,16 @@ async def on_inbound(lead: dict, stype: str) -> int:
 
 
 async def handle_reply(contact: dict, text: str, *, source: str, label: Optional[str] = None, by: str = "system", meta: Optional[dict] = None) -> dict:
-    cls = {"label": label, "reason": "Set by a person", "by": by} if label else await classify(text)
+    cls = {"label": label, "reason": "Set by a person", "by": by, "intents": [label], "needs_review": False} if label else await classify(text)
     label = cls["label"]
+    if cls.get("needs_review"):
+        return await _hold_for_review(contact, text, cls, source=source, meta=meta)
     company = await _db().companies.find_one({"id": contact.get("company_id")}, {"_id": 0}) if contact.get("company_id") else None
     enr = await _db().enrollments.find_one({"contact_id": contact["id"]}, {"_id": 0, "steps": 0}, sort=[("created_at", -1)])
     rec = {"id": str(uuid.uuid4()), "contact_id": contact["id"], "company_id": contact.get("company_id"), "email": contact.get("email"), "enrollment_id": (enr or {}).get("id"),
            "sequence_id": (enr or {}).get("sequence_id"), "variant": (enr or {}).get("variant"), "step": (enr or {}).get("step_index"), "label": label, "reason": cls.get("reason"),
-           "classified_by": cls.get("by"), "text": (text or "")[:5000], "source": source, "meta": meta or {}, "received_at": now_iso()}
+           "classified_by": cls.get("by"), "intents": cls.get("intents"), "confidence": cls.get("confidence"), "text": (text or "")[:5000], "source": source,
+           "meta": meta or {}, "received_at": now_iso()}
     first = not await _db().reply_log.count_documents({"contact_id": contact["id"]})
     await _db().reply_log.insert_one(dict(rec))
     if first:  # the first reply proves the address reaches a person, and says whether it's the right one
@@ -835,6 +961,36 @@ async def handle_reply(contact: dict, text: str, *, source: str, label: Optional
     return rec
 
 
+async def _hold_for_review(contact: dict, text: str, cls: dict, *, source: str, meta: Optional[dict]) -> dict:
+    """Mixed or uncertain reply: pause every sequence for this person and ask a human the same day (C-07)."""
+    enr = await _db().enrollments.find_one({"contact_id": contact["id"]}, {"_id": 0, "steps": 0}, sort=[("created_at", -1)])
+    rec = {"id": str(uuid.uuid4()), "contact_id": contact["id"], "company_id": contact.get("company_id"), "email": contact.get("email"), "enrollment_id": (enr or {}).get("id"),
+           "sequence_id": (enr or {}).get("sequence_id"), "variant": (enr or {}).get("variant"), "step": (enr or {}).get("step_index"), "label": "needs_review",
+           "suggested": cls["label"], "intents": cls.get("intents"), "confidence": cls.get("confidence"), "reason": cls.get("reason"), "classified_by": cls.get("by"),
+           "text": (text or "")[:5000], "source": source, "meta": meta or {}, "received_at": now_iso(), "review": {"status": "open"}}
+    await _db().reply_log.insert_one(dict(rec))
+    async for e in _db().enrollments.find({"contact_id": contact["id"], "status": {"$in": ["scheduled", "active"]}}, {"_id": 0, "id": 1}):
+        await _set_status(e, "paused", "echolocate", "Reply needs a person to read it", {"resume_at": None})
+    who = f"{contact.get('name') or contact.get('email')} ({contact.get('title') or 'unknown title'})"
+    await ops.notify("replies", f":eyes: Reply from {who} needs a person: it reads as {', '.join(cls.get('intents') or [cls['label']])}. Outbound > Review.", event="reply_review")
+    rec.pop("_id", None)
+    return rec
+
+
+async def resolve_review(reply_id: str, label: str, by: str) -> dict:
+    rec = await _db().reply_log.find_one({"id": reply_id, "label": "needs_review"}, {"_id": 0})
+    if not rec:
+        raise HTTPException(status_code=404, detail="Nothing waiting for review with that id")
+    if label not in REPLY_LABELS:
+        raise HTTPException(status_code=422, detail=f"label must be one of {', '.join(REPLY_LABELS)}")
+    contact = await _db().contacts.find_one({"id": rec["contact_id"]}, {"_id": 0})
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact no longer exists")
+    done = await handle_reply(contact, rec.get("text") or "", source="review", label=label, by=by, meta={"review_of": reply_id})
+    await _db().reply_log.update_one({"id": reply_id}, {"$set": {"review": {"status": "resolved", "label": label, "by": by, "at": now_iso()}, "superseded_by": done["id"]}})
+    return done
+
+
 async def on_account_status(company: dict, user: dict) -> None:
     if company.get("status") in ("not_a_fit", "meeting_booked", "won"):
         async for c in _db().contacts.find({"company_id": company["id"]}, {"_id": 0, "id": 1}):
@@ -847,8 +1003,14 @@ async def learn() -> dict:
     """Weekly re-weight of signal types from real outcomes. Needs 20+ closed outcomes, else keeps the defaults."""
     async with ops.run("learn") as run:
         positive = {"replied", "meeting_booked", "opportunity", "won"}
-        closed = await _db().companies.find({"status": {"$in": list(positive | {"contacted", "not_a_fit", "lost"})}}, {"_id": 0, "status": 1, "signal_types": 1}).to_list(20000)
-        outcomes = closed  # contacted-without-reply counts as a negative outcome
+        closed = await _db().companies.find({"status": {"$in": list(positive | {"contacted", "not_a_fit", "lost"})}}, {"_id": 0, "id": 1, "status": 1, "signal_types": 1}).to_list(20000)
+        # "Contacted, no reply" only counts as a no once the sequence has had time to work: an account emailed
+        # yesterday isn't a negative outcome yet, and counting it would teach the scoring that fresh signals fail.
+        mature = (_now() - timedelta(days=int(os.environ.get("LEARN_MATURE_DAYS", "21")))).isoformat()
+        first_sends = {r["_id"]: r["first"] async for r in _db().sends.aggregate([{"$match": {"company_id": {"$ne": None}}},
+                                                                                   {"$group": {"_id": "$company_id", "first": {"$min": "$sent_at"}}}])}
+        outcomes = [c for c in closed if c["status"] != "contacted" or (first_sends.get(c.get("id")) or "9999") <= mature]
+        run["counts"]["immature_skipped"] = len(closed) - len(outcomes)
         n = len(outcomes)
         run["counts"]["outcomes"] = n
         if n < 20:
@@ -871,19 +1033,55 @@ async def learn() -> dict:
     return run["counts"]
 
 
+def ab_sample_size(baseline_pct: float, lift: float, alpha: float = 0.05, power: float = 0.8) -> int:
+    """Contacts per variant needed to detect `lift` x the baseline positive-reply rate (two-proportion test).
+    At a 2% baseline, detecting a doubling needs about 1,140 per variant: 50 sends can't decide anything."""
+    from statistics import NormalDist
+    p1 = max(1e-4, baseline_pct / 100)
+    p2 = min(0.99, p1 * lift)
+    za, zb = NormalDist().inv_cdf(1 - alpha / 2), NormalDist().inv_cdf(power)
+    pbar = (p1 + p2) / 2
+    n = (za * (2 * pbar * (1 - pbar)) ** 0.5 + zb * (p1 * (1 - p1) + p2 * (1 - p2)) ** 0.5) ** 2 / (p2 - p1) ** 2
+    return int(n) + 1
+
+
+def ab_significant(n1: int, x1: int, n2: int, x2: int, alpha: float = 0.05) -> bool:
+    from statistics import NormalDist
+    if not n1 or not n2:
+        return False
+    p = (x1 + x2) / (n1 + n2)
+    se = (p * (1 - p) * (1 / n1 + 1 / n2)) ** 0.5
+    if se == 0:
+        return False
+    z = abs(x1 / n1 - x2 / n2) / se
+    return 2 * (1 - NormalDist().cdf(z)) < alpha
+
+
 async def ab_update() -> None:
+    """Pre-declared test: variants alternate until each has the sample size declared up front, then a winner is
+    named only if the difference is significant; otherwise the control (A) carries on. No peeking: nothing is
+    decided early on a lucky streak."""
     settings = await compliance.outbound_settings()
-    min_sends = int(settings.get("ab_min_sends") or 50)
-    async for seq in _db().sequences.find({"ab_winner": None}, {"_id": 0, "id": 1}):
+    need = max(int(settings.get("ab_min_sends") or 50), ab_sample_size(float(settings.get("ab_baseline_pct") or 2.0), float(settings.get("ab_lift") or 2.0)))
+    async for seq in _db().sequences.find({"ab_winner": None}, {"_id": 0, "id": 1, "name": 1}):
         stats = {}
         for v in ("A", "B"):
-            sends = await _db().sends.count_documents({"sequence_id": seq["id"], "variant": v, "step": 1})
-            pos = await _db().reply_log.count_documents({"sequence_id": seq["id"], "variant": v, "label": {"$in": list(POSITIVE)}})
-            stats[v] = (sends, pos / sends if sends else 0)
-        if stats["A"][0] >= min_sends and stats["B"][0] >= min_sends and stats["A"][1] != stats["B"][1]:
-            winner = "A" if stats["A"][1] > stats["B"][1] else "B"
-            await _db().sequences.update_one({"id": seq["id"]}, {"$set": {"ab_winner": winner, "ab_decided_at": now_iso(), "ab_stats": {k: {"sends": s, "positive_rate": round(r * 100, 2)} for k, (s, r) in stats.items()}}})
-            await ops.notify("pipeline", f"A/B test decided: variant {winner} wins on positive reply rate.", event="ab_winner")
+            sends = await _db().sends.count_documents({"sequence_id": seq["id"], "variant": v, "step": 1, "status": {"$in": ["sent", "delivered", "handed_off"]}})
+            pos = await _db().reply_log.count_documents({"sequence_id": seq["id"], "variant": v, "label": {"$in": list(POSITIVE)}, "superseded_by": {"$exists": False}})
+            stats[v] = (sends, pos)
+        await _db().sequences.update_one({"id": seq["id"]}, {"$set": {"ab_needed": need, "ab_progress": {k: {"sends": n, "positive": x} for k, (n, x) in stats.items()}}})
+        (na, xa), (nb, xb) = stats["A"], stats["B"]
+        if na < need or nb < need:
+            continue
+        rates = {k: (x / n if n else 0) for k, (n, x) in stats.items()}
+        if ab_significant(na, xa, nb, xb):
+            winner, verdict = ("A" if rates["A"] > rates["B"] else "B"), "significant"
+        else:
+            winner, verdict = "A", "no_difference"
+        await _db().sequences.update_one({"id": seq["id"]}, {"$set": {"ab_winner": winner, "ab_verdict": verdict, "ab_decided_at": now_iso(),
+                                                                      "ab_stats": {k: {"sends": n, "positive_rate": round(rates[k] * 100, 2)} for k, (n, _) in stats.items()}}})
+        await ops.notify("pipeline", f"A/B test on {seq.get('name')}: " + (f"variant {winner} wins (significant)." if verdict == "significant"
+                                                                           else "no significant difference; staying with A."), event="ab_winner")
 
 
 # --- KPIs ---------------------------------------------------------------------------------------------
@@ -894,7 +1092,7 @@ async def kpis(days: int = 30) -> dict:
     week = (_now() - timedelta(days=7)).isoformat()
     sends, replies, seq_rows, runs, status = await asyncio.gather(
         db.sends.find({"sent_at": {"$gte": since}}, {"_id": 0, "sequence_id": 1, "variant": 1, "bounced": 1, "status": 1, "step": 1}).to_list(100000),
-        db.reply_log.find({"received_at": {"$gte": since}}, {"_id": 0, "label": 1, "sequence_id": 1, "variant": 1, "received_at": 1}).to_list(100000),
+        db.reply_log.find({"received_at": {"$gte": since}, "superseded_by": {"$exists": False}}, {"_id": 0, "label": 1, "sequence_id": 1, "variant": 1, "received_at": 1}).to_list(100000),
         db.sequences.find({}, {"_id": 0, "id": 1, "name": 1}).to_list(None),
         db.ops_runs.find({"job": "radar_daily", "status": "ok"}, {"_id": 0, "started_at": 1}).sort("started_at", -1).to_list(60),
         db.enrollments.aggregate([{"$group": {"_id": "$status", "n": {"$sum": 1}}}]).to_list(None))
@@ -1003,6 +1201,12 @@ class ContactPatch(BaseModel):
     notes: Optional[str] = Field(default=None, max_length=2000)
     company_id: Optional[str] = None
     mark_verified: Optional[bool] = None
+    # Country policy inputs (country_policy.py): a person's role-relevance decision and a consent record.
+    role_relevant: Optional[bool] = None
+    role_relevance_basis: Optional[str] = Field(default=None, max_length=300)
+    consent_wording: Optional[str] = Field(default=None, max_length=1000)
+    consent_channel: Optional[str] = Field(default=None, max_length=40)
+    consent_proof: Optional[str] = Field(default=None, max_length=500)
 
 
 @router.patch("/contacts/{contact_id}", dependencies=[can_work])
@@ -1017,6 +1221,16 @@ async def patch_contact(contact_id: str, body: ContactPatch, user: dict = Depend
         if c.get("email_status") == "invalid":
             raise HTTPException(status_code=409, detail="This address bounced or failed verification; it can't be marked verified")
         sets.update({"email_status": "valid", "verify_detail": f"Marked verified by {user['email']}", "verified_at": now_iso()})
+    rr, basis = sets.pop("role_relevant", None), sets.pop("role_relevance_basis", None)
+    if rr is not None:
+        if rr and not basis:
+            raise HTTPException(status_code=422, detail="Say why the pitch relates to this person's job (role_relevance_basis): it's the logged basis France, Ireland, Sweden and Finland require")
+        sets["role_relevance"] = {"relevant": rr, "basis": basis or "Marked not relevant", "set_by": user["email"], "at": now_iso()}
+    wording, channel, proof = sets.pop("consent_wording", None), sets.pop("consent_channel", None), sets.pop("consent_proof", None)
+    if wording or proof:
+        if not (wording and proof):
+            raise HTTPException(status_code=422, detail="A consent record needs the wording they agreed to and the proof (a link or reference)")
+        sets["consent"] = {"at": now_iso(), "wording": wording, "channel": channel or "email", "proof": proof, "recorded_by": user["email"]}
     if "email" in sets:
         sets["email"] = sets["email"].strip().lower() or None
         sets["email_status"] = "unchecked" if sets["email"] else "missing"
@@ -1207,6 +1421,25 @@ class ImportIn(BaseModel):
     source: str = Field(default="csv_import", max_length=40)
 
 
+@router.post("/contacts/{contact_id}/enrich-seamless", dependencies=[can_work])
+async def enrich_seamless(contact_id: str, user: dict = Depends(get_current_admin)):
+    """Research one contact on Seamless.AI and keep only the fields the gates need, tagged by vendor."""
+    import seamless
+    if not seamless.ready():
+        raise HTTPException(status_code=422, detail="Set SEAMLESS_API_KEY on the server (needs Seamless's Public API licence).")
+    c = await _db().contacts.find_one({"id": contact_id}, {"_id": 0})
+    if not c:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    company = await _db().companies.find_one({"id": c.get("company_id")}, {"_id": 0}) if c.get("company_id") else None
+    try:
+        found = await seamless.research(c, company)
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    if found.get("pending"):
+        return {"pending": True, "request_id": found["pending"], "contact": c}
+    return {"pending": False, "contact": await seamless.apply(c, found, user["email"]), "found": {k: v for k, v in found.items() if k != "seamless_id"}}
+
+
 @router.post("/contacts/import", dependencies=[can_work])
 async def import_contacts(body: ImportIn, user: dict = Depends(get_current_admin)):
     import csv
@@ -1237,6 +1470,8 @@ class SequenceIn(BaseModel):
     active: bool = True
     provider: Optional[str] = Field(default=None, pattern="^(dry_run|smtp|instantly)$")
     instantly_campaign_id: Optional[str] = Field(default=None, max_length=80)
+    channel: str = Field(default="email", pattern="^(email|linkedin)$")
+    dripify_campaign_id: Optional[str] = Field(default=None, max_length=80)  # a campaign built and switched on in Dripify's UI
 
 
 def _clean_steps(steps: list) -> list:
@@ -1346,6 +1581,15 @@ async def patch_enrollment(enr_id: str, body: EnrollmentPatch, user: dict = Depe
             if rm.find_competitors(body.opener):
                 raise HTTPException(status_code=422, detail="The opener names a competitor.")
             sets["opener"] = body.opener
+        if sets:
+            # A person's edit is grounded like a model's draft: a wrong figure typed by hand is still wrong.
+            import grounding
+            ev = e.get("evidence") or {}
+            text = " ".join([sets.get("opener", e.get("opener") or "")] + [st["body"] for st in sets.get("steps", [])[:1]])
+            approved_templates = [st.get("subject", "") + " " + st.get("body", "") for st in e.get("steps") or []] + [e.get("opener") or ""]
+            sets["grounding"] = grounding.check(text, prospect_evidence=ev.get("prospect") or [], solix_evidence=(ev.get("solix") or []) + approved_templates,
+                                                company=e.get("company_name"), person=e.get("contact_name")) if ev else e.get("grounding")
+            sets["edited_by"] = user["email"]
         await _set_status(e, e["status"], user["email"], "Edited", sets)
     elif body.action == "approve":
         if e["status"] != "pending_approval":
@@ -1355,7 +1599,13 @@ async def patch_enrollment(enr_id: str, body: EnrollmentPatch, user: dict = Depe
         g = await compliance.gate(c, company, enrollment_id=e["id"])
         if not g["ok"]:
             raise HTTPException(status_code=422, detail={"message": "No longer passes the gate", "reasons": g["reasons"]})
-        await _set_status(e, "scheduled", user["email"], "Approved", {"approved_by": user["email"], "approved_at": now_iso(), "next_send_at": now_iso()})
+        if (e.get("grounding") or {}).get("ok") is False:
+            raise HTTPException(status_code=422, detail={"message": "A claim in this draft isn't supported by its sources. Edit it, then approve.",
+                                                         "reasons": e["grounding"].get("problems") or []})
+        # C-17: who approved which model's draft under which prompt, kept with the enrollment and every send.
+        await _set_status(e, "scheduled", user["email"], "Approved", {"approved_by": user["email"], "approved_at": now_iso(), "next_send_at": now_iso(),
+                                                                       "approval_record": {"by": user["email"], "at": now_iso(), "model": e.get("opener_model"),
+                                                                                           "prompt_version": e.get("prompt_version"), "opener_provider": e.get("opener_provider")}})
     elif body.action == "reject":
         await _set_status(e, "stopped", user["email"], f"Rejected: {body.reason or 'no reason given'}")
     elif body.action == "pause":
@@ -1384,6 +1634,15 @@ async def log_reply(body: ReplyIn, user: dict = Depends(get_current_admin)):
     return await handle_reply(c, body.text, source="manual", label=body.label, by=user["email"])
 
 
+class ResolveIn(BaseModel):
+    label: str = Field(max_length=20)
+
+
+@router.post("/replies/{reply_id}/resolve", dependencies=[can_work])
+async def resolve_reply(reply_id: str, body: ResolveIn, user: dict = Depends(get_current_admin)):
+    return await resolve_review(reply_id, body.label, user["email"])
+
+
 @router.get("/replies")
 async def list_replies(label: Optional[str] = None, page: int = Query(1, ge=1), page_size: int = Query(50, le=200)):
     q = {"label": label} if label else {}
@@ -1399,6 +1658,56 @@ async def list_replies(label: Optional[str] = None, page: int = Query(1, ge=1), 
 async def list_sends(page: int = Query(1, ge=1), page_size: int = Query(50, le=200)):
     total, items = await asyncio.gather(_db().sends.count_documents({}), _db().sends.find({}, {"_id": 0}).sort("sent_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size))
     return {"items": items, "total": total}
+
+
+@router.get("/review")
+async def review_queue():
+    """Replies a person must read (mixed or uncertain intent), oldest first."""
+    items = await _db().reply_log.find({"label": "needs_review", "review.status": "open"}, {"_id": 0}).sort("received_at", 1).to_list(200)
+    return {"items": items, "total": len(items)}
+
+
+@router.get("/deliverability")
+async def deliverability_health():
+    import deliverability as dl
+    settings = await compliance.outbound_settings()
+    return {"domains": await dl.health(settings), "uncertain_sends": await dl.uncertain(),
+            "thresholds": {k: settings.get(k) for k in ("bounce_warn_pct", "bounce_pause_pct", "complaint_warn_pct", "complaint_pause_pct", "health_min_sends")},
+            "enroll_hold": settings.get("enroll_hold"), "enroll_hold_reason": settings.get("enroll_hold_reason"), "paused": settings.get("paused"),
+            "linkedin_paused": settings.get("linkedin_paused"), "linkedin_pause_reason": settings.get("linkedin_pause_reason")}
+
+
+class LedgerIn(BaseModel):
+    email: Optional[str] = Field(default=None, max_length=200)
+    linkedin_url: Optional[str] = Field(default=None, max_length=300)
+    channel: str = Field(pattern="^(email|linkedin|phone|event)$")
+    note: Optional[str] = Field(default=None, max_length=300)
+
+
+@router.post("/ledger", dependencies=[can_work])
+async def ledger_record(body: LedgerIn, user: dict = Depends(get_current_admin)):
+    """Record a touch made outside MarkHub (a rep's own campaign), so automated outreach sees it (spec G9)."""
+    import ledger
+    if not (body.email or body.linkedin_url):
+        raise HTTPException(status_code=422, detail="Give an email or a LinkedIn URL")
+    person = {"email": body.email, "linkedin_url": body.linkedin_url}
+    clash = await ledger.conflict(person, body.channel)
+    return {"recorded": await ledger.record(person, body.channel, None, by=user["email"], note=body.note), "warning": clash}
+
+
+@router.get("/ledger")
+async def ledger_list(page: int = Query(1, ge=1), page_size: int = Query(50, le=200)):
+    total = await _db().outreach_ledger.count_documents({})
+    items = await _db().outreach_ledger.find({}, {"_id": 0, "touches": {"$slice": -5}}).sort("last_at", -1).skip((page - 1) * page_size).to_list(page_size)
+    return {"items": items, "total": total}
+
+
+@router.post("/ledger/{person_key}/release", dependencies=[can_work])
+async def ledger_release(person_key: str, user: dict = Depends(get_current_admin)):
+    import ledger
+    if not await ledger.release(person_key, user["email"]):
+        raise HTTPException(status_code=404, detail="Not in the ledger")
+    return {"released": True}
 
 
 @router.get("/kpis")
@@ -1435,6 +1744,48 @@ async def connect_instantly(request: Request):
 
 # --- Instantly webhook (public, secret header) ------------------------------------------------------------
 
+
+
+@webhooks.post("/dripify")
+async def dripify_webhook(request: Request, x_solix_webhook_secret: Optional[str] = Header(default=None)):
+    """Dripify's per-campaign webhook (set in its UI, one trigger each): replies and connection events."""
+    import hmac
+    import linkedin
+    secret = os.environ.get("DRIPIFY_WEBHOOK_SECRET")
+    if not secret or not x_solix_webhook_secret or not hmac.compare_digest(secret, x_solix_webhook_secret):
+        raise HTTPException(status_code=401, detail="Invalid webhook secret")
+    try:
+        p = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    lead = p.get("lead") or p
+    url = lead.get("linkedinProfileUrl") or lead.get("profileUrl") or lead.get("linkedin_url") or ""
+    event = (p.get("event") or p.get("trigger") or p.get("type") or "").lower()
+    dedupe = hashlib.sha256("|".join(str(x or "") for x in (event, p.get("eventId") or p.get("timestamp"), lead.get("id"), url)).encode()).hexdigest()[:40]
+    try:
+        await _db().webhook_events.insert_one({"id": str(uuid.uuid4()), "dedupe_key": dedupe, "source": "dripify", "event": event, "received_at": now_iso()})
+    except Exception as e:  # noqa: BLE001
+        if "duplicate" in str(e).lower() or "E11000" in str(e):
+            return {"ok": True, "duplicate": True}
+        raise
+    import ledger
+    li = ledger.linkedin_id(url)
+    contact = None
+    if li:
+        async for c in _db().contacts.find({"linkedin_url": {"$regex": re.escape(li), "$options": "i"}}, {"_id": 0}):
+            contact = c
+            break
+    if not contact:
+        return {"ok": True, "matched": False}
+    if "repl" in event or "message" in event:
+        text = p.get("message") or p.get("text") or ""
+        if not text and lead.get("id") and linkedin.ready():
+            try:
+                text = await linkedin.conversation(lead["id"])  # one read, only for a lead whose webhook fired
+            except Exception:  # noqa: BLE001
+                text = ""
+        await handle_reply(contact, text, source="dripify", meta={"event": event})
+    return {"ok": True, "matched": True}
 
 
 @webhooks.post("/instantly")
