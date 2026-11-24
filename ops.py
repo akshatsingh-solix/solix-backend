@@ -135,6 +135,12 @@ async def _deliver(client: httpx.AsyncClient, item: dict, cfg: dict) -> str:
         from outbound import instantly_block
         await instantly_block(payload["email"])
         return "sent"
+    if target == "dripify_blacklist":
+        import linkedin
+        if not linkedin.ready():
+            return "skipped"
+        await linkedin.blacklist(payload["linkedin_url"])
+        return "sent"
     if target == "instantly_delete":
         from outbound import instantly_delete_lead
         await instantly_delete_lead(payload["email"])
@@ -227,7 +233,49 @@ async def watchdog() -> list:
     await check("unassigned", unrouted == 0, "Unassigned strong accounts", f"{unrouted} strong account(s) without an owner for over 24h")
     await check("needs_routing", conflicts == 0, "Accounts needing routing", f"{conflicts} account(s) the territory rules couldn't place")
     await check("outbox_failed", failed == 0, "Deliveries", f"{failed} Slack/Digiprise/email deliveries failed in the last 24h")
+
+    # EchoLocate spec additions: model shutdowns, human queues, uncertain sends, LLM volume.
+    import deliverability
+    import llm_log
+    today = datetime.now(timezone.utc).date()
+    soon = []
+    for m in await llm_log.models_in_use():
+        when = llm_log.shutdowns().get(m)
+        if when:
+            days = (datetime.fromisoformat(when).date() - today).days
+            if days <= 30:
+                soon.append((m, days))
+    await check("model_shutdown", not soon, "Model shutdown dates",
+                "; ".join(f"{m} {'was shut down ' + str(-d) + ' days ago' if d < 0 else 'shuts down in ' + str(d) + ' days'}" for m, d in soon) + ": move it in Sol > Control or the provider settings"
+                if soon else "no model in use is within 30 days of its shutdown date", "fail" if any(d < 0 for _, d in soon) else "warn")
+    oldest = await db.enrollments.find_one({"status": "pending_approval"}, {"_id": 0, "created_at": 1}, sort=[("created_at", 1)])
+    stale_approval = bool(oldest and oldest.get("created_at", "9") < _ago(48))
+    await check("approval_backlog", not stale_approval, "Approval queue", f"oldest draft waiting since {oldest['created_at'][:16]} UTC" if stale_approval else "nothing older than 48 hours")
+    review = await db.reply_log.count_documents({"label": "needs_review", "review.status": "open", "received_at": {"$lte": _ago(24)}})
+    await check("review_backlog", review == 0, "Replies needing a person", f"{review} reply(ies) waiting over 24 hours in Outbound > Review (opt-outs must be honoured the same day)",
+                "fail" if review else "warn")
+    stuck = await deliverability.uncertain()
+    await check("uncertain_sends", not stuck, "Uncertain sends", f"{len(stuck)} send(s) stopped mid-call: check the provider before releasing them (never resent automatically)"
+                if stuck else "none", "fail")
+    budget = int(os.environ.get("LLM_DAILY_CALL_BUDGET") or 0)
+    if budget:
+        calls = await db.llm_calls.count_documents({"at": {"$gte": _ago(24)}})
+        await check("llm_budget", calls <= budget, "Model calls (24h)", f"{calls} of a {budget} daily budget")
+    await _deadman()
     return checks
+
+
+async def _deadman() -> None:
+    """An external dead-man's switch (healthchecks.io, Better Uptime...): if this ping stops, *they* alert, so a dead
+    watchdog is never silent."""
+    url = os.environ.get("DEADMAN_URL")
+    if not url:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            await c.get(url)
+    except httpx.HTTPError:
+        logger.warning("dead-man's switch ping failed")
 
 
 CREDIT_WARN_DAYS = 14

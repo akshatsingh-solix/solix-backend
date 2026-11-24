@@ -39,7 +39,7 @@ INJECTION = re.compile(
     r"|\b(reveal|print|show|repeat|output|display|leak|dump|tell me)\b.{0,40}\b(your|the)\b.{0,20}\b(prompt|instructions|rules|configuration|config)\b"
     r"|\bdeveloper mode\b|\bjail ?break|\bDAN\b|\bdo anything now\b|\bgod mode\b|\bunfiltered\b|\buncensored\b"
     r"|\b(you are|you're) (now|no longer)\b|\bfrom now on,? (you|act|respond|answer)\b|\bpretend (to be|you are|you're)\b"
-    r"|\bact as (an? |my )?(?!solix)(\w+ ){0,2}(assistant|ai|gpt|chatbot|model|terminal|interpreter|compiler|linux|python|shell|developer|hacker)\b"
+    r"|\bact as (an? |my )?(?!solix)(\w+ ){0,2}(gpt|chatgpt|terminal|interpreter|compiler|linux|python|shell|hacker|unrestricted (ai|assistant|model))\b"
     r"|<\|im_start\|>|<\|system\|>|\[/?INST\]|###\s*(system|instruction)|<\s*/?\s*system\s*>",
     _I,
 )
@@ -48,9 +48,11 @@ SECRETS = re.compile(
     r"\b(give|share|send|tell|show|reveal|print|leak|dump|expose|list|what('?s| is| are))\b.{0,30}\b(api[\s_-]?keys?|apikeys?|access tokens?|secret keys?|"
     r"passwords?|credentials?|env(ironment)? var(iable)?s?|\.env|connection strings?|mongo(db)? ?(url|uri)s?)\b"
     r"|\b(your|sol'?s|this (bot|chat)'?s?|openai|groq|openrouter|gemini|anthropic|hugging ?face)\s+(api[\s_-]?)?(keys?|tokens?|credentials?|secrets?)\b"
-    r"|\b(what|which)\b.{0,15}\b(llm|ai model|language model|model|provider|gpt)s?\b.{0,20}\b(are you|do you use|powers? (you|this|sol)|is behind|runs? (you|this|sol)|are behind|you run on|you based on)"
+    # Probes about *this chat's* model. "Which models does Solix Enterprise AI support" is a product question (see PRODUCT_CONTEXT).
+    r"|\b(what|which)\b.{0,15}\b(llm|ai model|language model|model|provider|gpt)s?\b.{0,20}\b(are you|do you use|powers? (you|this|sol)|(is|are) behind (you|this|sol)\b|runs? (you|this|sol)|you run on|you based on)"
     r"|\b(are you|is this|r u)\s+(an? )?(gpt|chatgpt|claude|gemini|llama|mistral|groq|openai|deepseek|qwen)\b"
-    r"|\byour (own )?(backend|servers?|infrastructure|source code|admin panel|tech stack|hosting|keys|tokens)\b|(?<![\w/])\.env\b",
+    # Hosting, infrastructure, architecture and tech stack are buying questions for a SaaS vendor, not probes.
+    r"|\byour (own )?(source code|admin panel|api keys?|keys|tokens|system prompt|database password)\b|(?<![\w/])\.env\b",
     _I,
 )
 
@@ -59,7 +61,9 @@ _NOUN = (r"(code|coding|script|scripts|function|program|class|snippet|regex|rege
 _LANG = r"(python|javascript|typescript|java|c\+\+|c#|golang|rust|php|ruby|bash|shell|sql|html|css|react|node(\.js)?|kotlin|swift|scala|perl|r)"
 CODE_ASK = re.compile(
     r"\b(write|generate|create|give|make|build|fix|debug|refactor|optimi[sz]e|convert|complete|implement|code up|port)\b(\s+(me|us))?(\s+\S+){0,3}?\s+" + _NOUN + r"\b"
-    r"|\b" + _LANG + r"\s+(code|script|program|function|snippet|class|query)\b"
+    # "Python script" alone is a request; "a SQL query on archived data" is a product question, so a bare
+    # language + query is left to the prompt and the output guard.
+    r"|\b" + _LANG + r"\s+(code|script|program|function|snippet|class)\b(?!.{0,40}\b(solix|archiv|retire|platform|migrat)\w*)"
     r"|\b(fix|debug|correct)\s+(my|this|the following)\s+(code|script|query|function|program|error|stack ?trace)\b"
     r"|\bhow (do|can|would|to) (i|you|we)?\s*(code|program|implement)\b.{0,40}\b(in|using|with) " + _LANG + r"\b",
     _I,
@@ -86,6 +90,14 @@ FREE_LLM = re.compile(
 )
 # Pasting a long text to translate or summarise is free-LLM use; asking Sol to sum up its own answer is not.
 LONG_TEXT_TASK = re.compile(r"\b(translate|summari[sz]e|paraphrase|rewrite|proofread)\b", _I)
+
+# A security question asked from the defender's side ("how do you prevent SQL injection") is a buying question.
+DEFENSIVE = re.compile(r"\b(prevent|protect|defend|detect|stop|mitigat|block|guard|secure|resist|recover|immutab|against)\w*", _I)
+# Asking which models a Solix *product* supports is a product question, not a probe of this chat.
+PRODUCT_CONTEXT = re.compile(r"\b(solix|eai|enterprise ai|cdp|common data platform|platform|product|archive|your customers|we|our)\b", _I)
+
+MODEL_WORDS = re.compile(r"\b(llm|model|provider|gpt)s?\b", _I)
+CREDENTIAL_WORDS = re.compile(r"\b(key|token|password|credential|secret|env|connection string|mongo)", _I)
 
 REPLIES = {
     "code": (
@@ -123,9 +135,14 @@ def screen(message: str, *, block_code: bool = True) -> Optional[Verdict]:
     text = message.strip()
     if INJECTION.search(text):
         return Verdict("injection", REPLIES["injection"])
-    if SECRETS.search(text):
+    m = SECRETS.search(text)
+    model_probe = bool(m) and MODEL_WORDS.search(m.group(0)) and not CREDENTIAL_WORDS.search(m.group(0))
+    # Only a question about which models a *product* uses is exempt; credentials never are, and
+    # "are you GPT" / "what powers this chat" stay blocked whatever else the message says.
+    exempt = model_probe and PRODUCT_CONTEXT.search(text) and not re.search(r"\b(are you|r u|this (chat|bot)|powers? (you|sol)|you (run|based) on)\b", m.group(0), _I)
+    if m and not exempt:
         return Verdict("secrets", REPLIES["secrets"])
-    if HACKING.search(text):
+    if HACKING.search(text) and not DEFENSIVE.search(text):
         return Verdict("hacking", REPLIES["hacking"])
     if block_code and (CODE_ASK.search(text) or len(CODE_PASTE.findall(text)) >= 2 or (CODE_PASTE.search(text) and len(text) > 300)):
         return Verdict("code", REPLIES["code"])

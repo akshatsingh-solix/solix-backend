@@ -30,6 +30,7 @@ from radar import router as radar_router
 from outbound import router as outbound_router, webhooks as outbound_webhooks
 from compliance import router as compliance_router, public as outbound_public
 import ops
+import mcp_server
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("solix")
@@ -130,6 +131,8 @@ app.include_router(outbound_public)
 app.include_router(compliance_router)
 app.include_router(ops.router)
 app.include_router(ops.public)
+app.include_router(mcp_server.public)
+app.include_router(mcp_server.router)
 import home  # noqa: E402
 import permissions  # noqa: E402
 app.include_router(permissions.router)
@@ -229,6 +232,19 @@ async def on_startup():
         db.radar_dns.create_index("domain", unique=True),
         db.ops_alerts.create_index([("code", 1), ("created_at", -1)]),
         db.webhook_events.create_index("received_at"),
+        db.webhook_events.create_index("dedupe_key", unique=True, sparse=True),  # Instantly retries carry no id
+        db.sends.create_index("idem_key", unique=True, sparse=True),  # one row per enrollment step: never sent twice
+        db.sends.create_index([("status", 1), ("created_at", 1)]),
+        db.outreach_ledger.create_index("id", unique=True),
+        db.outreach_ledger.create_index("keys"),
+        db.suppression.create_index([("reason", 1), ("added_at", -1)]),
+        db.reply_log.create_index([("label", 1), ("received_at", 1)]),
+        db.llm_calls.create_index([("at", -1)]),
+        db.llm_calls.create_index([("agent", 1), ("at", -1)]),
+        db.llm_calls.create_index("at_dt", expireAfterSeconds=400 * 86400),
+        db.contacts.create_index("linkedin_url", sparse=True),
+        db.contacts.create_index([("created_at", 1), ("notice_sent_at", 1)]),
+        db.sends.create_index([("channel", 1), ("campaign", 1), ("sent_at", -1)]),
         # Sol: learning, personalisation, answer cache, quality insights.
         db.sol_gaps.create_index("key", unique=True),
         db.sol_gaps.create_index([("status", 1), ("count", -1)]),
@@ -238,8 +254,20 @@ async def on_startup():
         db.sol_answer_cache.create_index("key", unique=True),
         db.sol_answer_cache.create_index("expires_at", expireAfterSeconds=0),
         db.chat_messages.create_index([("role", 1), ("created_at", -1)]),
+        # Tool registry, MCP and the policy layer.
+        db.tool_audit.create_index([("at", -1)]),
+        db.tool_audit.create_index([("user", 1), ("at", -1)]),
+        db.tool_audit.create_index("at_dt", expireAfterSeconds=365 * 86400),
+        db.tool_confirmations.create_index("nonce", unique=True),  # a confirmation token works once
+        db.tool_confirmations.create_index("expires_at", expireAfterSeconds=0),
+        db.mcp_tokens.create_index("jti", unique=True),
+        db.mcp_tokens.create_index("user_id"),
     )
     await seed_admin()
+    # Build the tool router's indexes now, so the first request routes in well under a millisecond, not ~13 ms.
+    import tool_registry
+    for surface in ("sol", "mcp"):
+        tool_registry.REGISTRY.route("warm up", surface)
     import radar_service  # Settings → Sales team becomes the Leads Radar's reps, once
     if await radar_service.ensure_sales_team():
         asyncio.create_task(radar_service.recompute_all())

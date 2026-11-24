@@ -75,6 +75,10 @@ fully with just MongoDB configured.
   enterprise / mid-market / small business. Sign-up list:
   [`docs/radar-free-sources.md`](docs/radar-free-sources.md); step-by-step go-live:
   [`docs/radar-sources-go-live.md`](docs/radar-sources-go-live.md).
+- **AI tools and MCP** (Admin → AI tools): one tool registry for Sol, connected assistants and the admin, with a
+  sub-millisecond semantic router (only the tools a request needs are loaded), least-privilege scoping,
+  read-only by default, and a dry run plus single-use confirmation before any change. MarkHub is an MCP
+  server at `/api/mcp`. Method and measured accuracy: [`docs/ai-tools-mcp.md`](docs/ai-tools-mcp.md).
 - Daily job: `.github/workflows/radar-daily.yml` (needs the `MONGO_URL` and
   `DB_NAME` secrets). Full method: [`docs/radar-echolocate.md`](docs/radar-echolocate.md).
 

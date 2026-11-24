@@ -401,11 +401,13 @@ def test_erasure_cascades_and_keeps_only_a_hash(client):
 
 def test_bounce_rate_pauses_sending_and_watchdog_reports(client):
     async def seed():
-        for i in range(25):
-            await _mock_db.sends.insert_one({"id": f"s{i}", "sent_at": "2099-01-01T00:00:00+00:00", "status": "sent", "bounced": i < 3, "sequence_id": "x", "variant": "A", "step": 1})
+        # Rates only count once there are enough sends to mean anything (health_min_sends, 30 by default).
+        for i in range(40):
+            await _mock_db.sends.insert_one({"id": f"s{i}", "sent_at": "2099-01-01T00:00:00+00:00", "status": "sent", "bounced": i < 5, "sequence_id": "x", "variant": "A",
+                                             "step": 1, "sending_domain": "mail.solix.example"})
         return await outbound.bounce_check(await compliance.outbound_settings())
     pct = run(seed())
-    assert pct == 12.0
+    assert pct == 12.5
     s = client.get("/api/admin/compliance/settings").json()
     assert s["paused"] and "Bounce rate" in s["pause_reason"]
     h = client.get("/api/admin/ops/health").json()
@@ -473,6 +475,7 @@ def test_live_email_needs_the_server_switch(client, monkeypatch):
         return "msg-1"
 
     monkeypatch.setattr(emailer, "send_email", fake_send)
+    monkeypatch.setattr(outbound, "verify_email", _valid)  # never verified: the first live send re-checks the mailbox
     run(_mock_db.contacts.insert_one({"id": "live-c", "email": "live@initech.example", "name": "Live Test"}))
     steps = [{"subject": "s1", "body": "b1", "day": 0}, {"subject": "s2", "body": "b2", "day": 3}]
     s = {**run(compliance.outbound_settings()), "provider": "smtp"}

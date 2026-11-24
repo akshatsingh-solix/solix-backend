@@ -86,6 +86,68 @@ class Index:
                 self.postings.setdefault(t, []).append((i, f))
         n = len(chunks)
         self.idf = {t: math.log(1 + (n - len(p) + 0.5) / (len(p) + 0.5)) for t, p in self.postings.items()}
+        self._build_shards()
+
+    # --- Sharded semantic layer -----------------------------------------------------------------------------
+    # Chunks are split into shards by what they are (products, solutions, industries, resources, company,
+    # services, learned answers). Each shard has its own vector index and a centroid; a query is matched
+    # against the centroids first and searches only the closest shards, so the semantic pass stays fast as
+    # the CMS grows, and a product question isn't diluted by hundreds of blog chunks.
+    def _build_shards(self) -> None:
+        import semantic
+        by: dict = {}
+        for i, c in enumerate(self.chunks):
+            by.setdefault(shard_of(c), []).append(i)
+        self.shards = {}
+        for name, ids in by.items():
+            vi = semantic.VectorIndex()
+            for i in ids:
+                c = self.chunks[i]
+                vi.add(f"{c['title']} {c['title']} {c['text'][:1500]}", {"i": i})
+            vi.build(max_df=0.7)
+            self.shards[name] = (vi, semantic.centroid(vi.vecs))
+
+    def semantic_search(self, query: str, k: int = 8, shards: int = 3, include: tuple = ()) -> List[tuple]:
+        import semantic
+        if not getattr(self, "shards", None):
+            return []
+        ranked = []
+        for name, (vi, cen) in self.shards.items():
+            ranked.append((semantic.cosine(vi.query_vector(query), cen), name))
+        ranked.sort(reverse=True)
+        out = []
+        names = [n for _, n in ranked[:shards]] + [n for n in include if n in self.shards]
+        for name in dict.fromkeys(names):
+            out += [(s, it["i"]) for s, it in self.shards[name][0].search(query, k)]
+        out.sort(reverse=True)
+        return out[:k]
+
+    def hybrid(self, query: str, k: int = 5) -> List[dict]:
+        """BM25 plus the sharded semantic pass, fused on normalised scores (0.65 keyword, 0.35 meaning).
+
+        Score fusion rather than rank fusion: one strong exact match ("mainframe" -> the Mainframe Archiving
+        page) must not be outvoted by several weak hits that merely appear in both lists. The shard holding
+        the best keyword hit is always searched too. A chunk found only by meaning keeps a modest score (under
+        the 'well covered' bar), so gap logging and the 'Related' chips stay keyword-backed."""
+        kw = self.search(query, max(k, 8))
+        top_kw = kw[0]["score"] if kw else 0.0
+        include = (shard_of(kw[0]),) if kw else ()
+        sem = self.semantic_search(query, max(k, 8), include=include)
+        top_sem = sem[0][0] if sem else 0.0
+        fused: dict = {}
+        by_id: dict = {}
+        for h in kw:
+            by_id[h["id"]] = h
+            fused[h["id"]] = 0.85 * (h["score"] / top_kw if top_kw else 0.0)
+        for sc, i in sem:
+            c = self.chunks[i]
+            by_id.setdefault(c["id"], {**c, "score": round(min(5.5, sc * 12), 2)})
+            fused[c["id"]] = fused.get(c["id"], 0.0) + 0.15 * (sc / top_sem if top_sem else 0.0)
+        ranked = [cid for cid, _ in sorted(fused.items(), key=lambda kv: -kv[1])]
+        if top_kw >= CONFIDENT_KEYWORD_SCORE:
+            # The visitor used the site's own words: keep the keyword order and let meaning add what it missed.
+            ranked = [h["id"] for h in kw[:3]] + [cid for cid in ranked if cid not in {h["id"] for h in kw[:3]}]
+        return [by_id[cid] for cid in ranked[:k]]
 
     def _expand(self, query: str) -> List[str]:
         terms = tokenize(query)
@@ -235,14 +297,17 @@ async def refresh_cms(db, force: bool = False) -> None:
     gen = cache.generation("content")
     if gen != _content_gen:
         force = True  # something was published, edited or unpublished in this process
-    if not force and _cms_checked is not None and time.monotonic() - _cms_checked < CMS_REFRESH_SECONDS:
-        return
-    if _lock is None:
-        _lock = asyncio.Lock()
+    loop = asyncio.get_running_loop()
+    if _lock is None or getattr(_lock, "_solix_loop", None) is not loop:
+        _lock = asyncio.Lock()  # one per event loop: a lock from another loop can't be awaited
+        _lock._solix_loop = loop
     if _lock.locked():
-        # Another request is rebuilding (it takes well under a second): wait and use its result.
+        # A rebuild is under way (just published, or the background refresh): wait for it rather than answer
+        # from the index it is replacing. Checked before the freshness test, which the rebuild has already reset.
         async with _lock:
             return
+    if not force and _cms_checked is not None and time.monotonic() - _cms_checked < CMS_REFRESH_SECONDS:
+        return
     async with _lock:
         _cms_checked, _content_gen = time.monotonic(), gen
         now = datetime.now(timezone.utc).isoformat()
@@ -270,8 +335,33 @@ async def refresh_cms(db, force: bool = False) -> None:
         logger.info("Sol knowledge rebuilt: %d chunks (%d site, %d CMS items, %d learned)", len(chunks), len(bundled_chunks()), len(docs), len(learned))
 
 
+SHARDS = (("learned", lambda c: c.get("kind") == "learned" or not c.get("url")), ("products", lambda c: c["url"].startswith("/products")),
+          ("solutions", lambda c: c["url"].startswith("/solutions") or c["url"].startswith("/platform")),
+          ("industries", lambda c: c["url"].startswith("/industries")), ("services", lambda c: c["url"].startswith("/services")),
+          ("resources", lambda c: c["url"].startswith("/resources") or c.get("kind") in ("cms", "article", "resource")),
+          ("news", lambda c: c["url"].startswith("/newsroom")))
+
+
+CONFIDENT_KEYWORD_SCORE = 7.0  # a BM25 top score this high means the question uses the site's own terms
+
+
+def shard_of(chunk: dict) -> str:
+    for name, test in SHARDS:
+        try:
+            if test(chunk):
+                return name
+        except (KeyError, AttributeError, TypeError):
+            continue
+    return "company"
+
+
 def search(query: str, k: int = 5) -> List[dict]:
     return index().search(query, k)
+
+
+def hybrid_search(query: str, k: int = 5) -> List[dict]:
+    """Keyword + sharded semantic retrieval (what Sol answers from)."""
+    return index().hybrid(query, k)
 
 
 def format_context(hits: List[dict], max_chars: int = 6000) -> str:

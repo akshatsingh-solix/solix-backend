@@ -1,0 +1,306 @@
+{
+  "note": "Requests people make, and the tool that should handle them. Phrased differently from each tool's own examples on purpose: this measures routing on unseen wording. Add a row whenever a real request is routed wrongly.",
+  "mcp": [
+    [
+      "Pull up every Strong account that nobody owns yet",
+      "radar_search_accounts"
+    ],
+    [
+      "look for Initech in radar",
+      "radar_search_accounts"
+    ],
+    [
+      "companies with a Smarsh posting in the UK",
+      "radar_search_accounts"
+    ],
+    [
+      "What signals and contacts do we have on account 1234?",
+      "radar_get_account"
+    ],
+    [
+      "break down the score for this company",
+      "radar_get_account"
+    ],
+    [
+      "give me the radar numbers at a glance",
+      "radar_summary"
+    ],
+    [
+      "did last night's radar job finish",
+      "radar_summary"
+    ],
+    [
+      "any research briefs sitting in draft?",
+      "radar_research_queue"
+    ],
+    [
+      "make Sam the owner of the Globex account",
+      "radar_update_account"
+    ],
+    [
+      "flag Initech as not a fit",
+      "radar_update_account"
+    ],
+    [
+      "kick off research on Umbrella Corp",
+      "radar_queue_research"
+    ],
+    [
+      "who are this week's marketing qualified leads",
+      "leads_search"
+    ],
+    [
+      "look up the person with email kim@contoso.com",
+      "leads_search"
+    ],
+    [
+      "leads Pat is responsible for",
+      "leads_search"
+    ],
+    [
+      "show the full history of lead 99",
+      "lead_get"
+    ],
+    [
+      "bump lead 99 to sales qualified",
+      "lead_update"
+    ],
+    [
+      "close lead 42 as lost",
+      "lead_update"
+    ],
+    [
+      "give lead 42 to Jordan",
+      "lead_update"
+    ],
+    [
+      "how much pipeline came from marketing this quarter",
+      "reports_overview"
+    ],
+    [
+      "conversion through the funnel",
+      "reports_overview"
+    ],
+    [
+      "what percentage of our cold emails bounced",
+      "outbound_kpis"
+    ],
+    [
+      "is variant B beating A",
+      "outbound_kpis"
+    ],
+    [
+      "prospects at Contoso we have on file",
+      "outbound_contacts"
+    ],
+    [
+      "emails sitting in the approval queue",
+      "outbound_enrollments"
+    ],
+    [
+      "which sequences are paused right now",
+      "outbound_enrollments"
+    ],
+    [
+      "did anyone ask for a meeting",
+      "outbound_replies"
+    ],
+    [
+      "responses from prospects today",
+      "outbound_replies"
+    ],
+    [
+      "sign off the pending email for enrollment 7",
+      "outbound_set_enrollment"
+    ],
+    [
+      "halt outreach to this prospect",
+      "outbound_set_enrollment"
+    ],
+    [
+      "record the reply Kim sent me on LinkedIn",
+      "outbound_log_reply"
+    ],
+    [
+      "are we allowed to cold email contact 55",
+      "compliance_gate_check"
+    ],
+    [
+      "what's stopping us from emailing contact 55",
+      "compliance_gate_check"
+    ],
+    [
+      "has bob@example.com opted out",
+      "compliance_suppression_search"
+    ],
+    [
+      "put these three addresses on do not contact",
+      "compliance_suppress"
+    ],
+    [
+      "a person asked us to forget them, remove everything",
+      "compliance_erase_person"
+    ],
+    [
+      "which visitor questions does Sol struggle with",
+      "sol_gaps"
+    ],
+    [
+      "how many Sol chats turned into leads",
+      "sol_insights"
+    ],
+    [
+      "give Sol this approved answer about SOC 2",
+      "sol_teach_answer"
+    ],
+    [
+      "do we have a datasheet on email archiving",
+      "content_search"
+    ],
+    [
+      "anything failing in the system right now",
+      "ops_health"
+    ]
+  ],
+  "sol": [
+    [
+      "can you set up a demo for next week",
+      "create_demo_request"
+    ],
+    [
+      "I'd love to see it in action",
+      "create_demo_request"
+    ],
+    [
+      "please have a person get back to me by email",
+      "request_expert_contact"
+    ],
+    [
+      "I need help from your support team",
+      "request_expert_contact"
+    ],
+    [
+      "I'm Priya from Northwind, priya@northwind.example",
+      "save_visitor_details"
+    ],
+    [
+      "we're a regional bank running Oracle EBS",
+      "save_visitor_details"
+    ],
+    [
+      "is there a case study for insurance",
+      "search_site"
+    ],
+    [
+      "what page talks about mainframe archiving",
+      "search_site"
+    ]
+  ],
+  "note_heldout": "'mcp_heldout' was written after the router was tuned on 'mcp' and never used for tuning: it is the honest accuracy figure.",
+  "mcp_heldout": [
+    [
+      "which accounts in France are surging",
+      "radar_search_accounts"
+    ],
+    [
+      "find accounts owned by Brenda",
+      "radar_search_accounts"
+    ],
+    [
+      "tell me everything about the Hooli account",
+      "radar_get_account"
+    ],
+    [
+      "how many weak accounts do we have overall",
+      "radar_summary"
+    ],
+    [
+      "dossiers awaiting a reviewer",
+      "radar_research_queue"
+    ],
+    [
+      "reassign Hooli to Brenda",
+      "radar_update_account"
+    ],
+    [
+      "investigate Stark Industries for me",
+      "radar_queue_research"
+    ],
+    [
+      "list SQL-stage leads in Canada",
+      "leads_search"
+    ],
+    [
+      "what has lead 512 been doing on our site",
+      "lead_get"
+    ],
+    [
+      "promote lead 512 to opportunity",
+      "lead_update"
+    ],
+    [
+      "how many MQLs did we create last month",
+      "reports_overview"
+    ],
+    [
+      "what's our positive reply rate",
+      "outbound_kpis"
+    ],
+    [
+      "prospects we've imported from Northwind",
+      "outbound_contacts"
+    ],
+    [
+      "what drafts still need a human to approve",
+      "outbound_enrollments"
+    ],
+    [
+      "approve enrollment abc123",
+      "outbound_set_enrollment"
+    ],
+    [
+      "pause the sequence for the Hooli CIO",
+      "outbound_set_enrollment"
+    ],
+    [
+      "who said they're interested",
+      "outbound_replies"
+    ],
+    [
+      "log that Raj replied asking for pricing",
+      "outbound_log_reply"
+    ],
+    [
+      "why can't contact 88 be enrolled",
+      "compliance_gate_check"
+    ],
+    [
+      "is raj@hooli.example on the suppression list",
+      "compliance_suppression_search"
+    ],
+    [
+      "unsubscribe these two addresses from all outreach",
+      "compliance_suppress"
+    ],
+    [
+      "delete all data about raj@hooli.example under GDPR",
+      "compliance_erase_person"
+    ],
+    [
+      "top unanswered questions in Sol this week",
+      "sol_gaps"
+    ],
+    [
+      "teach Sol how to answer questions about FedRAMP",
+      "sol_teach_answer"
+    ],
+    [
+      "find our case study about insurance",
+      "content_search"
+    ],
+    [
+      "is the outbound sender running",
+      "ops_health"
+    ]
+  ]
+}

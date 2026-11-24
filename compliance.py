@@ -23,7 +23,7 @@ import hmac
 import os
 import re
 import uuid
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query
 from fastapi.responses import HTMLResponse
@@ -47,7 +47,15 @@ DEFAULT_OUTBOUND = {
     "sending_enabled": False, "paused": False, "pause_reason": None, "approval_required": True, "provider": "dry_run",
     "instantly_campaign_id": None, "blocked_countries": ["Germany", "Poland"], "postal_address": "", "sender_name": "Solix Technologies",
     "daily_cap": 50, "send_days": [0, 1, 2, 3, 4], "send_hours_utc": [8, 17], "min_account_score": 30, "require_verified_email": True,
-    "max_touches": 4, "ai_disclosure": "", "bounce_pause_pct": 3.0, "ab_min_sends": 50,
+    "max_touches": 4, "ai_disclosure": "", "ab_min_sends": 50, "ab_baseline_pct": 2.0, "ab_lift": 2.0,
+    # Deliverability (deliverability.py): staged response per sending domain, over 7 days, once there are enough sends.
+    "bounce_warn_pct": 1.0, "bounce_pause_pct": 2.0, "complaint_warn_pct": 0.1, "complaint_pause_pct": 0.3, "health_min_sends": 30,
+    "enroll_hold": False, "enroll_hold_reason": None, "enroll_hold_auto": True,
+    "reverify_days": 30,
+    # GDPR Art. 14: first touch carries the notice; a sourced record with no notice by day 30 is purged (retention.py).
+    "country_policies": {}, "unknown_country_policy": "BLOCK_UNLESS_CONSENT",
+    "linkedin_daily_cap": 15, "linkedin_weekly_cap": 80, "linkedin_paused": False, "linkedin_pause_reason": None,
+    "art14_notice": True, "privacy_notice_url": None, "notice_deadline_days": 30, "retention_days": 365, "retention_enforce": False, "channel_cooldown_days": 90,  # re-check a mailbox at send time when its last verification is older than this
     # Data accuracy gate (data_quality.py): "conflicts" blocks accounts whose size or industry sources disagree;
     # "verified" also blocks until every core fact is verified; "off" only warns.
     "data_gate": "conflicts",
@@ -57,6 +65,16 @@ DEFAULT_OUTBOUND = {
 
 def _db():
     return database.db
+
+
+SOURCE_LABELS = {"seamless": "Seamless.AI", "deep_dive": "public sources about your company", "referral": "a colleague's referral", "csv": "a business contact list",
+                 "manual": "public business sources", "hunter": "public business sources", "apollo": "a business contact database", "radar": "public business sources"}
+
+
+def source_label(contact: dict) -> str:
+    """The named data source the Art. 14 notice must give (Art. 14(2)(f))."""
+    src = (contact.get("source") or "manual").lower()
+    return SOURCE_LABELS.get(src) or (contact.get("source") or "public business sources")
 
 
 def live_sending_allowed() -> bool:
@@ -135,6 +153,9 @@ async def suppress(email: str, reason: str, *, source: str, by: str, keep_email:
                                             {"$set": {"status": "stopped", "stop_reason": f"Suppressed: {reason}", "updated_at": now_iso()}})
     if os.environ.get("INSTANTLY_API_KEY") and email:
         await ops.enqueue("instantly_block", "suppression", {"email": email}, key=f"block:{doc['email_hash']}")
+    if os.environ.get("DRIPIFY_API_KEY") and ids:  # the same person on LinkedIn: Dripify's blacklist too
+        async for c in _db().contacts.find({"id": {"$in": ids}, "linkedin_url": {"$nin": [None, ""]}}, {"_id": 0, "linkedin_url": 1}):
+            await ops.enqueue("dripify_blacklist", "suppression", {"linkedin_url": c["linkedin_url"]}, key=f"dblock:{c['linkedin_url'].lower()}")
     await ops.digiprise("contact.suppressed", {"email_hash": doc["email_hash"], "reason": reason, "email": email if keep_email else None}, key=f"dp-supp:{doc['email_hash']}:{reason}")
     return doc
 
@@ -146,7 +167,7 @@ async def lia_signed(region: str) -> bool:
     return any(r.get("signed_at") and r.get("region") in (region, "global") and not r.get("revoked") for r in doc.get("records") or [])
 
 
-async def gate(contact: dict, company: Optional[dict], settings: Optional[dict] = None, *, enrollment_id: Optional[str] = None) -> dict:
+async def gate(contact: dict, company: Optional[dict], settings: Optional[dict] = None, *, enrollment_id: Optional[str] = None, channel: str = "email") -> dict:
     """Exclusion + confidence gate. `ok` only when there are no blocking reasons."""
     settings = settings or await outbound_settings()
     reasons: List[str] = []
@@ -185,6 +206,13 @@ async def gate(contact: dict, company: Optional[dict], settings: Optional[dict] 
         where = ", ".join(sorted(countries & blocked))
         reasons.append(f"Outbound blocked in {where} (prior consent required)" if explicit else
                        f"Account has signals in {where}: set the contact's country to confirm where they are")
+    # Country policy engine (country_policy.py): allow-list by country, UK corporate subscribers, role relevance, consent.
+    import country_policy as cp
+    cp_reasons, cp_warnings, decision = cp.evaluate(contact, company, countries - blocked, settings)
+    if not explicit and cp_reasons and countries:
+        cp_reasons = [r + " (inferred from the account: set the contact's country to confirm)" for r in cp_reasons]
+    reasons += cp_reasons
+    warnings += cp_warnings
     if not company:
         reasons.append("Not linked to an account")
     else:
@@ -216,9 +244,13 @@ async def gate(contact: dict, company: Optional[dict], settings: Optional[dict] 
                                                   **({"id": {"$ne": enrollment_id}} if enrollment_id else {})}, {"_id": 0, "sequence_name": 1})
         if other:
             reasons.append(f"Already in an active sequence ({other.get('sequence_name') or 'another sequence'})")
+    import ledger  # one channel per person (G9): another team or channel got there first
+    clash = await ledger.conflict(contact, channel)
+    if clash:
+        reasons.append(f"Overlap: {clash}")
     if contact.get("persona") != "target":
         warnings.append("Title is outside the target personas")
-    return {"ok": not reasons, "reasons": reasons, "warnings": warnings, "region": region}
+    return {"ok": not reasons, "reasons": reasons, "warnings": warnings, "region": region, "policy": decision}
 
 
 # --- Unsubscribe ----------------------------------------------------------------------------------
@@ -348,7 +380,26 @@ class OutboundSettingsIn(BaseModel):
     max_touches: Optional[int] = Field(default=None, ge=1, le=8)
     ai_disclosure: Optional[str] = Field(default=None, max_length=300)
     bounce_pause_pct: Optional[float] = Field(default=None, ge=0.5, le=20)
+    bounce_warn_pct: Optional[float] = Field(default=None, ge=0.1, le=20)
+    complaint_warn_pct: Optional[float] = Field(default=None, ge=0.01, le=5)
+    complaint_pause_pct: Optional[float] = Field(default=None, ge=0.05, le=5)
+    health_min_sends: Optional[int] = Field(default=None, ge=10, le=10000)
+    enroll_hold: Optional[bool] = None
+    reverify_days: Optional[int] = Field(default=None, ge=1, le=365)
+    country_policies: Optional[Dict[str, Dict[str, object]]] = None
+    unknown_country_policy: Optional[str] = Field(default=None, pattern="^(ALLOW_OPT_OUT|ALLOW_IF_ROLE_RELEVANT|GENERIC_ADDRESS_ONLY|BLOCK_UNLESS_CONSENT)$")
+    art14_notice: Optional[bool] = None
+    privacy_notice_url: Optional[str] = Field(default=None, max_length=500)
+    notice_deadline_days: Optional[int] = Field(default=None, ge=1, le=30)
+    retention_days: Optional[int] = Field(default=None, ge=30, le=1095)
+    retention_enforce: Optional[bool] = None
+    linkedin_daily_cap: Optional[int] = Field(default=None, ge=1, le=40)
+    linkedin_weekly_cap: Optional[int] = Field(default=None, ge=5, le=150)
+    linkedin_paused: Optional[bool] = None
+    channel_cooldown_days: Optional[int] = Field(default=None, ge=7, le=365)
     ab_min_sends: Optional[int] = Field(default=None, ge=10, le=1000)
+    ab_baseline_pct: Optional[float] = Field(default=None, ge=0.1, le=50)
+    ab_lift: Optional[float] = Field(default=None, ge=1.1, le=10)
 
 
 @router.get("/settings")
@@ -371,6 +422,14 @@ async def put_settings(body: OutboundSettingsIn, user: dict = Depends(get_curren
             raise HTTPException(status_code=422, detail="Set PUBLIC_API_URL on the server so emails can carry a working unsubscribe link.")
     if values.get("paused") is False:
         values["pause_reason"] = None
+    if "country_policies" in values:
+        import country_policy as cp
+        values["country_policies"] = {c: {"policy": r.get("policy"), "basis": str(r.get("basis") or "")[:300], "verified": bool(r.get("verified")),
+                                          "by": user["email"], "at": now_iso()} for c, r in values["country_policies"].items() if r.get("policy") in cp.POLICIES}
+    if values.get("enroll_hold") is False:
+        values["enroll_hold_reason"] = None
+    if values.get("linkedin_paused") is False:
+        values["linkedin_pause_reason"] = None
     saved = await save_outbound_settings(values)
     await ops.notify("watchdog", f"Outbound settings changed by {user['email']}: sending {'on' if saved['sending_enabled'] else 'off'}, {'paused' if saved['paused'] else 'running'}, provider {saved['provider']}.", event="settings")
     return saved
@@ -482,6 +541,23 @@ async def erasure(body: ErasureIn, user: dict = Depends(get_current_admin)):
 @router.get("/erasure", dependencies=[can_comply])
 async def erasure_log(limit: int = Query(50, le=200)):
     return await _db().erasure_requests.find({}, {"_id": 0}).sort("completed_at", -1).to_list(limit)
+
+
+@router.get("/retention")
+async def retention_status():
+    import retention
+    state = await _db().settings.find_one({"key": "retention"}, {"_id": 0}) or {}
+    preview = await retention.run({**(await outbound_settings()), "retention_enforce": False}, record=False)  # counts only, nothing deleted
+    return {"last_run": state, "would_purge_now": preview, "enforced": (await outbound_settings()).get("retention_enforce")}
+
+
+@router.get("/country-policies")
+async def country_policies():
+    """The policy per country (defaults from the spec's table, admin overrides on top) and what unknown countries get."""
+    import country_policy as cp
+    s = await outbound_settings()
+    return {"table": cp.table(s.get("country_policies")), "unknown_country_policy": s.get("unknown_country_policy"), "policies": list(cp.POLICIES),
+            "note": "Rows marked unverified rest on a January 2024 secondary table: confirm with local counsel before live sending."}
 
 
 @router.get("/gate/{contact_id}")

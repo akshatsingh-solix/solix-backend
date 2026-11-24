@@ -98,6 +98,18 @@ services:
         sync: false
       - key: INSTANTLY_WEBHOOK_SECRET
         generateValue: true
+      # LinkedIn through Dripify, and Seamless.AI research (both optional).
+      - key: DRIPIFY_API_KEY
+        sync: false
+      - key: DRIPIFY_WEBHOOK_SECRET
+        generateValue: true
+      - key: SEAMLESS_API_KEY
+        sync: false
+      # Watchdog: external dead-man's switch; signing key for AI tool dry-run confirmations.
+      - key: DEADMAN_URL
+        sync: false
+      - key: TOOL_CONFIRM_SECRET
+        generateValue: true
       - key: REACHER_URL
         sync: false
       # Radar web research and page reading (1,000 free credits a month); Parallel is the backup.
