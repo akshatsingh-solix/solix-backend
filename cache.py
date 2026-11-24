@@ -8,6 +8,7 @@ burst of traffic costs one database query, not hundreds.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -18,16 +19,32 @@ from fastapi.responses import JSONResponse, Response
 
 _store: dict[str, tuple[float, Any]] = {}
 _generation: dict[str, int] = {}
-MAX_KEYS = 500
+_inflight: dict[str, "asyncio.Future"] = {}
+MAX_KEYS = 200
 
 
 def bump(namespace: str) -> None:
-    """Invalidate every cached entry in a namespace (e.g. after publishing)."""
+    """Invalidate every cached entry in a namespace (e.g. after publishing).
+
+    The old entries are dropped right away. They used to stay in memory until 500 keys had piled up, and the
+    Radar bumps its account list on every account change, so each page load after a change kept another full copy
+    of every account: on a 512 MB instance that ran the API out of memory."""
     _generation[namespace] = _generation.get(namespace, 0) + 1
+    prefix = f"{namespace}:"
+    for k in [k for k in _store if k.startswith(prefix)]:
+        _store.pop(k, None)
 
 
 def generation(namespace: str) -> int:
     return _generation.get(namespace, 0)
+
+
+def _prune(now: float) -> None:
+    for k in [k for k, (exp, _) in _store.items() if exp <= now]:
+        _store.pop(k, None)
+    if len(_store) >= MAX_KEYS:
+        for k in sorted(_store, key=lambda k: _store[k][0])[: len(_store) - MAX_KEYS + MAX_KEYS // 5]:
+            _store.pop(k, None)
 
 
 async def memo(namespace: str, key: str, ttl: float, produce: Callable[[], Awaitable[Any]]) -> Any:
@@ -36,16 +53,40 @@ async def memo(namespace: str, key: str, ttl: float, produce: Callable[[], Await
     now = time.monotonic()
     if hit and hit[0] > now:
         return hit[1]
-    value = await produce()
-    if len(_store) >= MAX_KEYS:
-        for k in sorted(_store, key=lambda k: _store[k][0])[: MAX_KEYS // 5]:
-            _store.pop(k, None)
-    _store[full] = (now + ttl, value)
+    # Callers arriving while the value is being produced wait for that one result instead of each building
+    # their own copy (ten admins' auto-refresh landing together was ten full account lists in memory at once).
+    pending = _inflight.get(full)
+    if pending is not None:
+        return await asyncio.shield(pending)
+    fut = asyncio.get_running_loop().create_future()
+    _inflight[full] = fut
+    try:
+        value = await produce()
+    except BaseException as e:
+        fut.set_exception(e)
+        fut.exception()  # mark retrieved: waiters get it, nobody logs "never retrieved"
+        raise
+    finally:
+        _inflight.pop(full, None)
+    fut.set_result(value)
+    _prune(now)
+    if full.split(":", 2)[1] == str(generation(namespace)):  # not invalidated while it was loading
+        _store[full] = (now + ttl, value)
     return value
+
+
+def size() -> dict:
+    """Entries per namespace (Ops > Health)."""
+    out: dict = {}
+    for k in _store:
+        ns = k.split(":", 1)[0]
+        out[ns] = out.get(ns, 0) + 1
+    return out
 
 
 def clear() -> None:
     _store.clear()
+    _inflight.clear()
 
 
 def cached_json(request: Request, payload: Any, *, max_age: int = 60, swr: int = 86400, private: bool = False) -> Response:
