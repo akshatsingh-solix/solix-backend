@@ -232,6 +232,12 @@ async def on_startup():
         db.radar_dns.create_index("domain", unique=True),
         db.ops_alerts.create_index([("code", 1), ("created_at", -1)]),
         db.webhook_events.create_index("received_at"),
+        db.webhook_events.create_index("dedupe_key", unique=True, sparse=True),  # Instantly retries carry no id
+        db.sends.create_index("idem_key", unique=True, sparse=True),  # one row per enrollment step: never sent twice
+        db.sends.create_index([("status", 1), ("created_at", 1)]),
+        db.outreach_ledger.create_index("id", unique=True),
+        db.outreach_ledger.create_index("keys"),
+        db.suppression.create_index([("reason", 1), ("added_at", -1)]),
         # Sol: learning, personalisation, answer cache, quality insights.
         db.sol_gaps.create_index("key", unique=True),
         db.sol_gaps.create_index([("status", 1), ("count", -1)]),

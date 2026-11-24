@@ -36,18 +36,8 @@ def run(coro):
 
 
 @pytest.fixture(scope="module")
-def admin():
-    if getattr(database.db, "client", None) is database.client:
-        database.db = AsyncMongoMockClient()["solix_test"]
-    for name in PATCHED:
-        mod = sys.modules.get(name)
-        if mod is not None and hasattr(mod, "db"):
-            mod.db = database.db
-    tr.clear_policy_cache()
-    with TestClient(server.app) as c:
-        token = c.post("/api/auth/login", json={"email": os.environ["ADMIN_EMAIL"], "password": os.environ["ADMIN_PASSWORD"]}).json()["access_token"]
-        c.headers.update({"Authorization": f"Bearer {token}"})
-        yield c
+def admin(isolated_app):
+    return isolated_app[0]
 
 
 def _user(admin, email, role):

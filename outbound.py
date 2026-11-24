@@ -18,6 +18,7 @@ Flow
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -320,12 +321,19 @@ def render_steps(sequence: dict, variant: str, ctx: dict) -> List[dict]:
             for s in sequence.get("steps") or []]
 
 
-def footer_html(email: str, settings: dict) -> str:
+def footer_html(email: str, settings: dict, *, contact: Optional[dict] = None, first: bool = False) -> str:
+    """Sender identity, postal address and a one-step opt-out on every email (PECR reg. 23, ePrivacy 13(4)); on the
+    first touch also the GDPR Art. 14 notice: who we are, where we got their details, the lawful basis and their rights."""
     unsub = compliance.unsubscribe_url(email)
     parts = []
     if settings.get("ai_disclosure"):
         parts.append(escape(settings["ai_disclosure"]))
     parts.append(f"{escape(settings.get('sender_name') or 'Solix Technologies')}, {escape(settings.get('postal_address') or '')}")
+    if first and settings.get("art14_notice", True):
+        source = compliance.source_label(contact or {})
+        privacy = settings.get("privacy_notice_url") or ((settings.get("site_url") or "https://www.solix.com").rstrip("/") + "/privacy")
+        parts.append(f"We contacted you because your role relates to what we do. We found your work details via {escape(source)} and use them on the basis of "
+                     f"legitimate interest. You can object or ask what we hold at any time: <a href=\"{escape(privacy)}\">privacy notice</a>.")
     parts.append(f'Not relevant? <a href="{escape(unsub)}">Unsubscribe</a> and we won\'t email you again.')
     return "<p style='color:#778;font-size:12px;margin-top:24px'>" + "<br>".join(parts) + "</p>"
 
@@ -347,6 +355,9 @@ async def _variant(sequence: dict) -> str:
 async def enroll(contact: dict, sequence: dict, by: str, *, force_variant: Optional[str] = None) -> dict:
     company = await _db().companies.find_one({"id": contact.get("company_id")}, {"_id": 0}) if contact.get("company_id") else None
     settings = await compliance.outbound_settings()
+    if settings.get("enroll_hold"):
+        raise HTTPException(status_code=422, detail={"message": "New enrollments are on hold for deliverability.", "reasons": [settings.get("enroll_hold_reason") or "Deliverability warning"],
+                                                     "warnings": []})
     g = await compliance.gate(contact, company, settings)
     if not g["ok"]:
         raise HTTPException(status_code=422, detail={"message": "This contact can't be enrolled yet.", "reasons": g["reasons"], "warnings": g["warnings"]})
@@ -422,17 +433,23 @@ async def instantly_delete_lead(email: str) -> None:
 
 
 async def _send_instantly(enr: dict, contact: dict, sequence: dict, settings: dict) -> str:
+    """Bulk-add endpoint with a deterministic idempotency key: a retry after a timeout can't create the lead twice."""
+    import deliverability as dl
     campaign = sequence.get("instantly_campaign_id") or settings.get("instantly_campaign_id")
     if not campaign:
         raise RuntimeError("No Instantly campaign is set for this sequence")
     custom = {"opener": enr["opener"], "rep_name": (enr["steps"][0]["body"].rsplit("\n", 1)[-1] if enr["steps"] else ""), "solix_enrollment": enr["id"],
-              "unsubscribe_url": compliance.unsubscribe_url(contact["email"])}
+              "solix_contact": contact["id"], "job_title": contact.get("title") or "", "unsubscribe_url": compliance.unsubscribe_url(contact["email"])}
     for i, s in enumerate(enr["steps"], 1):
         custom[f"subject_{i}"], custom[f"body_{i}"] = s["subject"], s["body"]
-    res = await instantly_request("POST", "/leads", json={"campaign": campaign, "email": contact["email"], "first_name": contact.get("first_name"), "last_name": contact.get("last_name"),
-                                                          "company_name": enr.get("company_name"), "job_title": contact.get("title"), "personalization": enr["opener"],
-                                                          "custom_variables": custom, "skip_if_in_workspace": True})
-    return res.get("id") or "instantly"
+    lead = {"email": contact["email"], "first_name": contact.get("first_name"), "last_name": contact.get("last_name"), "company_name": enr.get("company_name"),
+            "personalization": enr["opener"], "custom_variables": custom}
+    res = await instantly_request("POST", "/leads/add", json={"campaign_id": campaign, "leads": [{k: v for k, v in lead.items() if v is not None}],
+                                                              "skip_if_in_workspace": True, "idempotency_key": dl.instantly_key(campaign, contact["id"], enr)})
+    created = res.get("created_leads") or []
+    if not created and (res.get("blocklist_count") or res.get("in_blocklist")):
+        raise RuntimeError("Instantly refused the lead: the address is on the workspace blocklist")
+    return (created[0].get("id") if created else None) or res.get("id") or "instantly"
 
 
 async def _claim(enr: dict) -> bool:
@@ -445,6 +462,12 @@ async def _claim(enr: dict) -> bool:
 
 
 async def send_step(enr: dict, settings: dict) -> str:
+    """Send one step, exactly once.
+
+    The enrollment is claimed for 10 minutes (two runs can't take the same step), then the send row is written
+    *before* the provider is called under a unique (enrollment, step) key (deliverability.claim_send). If that row
+    already exists and isn't a clean failure, this step went out or may have: nothing is sent again."""
+    import deliverability as dl
     if not await _claim(enr):
         return "skipped"
     contact = await _db().contacts.find_one({"id": enr["contact_id"]}, {"_id": 0})
@@ -452,11 +475,14 @@ async def send_step(enr: dict, settings: dict) -> str:
     if not contact:
         await _set_status(enr, "stopped", "system", "Contact deleted")
         return "stopped"
-    # Re-check suppression and exclusions at send time: they can change after enrollment.
+    # Re-check suppression, exclusions and the overlap ledger at send time: they can change after approval.
+    import ledger
     sup = await compliance.is_suppressed(contact.get("email"))
-    blocked = sup or (company or {}).get("excluded_reason") or ((company or {}).get("status") in ("not_a_fit", "meeting_booked", "opportunity", "won", "lost"))
-    if blocked:
-        await _set_status(enr, "stopped", "system", f"Blocked at send time: {sup or (company or {}).get('excluded_reason') or (company or {}).get('status')}")
+    status_block = (company or {}).get("status") if (company or {}).get("status") in ("not_a_fit", "meeting_booked", "opportunity", "won", "lost") else None
+    reason = (f"suppressed ({sup})" if sup else None) or (company or {}).get("excluded_reason") or (f"account is {status_block}" if status_block else None) \
+        or await ledger.conflict(contact, enr.get("channel") or "email", enr["id"])
+    if reason:
+        await _set_status(enr, "stopped", "system", f"Blocked at send time: {reason}")
         return "stopped"
     step = enr["steps"][enr["step_index"]]
     provider = enr.get("provider") or settings.get("provider") or "dry_run"
@@ -464,25 +490,51 @@ async def send_step(enr: dict, settings: dict) -> str:
         # Held, not simulated: a simulated send would mark the account contacted and count as delivered.
         await _db().enrollments.update_one({"id": enr["id"]}, {"$set": {"claim_until": None}})
         return "held"
+    if provider != "dry_run" and enr["step_index"] == 0 and _stale(contact.get("verified_at"), int(settings.get("reverify_days") or 30)):
+        # Addresses decay 2-3% a month: re-check a mailbox verified long ago before the first email goes.
+        contact = await set_verification(contact)
+        if contact.get("email_status") == "invalid":
+            await _set_status(enr, "stopped", "system", "Address failed re-verification at send time")
+            return "stopped"
+        if contact.get("email_status") != "valid" and settings.get("require_verified_email"):
+            await _set_status(enr, "paused", "system", f"Re-verification came back {contact.get('email_status')}: held for a person to check", {"claim_until": None, "resume_at": None})
+            return "held"
     sequence = await _db().sequences.find_one({"id": enr["sequence_id"]}, {"_id": 0}) or {}
+    from_addr = os.environ.get("EMAIL_FROM") or os.environ.get("SMTP_USER") or ""
     send = {"id": str(uuid.uuid4()), "enrollment_id": enr["id"], "contact_id": contact["id"], "company_id": enr.get("company_id"), "sequence_id": enr["sequence_id"],
-            "variant": enr["variant"], "step": enr["step_index"] + 1, "email": contact["email"], "subject": step["subject"], "provider": provider, "sent_at": now_iso()}
-    if provider == "instantly":
-        send["provider_ref"] = await _send_instantly(enr, contact, sequence, settings)
-        send["status"] = "handed_off"
-        await _db().sends.insert_one(dict(send))
-        await _set_status(enr, "active", "system", "Handed to Instantly (it sends every step)", {"step_index": len(enr["steps"]), "handed_off_at": now_iso(), "claim_until": None})
-    else:
-        if provider == "smtp":
+            "variant": enr["variant"], "step": enr["step_index"] + 1, "email": contact["email"], "subject": step["subject"], "provider": provider, "sent_at": now_iso(),
+            "channel": "email", "sending_domain": dl.domain_of(from_addr) if provider == "smtp" else (settings.get("instantly_sending_domain") if provider == "instantly" else "dry-run"),
+            "model": enr.get("opener_model"), "prompt_version": enr.get("prompt_version"), "approved_by": enr.get("approved_by")}
+    claimed = await dl.claim_send(send)
+    if not claimed:
+        # This step already has a send row: it went out (or may have). Move on rather than send it twice.
+        await _db().enrollments.update_one({"id": enr["id"]}, {"$set": {"claim_until": None}})
+        await _set_status(enr, enr["status"], "system", "Step already sent or in flight: not sent again", {"claim_until": None})
+        return "skipped"
+    key = claimed["idem_key"]
+    try:
+        if provider == "instantly":
+            ref = await _send_instantly(enr, contact, sequence, settings)
+        elif provider == "smtp":
             from emailer import send_email
             unsub = compliance.unsubscribe_url(contact["email"])
-            html = body_html(step["body"]) + footer_html(contact["email"], settings)
-            send["provider_ref"] = await send_email(to=contact["email"], subject=step["subject"], html=html,
-                                                    headers={"List-Unsubscribe": f"<{unsub}>", "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"})
-            send["status"] = "sent"
+            html = body_html(step["body"]) + footer_html(contact["email"], settings, contact=contact, first=enr["step_index"] == 0)
+            ref = await send_email(to=contact["email"], subject=step["subject"], html=html,
+                                   headers={"List-Unsubscribe": f"<{unsub}>", "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"})
         else:
-            send["status"] = "simulated"
-        await _db().sends.insert_one(dict(send))
+            ref = None
+    except Exception:
+        await dl.finish_send(key, "failed")  # the provider refused: nothing left, a later attempt may retry this row
+        raise
+    status = "handed_off" if provider == "instantly" else "sent" if provider == "smtp" else "simulated"
+    await dl.finish_send(key, status, provider_ref=ref)
+    send["status"] = status
+    await ledger.record(contact, "email", enr["id"], by="echolocate")
+    if enr["step_index"] == 0 and not contact.get("notice_sent_at") and provider != "dry_run":
+        await _db().contacts.update_one({"id": contact["id"]}, {"$set": {"notice_sent_at": now_iso()}})  # Art. 14(3) clock stops
+    if provider == "instantly":
+        await _set_status(enr, "active", "system", "Handed to Instantly (it sends every step)", {"step_index": len(enr["steps"]), "handed_off_at": now_iso(), "claim_until": None})
+    else:
         nxt = enr["step_index"] + 1
         if nxt >= len(enr["steps"]):
             await _set_status(enr, "completed", "system", f"Step {nxt} sent; sequence finished", {"step_index": nxt, "claim_until": None})
@@ -497,17 +549,22 @@ async def send_step(enr: dict, settings: dict) -> str:
     return send["status"]
 
 
+def _stale(iso: Optional[str], days: int) -> bool:
+    if not iso:
+        return True
+    try:
+        return datetime.fromisoformat(iso) < _now() - timedelta(days=days)
+    except ValueError:
+        return True
+
+
 async def bounce_check(settings: dict) -> Optional[float]:
-    since = (_now() - timedelta(days=7)).isoformat()
-    sent = await _db().sends.count_documents({"sent_at": {"$gte": since}, "status": {"$in": ["sent", "handed_off", "delivered"]}})
-    if sent < 20:
-        return None
-    bounced = await _db().sends.count_documents({"sent_at": {"$gte": since}, "bounced": True})
-    pct = round(100 * bounced / sent, 2)
-    if pct > float(settings.get("bounce_pause_pct") or 3) and not settings.get("paused"):
-        await compliance.save_outbound_settings({"paused": True, "pause_reason": f"Bounce rate {pct}% over the last 7 days is above {settings.get('bounce_pause_pct')}%"})
-        await ops.alert("bounce_pause", f"Outbound paused automatically: bounce rate {pct}% (7 days, {sent} sends). Check list quality and domain health before resuming.", severity="fail", dedupe_hours=1)
-    return pct
+    """Staged deliverability response per sending domain (deliverability.py). Returns the overall 7-day bounce %
+    once there are enough sends to mean anything, else None."""
+    import deliverability as dl
+    table = await dl.enforce(settings)
+    row = table.get("all") or {}
+    return row.get("bounce_pct") if row.get("enough_data") else None
 
 
 def _in_window(settings: dict, now: datetime) -> bool:
@@ -1392,30 +1449,60 @@ async def instantly_webhook(request: Request, x_solix_webhook_secret: Optional[s
         raise HTTPException(status_code=400, detail="Invalid JSON")
     event = p.get("event_type") or p.get("event") or ""
     email = (p.get("lead_email") or p.get("email") or (p.get("lead") or {}).get("email") or "").strip().lower()
-    await _db().webhook_events.insert_one({"id": str(uuid.uuid4()), "source": "instantly", "event": event, "email_hash": compliance.email_hash(email) if email else None,
-                                           "received_at": now_iso(), "campaign": p.get("campaign_id") or p.get("campaign")})
+    step = p.get("step") or p.get("email_sequence_step")
+    # Instantly's webhooks carry no event id and may be retried: derive one, and let a unique index drop repeats.
+    dedupe = hashlib.sha256("|".join(str(x or "") for x in (event, p.get("timestamp"), p.get("campaign_id") or p.get("campaign"), email, step)).encode()).hexdigest()[:40]
+    try:
+        await _db().webhook_events.insert_one({"id": str(uuid.uuid4()), "dedupe_key": dedupe, "source": "instantly", "event": event,
+                                               "email_hash": compliance.email_hash(email) if email else None, "received_at": now_iso(),
+                                               "campaign": p.get("campaign_id") or p.get("campaign")})
+    except Exception as e:  # noqa: BLE001 - duplicate key: already processed
+        if "duplicate" in str(e).lower() or "E11000" in str(e):
+            return {"ok": True, "duplicate": True}
+        raise
     contact = await _db().contacts.find_one({"email": email}, {"_id": 0}) if email else None
     if not contact:
         if event in ("lead_unsubscribed",) and email:
             await compliance.suppress(email, "unsubscribed", source="instantly", by="instantly")
         return {"ok": True, "matched": False}
     enr = await _db().enrollments.find_one({"contact_id": contact["id"]}, {"_id": 0}, sort=[("created_at", -1)])
+    account = p.get("email_account") or p.get("from_email") or ""
+    sending_domain = account.rsplit("@", 1)[-1].lower() if "@" in account else None
     if event == "email_sent" and enr:
-        await _db().sends.insert_one({"id": str(uuid.uuid4()), "enrollment_id": enr["id"], "contact_id": contact["id"], "company_id": enr.get("company_id"), "sequence_id": enr["sequence_id"],
-                                      "variant": enr.get("variant"), "step": p.get("step") or p.get("email_sequence_step"), "email": email, "subject": p.get("email_subject"),
-                                      "provider": "instantly", "status": "delivered", "sent_at": now_iso()})
+        # The hand-off row stands for step 1; later steps get their own row. One email, one row: rates stay honest.
+        step_n = int(step) if str(step or "").isdigit() else None
+        handoff = await _db().sends.find_one_and_update({"enrollment_id": enr["id"], "status": "handed_off"},
+                                                       {"$set": {"status": "delivered", "step": step_n or 1, "sent_at": now_iso(), "sending_domain": sending_domain, "subject": p.get("email_subject")}})
+        if not handoff:
+            key = f"{enr['id']}:{step_n or 'x'}:instantly"
+            await _db().sends.update_one({"idem_key": key}, {"$setOnInsert": {
+                "id": str(uuid.uuid4()), "idem_key": key, "enrollment_id": enr["id"], "contact_id": contact["id"], "company_id": enr.get("company_id"),
+                "sequence_id": enr["sequence_id"], "variant": enr.get("variant"), "step": step_n, "email": email, "subject": p.get("email_subject"),
+                "provider": "instantly", "status": "delivered", "sent_at": now_iso(), "channel": "email", "sending_domain": sending_domain}}, upsert=True)
     elif event == "email_bounced":
-        await _db().sends.update_many({"contact_id": contact["id"]}, {"$set": {"bounced": True}})
+        # Only the email that bounced counts as bounced: the latest one to this address, not every send ever made to them.
+        latest = await _db().sends.find_one({"contact_id": contact["id"], "status": {"$in": ["sent", "delivered", "handed_off"]}}, {"_id": 0, "id": 1}, sort=[("sent_at", -1)])
+        if latest:
+            await _db().sends.update_one({"id": latest["id"]}, {"$set": {"bounced": True, "bounced_at": now_iso(), **({"sending_domain": sending_domain} if sending_domain else {})}})
         await _db().contacts.update_one({"id": contact["id"]}, {"$set": {"email_status": "invalid", "verify_detail": "Hard bounce"}})
         await score_email_source(contact, False, "bounce")
         await compliance.suppress(email, "bounced", source="instantly", by="instantly")
+    elif event in ("email_complaint", "lead_marked_spam", "spam_complaint"):
+        await compliance.suppress(email, "complaint", source="instantly", by="instantly")
+        await _db().suppression.update_one({"email_hash": compliance.email_hash(email)}, {"$set": {"sending_domain": sending_domain}})
     elif event in ("reply_received", "lead_interested", "lead_meeting_booked", "lead_not_interested", "lead_out_of_office", "lead_wrong_person", "lead_unsubscribed"):
         text = p.get("reply_text") or p.get("reply_text_snippet") or ""
         label = {"lead_interested": "interested", "lead_meeting_booked": "meeting", "lead_not_interested": "not_interested", "lead_out_of_office": "ooo",
                  "lead_wrong_person": "referral", "lead_unsubscribed": "unsubscribe"}.get(event)
+        recent = await _db().reply_log.find_one({"contact_id": contact["id"], "source": "instantly", "received_at": {"$gte": (_now() - timedelta(minutes=30)).isoformat()}},
+                                                {"_id": 0}, sort=[("received_at", -1)])
+        if label and recent:
+            # Instantly labels the reply we already classified: note its view, and act again only to stop contact.
+            await _db().reply_log.update_one({"id": recent["id"]}, {"$set": {"instantly_label": label}})
+            if label in ("unsubscribe", "not_interested") and recent.get("label") not in ("unsubscribe", "not_interested"):
+                await compliance.suppress(email, "unsubscribed" if label == "unsubscribe" else "not_interested", source="instantly-label", by="instantly")
+            return {"ok": True, "duplicate": True}
         if event == "reply_received" or label:
-            if label and await _db().reply_log.find_one({"contact_id": contact["id"], "label": label, "received_at": {"$gte": (_now() - timedelta(minutes=10)).isoformat()}}, {"_id": 1}):
-                return {"ok": True, "duplicate": True}
             await handle_reply(contact, text, source="instantly", label=label, meta={"event": event, "unibox_url": p.get("unibox_url")})
     elif event in ("email_opened", "email_link_clicked") and enr:
         await _db().enrollments.update_one({"id": enr["id"]}, {"$inc": {"opens" if event == "email_opened" else "clicks": 1}})
