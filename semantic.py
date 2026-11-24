@@ -83,8 +83,9 @@ def words(text: str) -> List[str]:
     return [w for w in _WORD.findall((text or "").lower()) if w not in STOP]
 
 
-def features(text: str) -> Counter:
-    """Weighted features of one text (before IDF)."""
+def features(text: str, ngrams: bool = True, pairs: bool = True) -> Counter:
+    """Weighted features of one text (before IDF). `ngrams=False` skips character 4-grams: they are most of the
+    features, so large corpora (Sol's knowledge) leave them out to stay small; the tool router keeps them."""
     ws = words(text)
     out: Counter = Counter()
     stems = [stem(w) for w in ws]
@@ -93,12 +94,13 @@ def features(text: str) -> Counter:
         c = _CONCEPT_OF.get(w) or _CONCEPT_OF.get(s)
         if c:
             out["c:" + c] += 1.0
-        if len(w) >= 5:
+        if ngrams and len(w) >= 5:
             padded = f"<{w}>"
             for i in range(len(padded) - 3):
                 out["g:" + padded[i:i + 4]] += 0.25
-    for a, b in zip(stems, stems[1:]):
-        out["b:" + a + "_" + b] += 1.5
+    if pairs:
+        for a, b in zip(stems, stems[1:]):
+            out["b:" + a + "_" + b] += 1.5
     return out
 
 
@@ -107,38 +109,68 @@ def _h(feat: str) -> int:
 
 
 class VectorIndex:
-    """Sparse TF-IDF cosine index with postings. `add` everything, then `build()`, then `search()`."""
+    """Sparse TF-IDF cosine index with postings. `add` everything, then `build()`, then `search()`.
 
-    def __init__(self) -> None:
+    Memory matters (the API runs in 512 MB): after build() only the postings are kept, as compact arrays, plus a
+    centroid when asked for; the per-document vectors and raw counts are dropped."""
+
+    def __init__(self, ngrams: bool = True, pairs: bool = True) -> None:
+        self.ngrams, self.pairs = ngrams, pairs
         self.items: List[dict] = []
-        self._raw: List[Counter] = []
-        self.vecs: List[Dict[int, float]] = []
+        self._raw: Optional[List[str]] = []
         self.idf: Dict[int, float] = {}
-        self.postings: Dict[int, List[Tuple[int, float]]] = defaultdict(list)
+        self.postings: Dict[int, tuple] = {}
+        self.centroid: Dict[int, float] = {}
 
     def add(self, text: str, item: dict) -> None:
+        """Queue a text. Its features are computed in build(), twice (document frequencies, then weights), so no
+        per-document table is ever held for the whole corpus."""
         self.items.append(item)
-        self._raw.append(Counter({_h(f): w for f, w in features(text).items()}))
+        self._raw.append(text)
 
-    def build(self, max_df: float = 0.5) -> "VectorIndex":
-        n = max(1, len(self._raw))
+    def _hashed(self, text: str) -> Dict[int, float]:
+        raw: Dict[int, float] = {}
+        for f, w in features(text, self.ngrams, self.pairs).items():
+            h = _h(f)
+            raw[h] = raw.get(h, 0.0) + w
+        return raw
+
+    def build(self, max_df: float = 0.5, centroid: bool = False, min_df: int = 1) -> "VectorIndex":
+        from array import array
+        texts = self._raw or []
+        n = max(1, len(texts))
         df: Counter = Counter()
-        for raw in self._raw:
-            df.update(raw.keys())
+        for t in texts:
+            df.update(self._hashed(t).keys())
         # Features in more than max_df of documents carry no signal and only lengthen postings.
-        self.idf = {h: math.log(1 + n / (1 + d)) for h, d in df.items() if n < 8 or d / n <= max_df}
-        self.vecs, self.postings = [], defaultdict(list)
-        for i, raw in enumerate(self._raw):
+        # min_df > 1 drops features seen in a single document (mostly one-off word pairs): they can't connect two
+        # texts, and on a large corpus they are most of the index.
+        self.idf = {h: math.log(1 + n / (1 + d)) for h, d in df.items() if (n < 8 or d / n <= max_df) and d >= min_df}
+        del df
+        docs: Dict[int, array] = {}
+        weights: Dict[int, array] = {}
+        acc: Dict[int, float] = defaultdict(float)
+        for i, t in enumerate(texts):
+            raw = self._hashed(t)
             v = {h: (1 + math.log(w)) * self.idf[h] if w >= 1 else w * self.idf[h] for h, w in raw.items() if h in self.idf}
             norm = math.sqrt(sum(x * x for x in v.values())) or 1.0
-            v = {h: x / norm for h, x in v.items()}
-            self.vecs.append(v)
             for h, x in v.items():
-                self.postings[h].append((i, x))
+                x /= norm
+                if h not in docs:
+                    docs[h], weights[h] = array("i"), array("f")
+                docs[h].append(i)
+                weights[h].append(x)
+                if centroid:
+                    acc[h] += x
+        self.postings = {h: (docs[h], weights[h]) for h in docs}
+        if centroid:
+            cn = math.sqrt(sum(x * x for x in acc.values())) or 1.0
+            self.centroid = {h: x / cn for h, x in acc.items()}
+        self._raw = None  # the texts were only needed to build
         return self
 
     def query_vector(self, text: str) -> Dict[int, float]:
-        raw = Counter({_h(f): w for f, w in features(text).items()})
+        raw = self._hashed(text)
         v = {h: (1 + math.log(w)) * self.idf[h] if w >= 1 else w * self.idf[h] for h, w in raw.items() if h in self.idf}
         norm = math.sqrt(sum(x * x for x in v.values())) or 1.0
         return {h: x / norm for h, x in v.items()}
@@ -147,8 +179,10 @@ class VectorIndex:
         q = self.query_vector(text)
         scores: Dict[int, float] = defaultdict(float)
         for h, qx in q.items():
-            for i, x in self.postings.get(h, ()):
-                scores[i] += qx * x
+            p = self.postings.get(h)
+            if p:
+                for i, x in zip(p[0], p[1]):
+                    scores[i] += qx * x
         ranked = sorted(scores.items(), key=lambda kv: -kv[1])
         out = []
         for i, s in ranked:

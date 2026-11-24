@@ -118,11 +118,13 @@ The 17 Nov update lowered answer quality in three ways, all fixed:
   key now keeps order and negation, and includes the prompt version, so answers written under the old prompt
   are never served again.
 
-Retrieval is now **sharded and hybrid**: keyword (BM25) plus an in-process semantic pass over shards (products,
-solutions, industries, services, resources, news, company, learned answers), fused on normalised scores. Exact
-questions keep their keyword order; paraphrases and typos improve (offline eval: 100% on exact questions,
-93.8% on paraphrases and typos vs 87.5% keyword-only; p95 under 2 ms). A race that could answer from the old
-index right after a publish is fixed.
+Retrieval is now **sharded and hybrid**: keyword (BM25) plus an in-process semantic pass (stemmed words, word
+pairs and a domain thesaurus) over shards (products, solutions, industries, services, resources, news, company,
+learned answers), fused on normalised scores. Exact questions keep their keyword order (offline eval: 100%;
+paraphrases and typos 87.5%; p95 under 1 ms). The semantic layer is kept deliberately small, because the API runs
+in 512 MB: the first version also indexed character 4-grams (93.8% on paraphrases) but used about 100 MB per
+1,200 chunks and stopped the API from starting on Render with the full CMS loaded; it now uses about 18 MB per
+1,200 chunks. A race that could answer from the old index right after a publish is fixed.
 
 Sol's tools go through the shared tool registry ([`ai-tools-mcp.md`](ai-tools-mcp.md)): only the tools a turn
 needs are loaded, and a booking or contact request with an invalid email is refused by its dry-run validation

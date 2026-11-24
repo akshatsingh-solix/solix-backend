@@ -75,17 +75,24 @@ class Index:
         self.chunks = chunks
         self.k1, self.b = k1, b
         # Titles count twice: a chunk titled "Application Retirement" is about it.
-        self.docs = [Counter(tokenize(f"{c['title']} {c['title']} {c['text']}")) for c in chunks]
-        self.lens = [sum(d.values()) for d in self.docs]
-        self.avg = (sum(self.lens) / len(self.lens)) if self.lens else 1
-        # Postings: term -> [(chunk, frequency)], so a query touches only chunks that share a term
-        # (milliseconds over thousands of chunks, which matters under concurrent visitors).
+        self.lens = []
+        # Postings: term -> (chunk ids, frequencies) as compact arrays, so a query touches only chunks that share a
+        # term. Arrays, not lists of (chunk, frequency) tuples: a tuple per posting cost about 10x the memory and,
+        # with a few thousand CMS articles, ran the API out of its 512 MB.
+        from array import array
         self.postings: dict = {}
-        for i, d in enumerate(self.docs):
+        for i, c in enumerate(chunks):
+            d = Counter(tokenize(f"{c['title']} {c['title']} {c['text']}"))  # one chunk at a time: nothing per chunk is kept
+            self.lens.append(sum(d.values()))
             for t, f in d.items():
-                self.postings.setdefault(t, []).append((i, f))
+                p = self.postings.get(t)
+                if p is None:
+                    p = self.postings[t] = (array("i"), array("H"))
+                p[0].append(i)
+                p[1].append(min(f, 65535))
+        self.avg = (sum(self.lens) / len(self.lens)) if self.lens else 1
         n = len(chunks)
-        self.idf = {t: math.log(1 + (n - len(p) + 0.5) / (len(p) + 0.5)) for t, p in self.postings.items()}
+        self.idf = {t: math.log(1 + (n - len(p[0]) + 0.5) / (len(p[0]) + 0.5)) for t, p in self.postings.items()}
         self._build_shards()
 
     # --- Sharded semantic layer -----------------------------------------------------------------------------
@@ -100,12 +107,14 @@ class Index:
             by.setdefault(shard_of(c), []).append(i)
         self.shards = {}
         for name, ids in by.items():
-            vi = semantic.VectorIndex()
+            # Stemmed words and domain concepts only (no word pairs, no character n-grams), first 600 characters:
+            # the semantic pass is for meaning, BM25 already covers every word, and the API runs in 512 MB.
+            vi = semantic.VectorIndex(ngrams=False, pairs=False)
             for i in ids:
                 c = self.chunks[i]
-                vi.add(f"{c['title']} {c['title']} {c['text'][:1500]}", {"i": i})
-            vi.build(max_df=0.7)
-            self.shards[name] = (vi, semantic.centroid(vi.vecs))
+                vi.add(f"{c['title']} {c['title']} {c['text'][:600]}", {"i": i})
+            vi.build(max_df=0.7, centroid=True, min_df=2 if len(ids) > 50 else 1)
+            self.shards[name] = (vi, vi.centroid)
 
     def semantic_search(self, query: str, k: int = 8, shards: int = 3, include: tuple = ()) -> List[tuple]:
         import semantic
@@ -163,7 +172,8 @@ class Index:
             idf = self.idf.get(t)
             if idf is None:
                 continue
-            for i, f in self.postings[t]:
+            ids, freqs = self.postings[t]
+            for i, f in zip(ids, freqs):
                 scores[i] = scores.get(i, 0.0) + idf * f * (self.k1 + 1) / (f + self.k1 * (1 - self.b + self.b * self.lens[i] / self.avg))
         scored = sorted(((s, i) for i, s in scores.items() if s > 0 and (not kinds or self.chunks[i]["kind"] in kinds)), reverse=True)
         return [{**self.chunks[i], "score": round(s, 2)} for s, i in scored[:k]]
