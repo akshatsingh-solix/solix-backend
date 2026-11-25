@@ -37,6 +37,7 @@ Configure with environment variables. Any provider whose key is set is used:
 """
 import os
 import json
+import re
 import time
 import asyncio
 import logging
@@ -59,7 +60,8 @@ class Provider:
 
 
 # OpenRouter's free models; CHAT_MODELS on the Render service overrides this.
-DEFAULT_OPENROUTER_MODELS = "google/gemma-4-31b-it:free,thinkingmachines/inkling-small:free,nvidia/nemotron-3.5-lightning:free,openrouter/free"
+# openrouter/free routes to whichever free model is up right now; named :free models come and go.
+DEFAULT_OPENROUTER_MODELS = "openrouter/free,google/gemma-4-31b-it:free,nvidia/nemotron-3.5-lightning:free"
 
 
 def _models(var: str, default: str, fallback_var: Optional[str] = None) -> List[str]:
@@ -185,8 +187,26 @@ def shared_client() -> httpx.AsyncClient:
 
 # (provider, model) -> monotonic time until which it is skipped after a rate limit or outage.
 _cooldown: Dict[tuple, float] = {}
-COOLDOWN_RATE_LIMIT = 60
+COOLDOWN_RATE_LIMIT = 300
 COOLDOWN_ERROR = 20
+COOLDOWN_SLOW = 180        # no first token in time, or an empty reply
+COOLDOWN_GONE = 6 * 3600   # retired, unknown or "not available for free": it won't come back in minutes
+COOLDOWN_DAILY_CAP = 3600  # a free tier's daily allowance is spent
+
+GONE = re.compile(r"HTTP 404|model_not_found|not_found_error|does not exist|decommissioned|deprecated|no longer (supported|available)|"
+                  r"unavailable for free|not a valid model|invalid model|unknown model|no endpoints found", re.I)
+DAILY_CAP = re.compile(r"per[- ]day|daily|free-models-per-day|quota exceeded for .*day", re.I)
+
+
+def cooldown_for(msg: str) -> float:
+    """How long a model rests after this failure. Retrying a dead model every 20s cost every visitor seconds."""
+    if GONE.search(msg):
+        return COOLDOWN_GONE
+    if "429" in msg or "quota" in msg.lower() or "rate limit" in msg.lower():
+        return COOLDOWN_DAILY_CAP if DAILY_CAP.search(msg) else COOLDOWN_RATE_LIMIT
+    if "no answer within" in msg or "empty reply" in msg:
+        return COOLDOWN_SLOW
+    return COOLDOWN_ERROR
 
 
 def _cool(key: tuple, seconds: float) -> None:
@@ -202,6 +222,14 @@ async def _stream_one(client: httpx.AsyncClient, p: Provider, model: str, messag
     if p.name == "gemini":
         # 2.5 models can skip thinking (faster first token); 3.x models can't, so keep it low.
         body["reasoning_effort"] = "none" if model.startswith("gemini-2.5") else "low"
+    elif p.name == "groq":
+        # Groq rejects a reasoning_effort a model doesn't take: gpt-oss wants low/medium/high, Qwen none/default,
+        # and the rest take none at all. One provider-wide "low" made every non-gpt-oss model fail.
+        body.pop("reasoning_effort", None)
+        if "gpt-oss" in model:
+            body["reasoning_effort"] = "low"
+        elif "qwen" in model.lower():
+            body["reasoning_effort"] = "none"
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
@@ -315,7 +343,7 @@ async def stream_completion(messages: list, tools: Optional[list] = None, max_to
                 _record((p.name, model), False, error=f"mid-stream: {msg}")
                 raise ProviderError(f"{p.name}/{model} failed mid-stream: {msg}")
             _record((p.name, model), False, error=msg)
-            _cool((p.name, model), COOLDOWN_RATE_LIMIT if "429" in msg or "quota" in msg.lower() else COOLDOWN_ERROR)
+            _cool((p.name, model), cooldown_for(msg))
             errors.append(f"{p.name}/{model}: {msg}")
             logger.warning("Sol provider %s/%s unavailable, trying next: %s", p.name, model, msg[:200])
     raise ProviderError("; ".join(errors) or "No provider answered")
