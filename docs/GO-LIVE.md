@@ -4,6 +4,25 @@ Everything below is set from the Render dashboard, the GitHub repository
 settings or the admin. No code changes are needed. Steps are in the order to do
 them; each says who does it and whether it costs anything.
 
+## Open follow-ups (noted 25 Nov 2026)
+
+Deferred on purpose; nothing is broken without them. Tick them off here when done.
+
+- [ ] **`DEADMAN_URL`** (5 min, free, do this first). The watchdog checks MarkHub every 30 minutes, but if the API
+      itself is down it can't tell anyone. Sign up at healthchecks.io, create a check (period 30 min, grace 15 min,
+      alerts to email or Slack), copy its `https://hc-ping.com/...` URL into Render → Environment → `DEADMAN_URL`.
+      Within half an hour the check should show "up". From then on, silence is the alert.
+- [ ] **`TOOL_CONFIRM_SECRET`** (1 min). A separate key for the one-time confirmation codes the AI tools need before
+      any change. Today they're signed with the login secret (`JWT_SECRET`), which works; a separate key can be reset
+      on its own without logging staff out. Any random string of 48+ characters in Render → Environment.
+- [ ] **Keep-awake check.** Render's "free instance will spin down" banner is normal, but MarkHub pings itself every
+      10 minutes to stay awake. If requests still take ~50 s after a quiet spell, confirm `PUBLIC_API_URL` is
+      `https://solix-backend-mf5w.onrender.com` and `KEEP_AWAKE` isn't `0`.
+- [ ] **Watch memory for a week** after the 25 Nov fixes (deploy `b790d5e`): MarkHub → Outbound → Health → "API memory"
+      should stay well under 400 MB, and Render's "exceeded its memory limit" emails should stop.
+- [ ] **Before any live outreach**: the checklist in section 9b (counsel on country rules, contact countries,
+      retention purge, privacy notice URL), then `OUTBOUND_LIVE_SENDING=1`.
+
 The Radar's free data sources (backup providers for search, jobs, people, emails,
 company size, website visitors, DNS and tenders) have their own step-by-step
 guide: [`radar-sources-go-live.md`](radar-sources-go-live.md).
