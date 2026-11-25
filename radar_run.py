@@ -134,8 +134,10 @@ async def collect(run: dict) -> set:
     counts["credits_used"] = budget["credits"]
     touched = set()
     resolver = await rs.Resolver.load()  # every posting saved in bulk: a round trip each adds up against Atlas
+    import ops as ops_mod  # (the name `ops` below is this function's list of writes)
     ops = []
     for sig in signals:
+        await ops_mod.breathe()
         if not sig.get("company"):
             continue
         company = resolver.resolve(sig["company"], sig.get("domain"), sig.get("source") or "radar")
@@ -411,6 +413,8 @@ async def digest(run: dict) -> int:
             await send_email(to=owner, subject=f"[Solix Radar] {n} account(s) with new signals", html=html)
             last[owner.replace(".", "·")] = now_iso()
             sent += 1
+            # Saved after each email, so a run resumed mid-digest never emails the same person twice.
+            await _db().settings.update_one({"key": "radar_digest"}, {"$set": {f"last_sent.{owner.replace('.', '·')}": last[owner.replace('.', '·')]}}, upsert=True)
         except Exception as exc:  # noqa: BLE001
             run["notes"].append(f"digest failed: {type(exc).__name__}")
     await _db().settings.update_one({"key": "radar_digest"}, {"$set": {"last_sent": last, "updated_at": now_iso()}}, upsert=True)
@@ -418,30 +422,85 @@ async def digest(run: dict) -> int:
     return sent
 
 
+async def _resume_point(run: dict) -> dict:
+    """Progress of today's run if it was cut off: the completed steps, the accounts touched, the accounts already scored.
+    The cut-off record is marked 'interrupted' so the day's history shows what happened."""
+    since = (datetime.fromisoformat(run["started_at"]) - timedelta(hours=24)).isoformat()  # the last day, not the calendar date
+    prev = await _db().ops_runs.find_one({"job": "radar_daily", "status": "running", "id": {"$ne": run["id"]}, "started_at": {"$gte": since}},
+                                         {"_id": 0}, sort=[("started_at", -1)])
+    if not prev:
+        return {}
+    await _db().ops_runs.update_one({"id": prev["id"]}, {"$set": {"status": "interrupted", "finished_at": now_iso(), "resumed_by": run["id"]}})
+    return prev.get("progress") or {}
+
+
+SCORE_CHUNK = 50  # accounts scored between checkpoints
+
+
+async def _score(run: dict, ids: list, done: set) -> int:
+    """Score accounts in small chunks with a checkpoint after each, skipping those already scored today."""
+    todo = [i for i in sorted(set(ids)) if i not in done]
+    n = 0
+    for i in range(0, len(todo), SCORE_CHUNK):
+        chunk = todo[i:i + SCORE_CHUNK]
+        n += await rs.recompute_many(chunk)
+        done.update(chunk)
+        await ops.heartbeat(run, scored=sorted(done))
+    return n
+
+
 async def daily(steps: Iterable[str] = ("collect", "enrich", "score", "research", "digest"), by: str = "system") -> dict:
+    """The Radar's day: collect, enrich, score, research, digest.
+
+    Resumable: progress is checkpointed after each step and every 50 accounts scored. If the instance restarts mid-run
+    (a deploy, or the free tier's tiny CPU), the next attempt continues from the last checkpoint, so the run always
+    completes and nothing is done twice (the digest, for instance, is never emailed twice)."""
     steps = tuple(steps)
     async with ops.run("radar_daily", by=by) as run:
         run["counts"]["steps"] = ",".join(steps)
-        repaired = await rs.ensure_size_migration()
-        if repaired:
-            run["counts"].update({f"migration_{k}": v for k, v in repaired.items()})
-        touched: set = set()
-        if "collect" in steps:
-            touched = await collect(run)
-        if "enrich" in steps:
+        prior = await _resume_point(run)
+        done_steps = set(prior.get("steps_done") or [])
+        touched: set = set(prior.get("touched") or [])
+        scored: set = set(prior.get("scored") or [])
+        since_start = prior.get("started_at") or run["started_at"]  # "new today" counts from the first attempt
+        if prior:
+            run["counts"]["resumed_after"] = ",".join(sorted(done_steps)) or "start"
+            run["progress"] = dict(prior)
+
+        async def checkpoint(step: str) -> None:
+            done_steps.add(step)
+            await ops.heartbeat(run, steps_done=sorted(done_steps), touched=sorted(touched), started_at=since_start)
+
+        if "migration" not in done_steps:
+            repaired = await rs.ensure_size_migration()
+            if repaired:
+                run["counts"].update({f"migration_{k}": v for k, v in repaired.items()})
+            await checkpoint("migration")
+        if "collect" in steps and "collect" not in done_steps:
+            touched |= await collect(run)
+            await checkpoint("collect")
+        if "enrich" in steps and "enrich" not in done_steps:
             touched |= await enrich(run)
-        if "score" in steps:
-            run["counts"]["recomputed"] = await (rs.recompute_many(touched) if "collect" in steps else rs.recompute_all())
-            # Decay moves every score a little each day, so refresh the rest too.
+            await checkpoint("enrich")
+        if "score" in steps and "score" not in done_steps:
             if "collect" in steps:
-                run["counts"]["recomputed"] += await rs.recompute_many([c["id"] async for c in _db().companies.find({"id": {"$nin": list(touched)}}, {"_id": 0, "id": 1})])
-            strong_new = await _db().companies.count_documents({"strength": "Strong", "created_at": {"$gte": run["started_at"]}})
+                # The accounts with new signals first, then the rest: decay moves every score a little each day.
+                n = await _score(run, list(touched), scored)
+                n += await _score(run, [c["id"] async for c in _db().companies.find({"id": {"$nin": list(touched)}}, {"_id": 0, "id": 1})], scored)
+            else:
+                n = await _score(run, [c["id"] async for c in _db().companies.find({}, {"_id": 0, "id": 1})], scored)
+            run["counts"]["recomputed"] = n + int(prior.get("recomputed") or 0)
+            strong_new = await _db().companies.count_documents({"strength": "Strong", "created_at": {"$gte": since_start}})
             if strong_new:
-                await ops.notify("pipeline", f"Radar: {strong_new} new strong account(s) today.", event="radar_new_strong")
-        if "research" in steps:
-            await research(run)
-        if "digest" in steps:
+                await ops.notify("pipeline", f"Radar: {strong_new} new strong account(s) today.", event="radar_new_strong",
+                                 key=f"radar_new_strong:{run['started_at'][:10]}")
+            await checkpoint("score")
+        if "research" in steps and "research" not in done_steps:
+            await research(run)  # each deep dive is saved as it finishes, so a resume only picks up the rest
+            await checkpoint("research")
+        if "digest" in steps and "digest" not in done_steps:
             await digest(run)
+            await checkpoint("digest")
     return run["counts"]
 
 

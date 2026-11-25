@@ -500,7 +500,9 @@ async def _recompute_batch(ids: List[str], ctx: tuple) -> List[dict]:
     import account_intel
     refresh = int(settings.get("refresh_days") or 30)
     out, writes = [], []
+    import ops
     for c in companies:
+        await ops.breathe()
         update = _compute(c, signals[c["id"]], latest.get(c["id"]), c["id"] in pending, leads[c["id"]], terr, members, settings, half_life)
         update["next_action"] = rm.next_action({**c, **update}, reachable=reachable[c["id"]], enrolled=c["id"] in enrolled, research=latest.get(c["id"]),
                                                signals=signals[c["id"]], refresh_days=refresh)

@@ -41,11 +41,14 @@ def isolated_app():
 
     previous = database.db
     fresh = AsyncMongoMockClient()["solix_isolated"]
-    patched = {}
+    patched = {}  # module -> the db it had, restored exactly afterwards
     database.db = fresh
     for name, mod in list(sys.modules.items()):
-        if getattr(mod, "db", None) is previous and name not in ("database",):
-            patched[name] = mod
+        handle = getattr(mod, "db", None) if mod is not None and name != "database" else None
+        # Every module holding *a* database handle (real or another test's in-memory one), not only the one seen at
+        # setup: test order decides which a module holds, and a real client may already have been closed.
+        if handle is not None and type(handle).__name__.endswith("Database"):
+            patched[name] = (mod, handle)
             mod.db = fresh
     cache.clear()
     tool_registry.clear_policy_cache()
@@ -56,7 +59,7 @@ def isolated_app():
             yield c, fresh
     finally:
         database.db = previous
-        for mod in patched.values():
-            mod.db = previous
+        for mod, handle in patched.values():
+            mod.db = handle
         cache.clear()
         tool_registry.clear_policy_cache()
