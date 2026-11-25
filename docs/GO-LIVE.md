@@ -20,13 +20,15 @@ Deferred on purpose; nothing is broken without them. Tick them off here when don
       `https://solix-backend-mf5w.onrender.com` and `KEEP_AWAKE` isn't `0`.
 - [ ] **Watch memory for a week** after the 25 Nov fixes (deploy `b790d5e`): MarkHub → Outbound → Health → "API memory"
       should stay well under 400 MB, and Render's "exceeded its memory limit" emails should stop.
-- [ ] **Check the daily Radar run completes** (fix of 25 Nov). It had been restarting the instance mid-run on Render's
-      0.1 CPU, then retrying every 3 hours. It now pauses inside long loops so health checks are answered, and a run
-      cut off twice in a day stops and alerts (`radar_cut_off`) instead of looping. After the next 05:00 UTC run,
-      Ops > Health > "Radar daily run" should show a recent successful run, and Render should show no
-      "HTTP health check failed" events. If it still struggles, move the run to GitHub Actions (free, 2 CPUs):
-      add the `MONGO_URL` and `DB_NAME` repository secrets, set `RADAR_DAILY_UTC=off` on Render, and add a
-      `schedule:` trigger to `.github/workflows/radar-daily.yml`.
+- [ ] **Check the daily Radar run completes** (fix of 25 Nov). It had been freezing the API on Render's 0.1 CPU, so
+      Render restarted the instance mid-run and the run restarted from scratch every 3 hours, never finishing. Now:
+      long loops pause so health checks are answered; the run checkpoints after each step and every 50 accounts
+      scored; a run that goes quiet for 15 minutes is resumed from its checkpoint (never skipped, never started over,
+      no digest emailed twice), as many times as it takes. After 3 interruptions in a day the watchdog also says so
+      (`radar_interrupted`). After the next 05:00 UTC run, Ops > Health > "Radar daily run" should show a successful
+      run, and Render should show no "HTTP health check failed" events. If interruptions keep showing up, move the
+      run to GitHub Actions (free, 2 CPUs): add the `MONGO_URL` and `DB_NAME` repository secrets, set
+      `RADAR_DAILY_UTC=off` on Render, and add a `schedule:` trigger to `.github/workflows/radar-daily.yml`.
 - [ ] **Before any live outreach**: the checklist in section 9b (counsel on country rules, contact countries,
       retention purge, privacy notice URL), then `OUTBOUND_LIVE_SENDING=1`.
 

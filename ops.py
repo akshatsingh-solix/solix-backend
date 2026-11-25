@@ -52,7 +52,8 @@ def _ago(hours: float) -> str:
 @asynccontextmanager
 async def run(job: str, by: str = "system"):
     """`async with ops.run("radar_collect") as r: r["counts"]["new"] += 1`"""
-    rec = {"id": str(uuid.uuid4()), "job": job, "by": by, "status": "running", "started_at": now_iso(), "counts": {}, "notes": []}
+    rec = {"id": str(uuid.uuid4()), "job": job, "by": by, "status": "running", "started_at": now_iso(), "heartbeat_at": now_iso(), "counts": {}, "notes": [],
+           "progress": {}}
     await _db().ops_runs.insert_one(dict(rec))
     try:
         yield rec
@@ -62,6 +63,16 @@ async def run(job: str, by: str = "system"):
         raise
     else:
         await _db().ops_runs.update_one({"id": rec["id"]}, {"$set": {"status": rec.get("status_override") or "ok", "finished_at": now_iso(), "counts": rec["counts"], "notes": rec["notes"][-50:]}})
+
+
+async def heartbeat(rec: dict, **progress) -> None:
+    """Record that a long job is alive and how far it has got. A job whose heartbeat stops was cut off (a restart or a
+    deploy) and is resumed from this progress, not started again from scratch."""
+    sets = {"heartbeat_at": now_iso(), "counts": rec["counts"]}
+    if progress:
+        rec.setdefault("progress", {}).update(progress)
+        sets["progress"] = rec["progress"]
+    await _db().ops_runs.update_one({"id": rec["id"]}, {"$set": sets})
 
 
 async def last_run(job: str, status: Optional[str] = "ok") -> Optional[dict]:
@@ -373,8 +384,8 @@ async def breathe(every_ms: float = 50) -> None:
         _last_yield = _t.monotonic()
 
 
-MAX_RADAR_ATTEMPTS = 2  # a run cut off this many times on the same day isn't restarted again: it alerts instead
-RADAR_STALE = timedelta(hours=3)  # a run still "running" after this was cut off (a deploy or restart)
+RADAR_ALERT_AFTER = 3  # interruptions in one day before the watchdog says so (the run still resumes and completes)
+RADAR_STALE = timedelta(minutes=15)  # no heartbeat for this long: the run was cut off and is resumed
 _radar_task: Optional[asyncio.Task] = None
 
 
@@ -390,20 +401,22 @@ async def radar_due(now: Optional[datetime] = None) -> bool:
     slot = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if now < slot:
         slot -= timedelta(days=1)  # before today's time, yesterday's run must have happened
-    last = await _db().ops_runs.find_one({"job": "radar_daily", "started_at": {"$gte": slot.isoformat()}}, {"_id": 0, "status": 1, "started_at": 1},
+    last = await _db().ops_runs.find_one({"job": "radar_daily", "started_at": {"$gte": slot.isoformat()}}, {"_id": 0, "status": 1, "started_at": 1, "heartbeat_at": 1},
                                          sort=[("started_at", -1)])
     if not last:
         return True
-    if not (last["status"] == "running" and last["started_at"] < (now - RADAR_STALE).isoformat()):
+    if last["status"] != "running":
         return False
-    # Cut off by a restart. Retry, but not forever: a run that keeps getting the instance restarted would otherwise
-    # come back every 3 hours and take the API down with it each time (25 Nov: 2:31, 5:34, 8:37).
-    attempts = await _db().ops_runs.count_documents({"job": "radar_daily", "status": "running", "started_at": {"$gte": slot.isoformat()}})
-    if attempts >= MAX_RADAR_ATTEMPTS:
-        await alert("radar_cut_off", f"The daily Radar run was cut off {attempts} times today (the instance restarted mid-run) and won't be "
-                                     "retried until tomorrow. Run it from Radar > Run now when the API is quiet, or move it to GitHub Actions (docs/GO-LIVE.md).",
-                    severity="fail", dedupe_hours=12)
+    # Still "running": alive if its heartbeat is recent, otherwise cut off (a restart or a deploy) and resumed from its
+    # last checkpoint, however many times that takes. The day's run always completes; it is never skipped.
+    beat = last.get("heartbeat_at") or last["started_at"]
+    if beat >= (now - RADAR_STALE).isoformat():
         return False
+    cut = await _db().ops_runs.count_documents({"job": "radar_daily", "status": {"$in": ["running", "interrupted"]}, "started_at": {"$gte": slot.isoformat()}})
+    if cut >= RADAR_ALERT_AFTER:
+        await alert("radar_interrupted", f"The daily Radar run has been interrupted {cut} times today (the instance restarted mid-run). It keeps "
+                                         "resuming from where it stopped and will complete; if this repeats daily, move the run to GitHub Actions (docs/GO-LIVE.md).",
+                    dedupe_hours=12)
     return True
 
 

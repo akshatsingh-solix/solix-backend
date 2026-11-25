@@ -695,9 +695,9 @@ def test_daily_radar_run_happens_inside_the_api(client, monkeypatch):
     run(_mock_db.ops_runs.insert_one({"job": "radar_daily", "status": "ok", "started_at": at(24, 5, 30).isoformat()}))
     assert not run(ops.radar_due(at(24, 6)))  # today's has run ("Run now" counts too)
     assert run(ops.radar_due(at(25, 5, 1)))  # and tomorrow's is due
-    run(_mock_db.ops_runs.insert_one({"job": "radar_daily", "status": "running", "started_at": at(24, 6).isoformat()}))
-    assert not run(ops.radar_due(at(24, 7)))  # one is under way
-    assert run(ops.radar_due(at(24, 10)))  # still "running" 4 hours later: cut off by a restart, so retried
+    run(_mock_db.ops_runs.insert_one({"job": "radar_daily", "status": "running", "started_at": at(24, 6).isoformat(), "heartbeat_at": at(24, 6, 55).isoformat()}))
+    assert not run(ops.radar_due(at(24, 7)))  # one is under way (its heartbeat is recent)
+    assert run(ops.radar_due(at(24, 10)))  # silent for hours: cut off by a restart, so resumed
     monkeypatch.setenv("RADAR_DAILY_UTC", "off")
     assert not run(ops.radar_due(at(24, 10)))
     monkeypatch.setenv("RADAR_DAILY_UTC", "05:00")
