@@ -355,6 +355,25 @@ async def keep_awake() -> None:
         pass
 
 
+_last_yield = 0.0
+
+
+async def breathe(every_ms: float = 50) -> None:
+    """Let the web server answer requests during long loops in background jobs.
+
+    The API runs on a fraction of one CPU (Render free: 0.1). A loop that scores hundreds of accounts without
+    awaiting holds the event loop for many seconds, Render's 5-second health check times out, and the instance is
+    restarted mid-job. Calling this inside such loops hands control back at least every `every_ms` of work."""
+    global _last_yield
+    import time as _t
+    now = _t.monotonic()
+    if (now - _last_yield) * 1000 >= every_ms:
+        _last_yield = now
+        await asyncio.sleep(0.01)  # a real pause, not sleep(0): requests waiting on I/O get a turn
+        _last_yield = _t.monotonic()
+
+
+MAX_RADAR_ATTEMPTS = 2  # a run cut off this many times on the same day isn't restarted again: it alerts instead
 RADAR_STALE = timedelta(hours=3)  # a run still "running" after this was cut off (a deploy or restart)
 _radar_task: Optional[asyncio.Task] = None
 
@@ -375,7 +394,17 @@ async def radar_due(now: Optional[datetime] = None) -> bool:
                                          sort=[("started_at", -1)])
     if not last:
         return True
-    return last["status"] == "running" and last["started_at"] < (now - RADAR_STALE).isoformat()
+    if not (last["status"] == "running" and last["started_at"] < (now - RADAR_STALE).isoformat()):
+        return False
+    # Cut off by a restart. Retry, but not forever: a run that keeps getting the instance restarted would otherwise
+    # come back every 3 hours and take the API down with it each time (25 Nov: 2:31, 5:34, 8:37).
+    attempts = await _db().ops_runs.count_documents({"job": "radar_daily", "status": "running", "started_at": {"$gte": slot.isoformat()}})
+    if attempts >= MAX_RADAR_ATTEMPTS:
+        await alert("radar_cut_off", f"The daily Radar run was cut off {attempts} times today (the instance restarted mid-run) and won't be "
+                                     "retried until tomorrow. Run it from Radar > Run now when the API is quiet, or move it to GitHub Actions (docs/GO-LIVE.md).",
+                    severity="fail", dedupe_hours=12)
+        return False
+    return True
 
 
 async def radar_schedule() -> bool:

@@ -134,8 +134,10 @@ async def collect(run: dict) -> set:
     counts["credits_used"] = budget["credits"]
     touched = set()
     resolver = await rs.Resolver.load()  # every posting saved in bulk: a round trip each adds up against Atlas
+    import ops as ops_mod  # (the name `ops` below is this function's list of writes)
     ops = []
     for sig in signals:
+        await ops_mod.breathe()
         if not sig.get("company"):
             continue
         company = resolver.resolve(sig["company"], sig.get("domain"), sig.get("source") or "radar")
