@@ -353,6 +353,7 @@ class AccountPatch(BaseModel):
     hq: Optional[Dict[str, Optional[str]]] = None
     domains: Optional[List[str]] = Field(default=None, max_length=20)
     manual_exclusion: Optional[str] = Field(default=None, max_length=200)
+    vendor_override: Optional[bool] = None  # true: a competitor's account is treated as a prospect (a partner deal, say)
     products_owned: Optional[List[str]] = Field(default=None, max_length=30)  # Solix products a customer already has (up-sell, not re-pitch)
 
 
@@ -900,8 +901,11 @@ class RunIn(BaseModel):
 @router.post("/run", dependencies=[admin_only])
 async def run_now(body: RunIn, user: dict = Depends(get_current_admin)):
     import radar_run
-    two_hours_ago = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-    if await _db().ops_runs.find_one({"job": "radar_daily", "status": "running", "started_at": {"$gte": two_hours_ago}}, {"_id": 1}):
+    import ops
+    # Alive = heartbeat in the last few minutes (a live run beats every minute). A run cut off by a restart stays
+    # "running" in the database; it used to block "Run now" for two hours, now it is resumed by this run.
+    alive_since = (datetime.now(timezone.utc) - ops.RADAR_STALE).isoformat()
+    if await _db().ops_runs.find_one({"job": "radar_daily", "status": "running", "heartbeat_at": {"$gte": alive_since}}, {"_id": 1}):
         raise HTTPException(status_code=409, detail="A Radar run is already in progress")
     _spawn(radar_run.daily(tuple(body.steps), by=user["email"]))
     return {"started": True, "steps": body.steps}

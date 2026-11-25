@@ -27,6 +27,7 @@ import scoring
 from database import now_iso
 
 LEAD_STAGE_TO_STATUS = {"sql": "meeting_booked", "opportunity": "opportunity", "won": "won", "lost": "lost"}
+VENDOR_REASON = "Competitor (vendor), not a prospect"
 STATUS_ORDER = ["new", "researching", "ready", "contacted", "replied", "meeting_booked", "opportunity", "won"]
 
 
@@ -59,6 +60,8 @@ DEFAULT_RADAR = {
     "tender_countries": [],   # ISO3 codes for TED, empty = all EU
     "weights": {},            # learned multipliers per signal type (outbound.learn)
     "product_weights": {},    # learned multipliers for product-fit evidence (learning.py), bounded 0.5-1.5
+    "research_backlog_per_run": 5,  # extra deep dives a day for accounts never researched (target segments, best score first)
+    "vendor_names": [],       # extra companies that are never prospects (competitors and Solix are built in: radar_model.is_vendor)
     "accuracy_target": 0.98,  # a fact counts as verified when a person confirmed it or its sources push it past this (data_quality.py)
 }
 
@@ -304,6 +307,11 @@ class Resolver:
             companies_changed()
         if self.linking:
             await link_by_domain_many(self.linking)
+        # Written: later resolves update these accounts instead of inserting them again, so flush can run after
+        # every source of a collect run (a restart then loses one source's work, not the whole day's).
+        self.existing.update(c["id"] for c in self.created)
+        self.created, self.linking = [], []
+        self.adds, self.sets = defaultdict(lambda: defaultdict(list)), defaultdict(dict)
 
 
 async def save_signals(ops: list) -> int:
@@ -407,6 +415,8 @@ def _compute(company: dict, signals: list, research: Optional[dict], pending: bo
         reason = "Existing customer"
     elif active:
         reason = f"Active deal in the lead pipeline ({active[0].get('stage', '').upper()})"
+    elif not company.get("vendor_override") and rm.is_vendor(company.get("name"), company.get("domains") or (), settings.get("vendor_names") or ()):
+        reason = VENDOR_REASON  # a competitor (or Solix itself): kept for competitive intel, never researched or contacted
     if company.get("manual_exclusion"):
         reason = company["manual_exclusion"]
     update["excluded_reason"] = reason
@@ -663,6 +673,9 @@ async def patch_company(company: dict, body: dict, user: dict) -> dict:
     if "manual_exclusion" in body:
         sets["manual_exclusion"] = (body["manual_exclusion"] or "").strip() or None
         notes.append(("exclusion", f"Excluded: {sets['manual_exclusion']}" if sets["manual_exclusion"] else "Exclusion removed"))
+    if body.get("vendor_override") is not None:
+        sets["vendor_override"] = bool(body["vendor_override"])
+        notes.append(("vendor", "Treated as a prospect although it's a competitor" if sets["vendor_override"] else "Competitor: not a prospect"))
     if not sets:
         return company
     sets.update(await _confirm_edits(company, sets, user))

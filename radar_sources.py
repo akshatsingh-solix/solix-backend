@@ -1352,10 +1352,15 @@ async def ip_company(client: httpx.AsyncClient, ip: str) -> Optional[dict]:
 # =====================================================================================
 
 async def _sub_crtsh(client, domain):
-    r = _raise_for(await client.get("https://crt.sh/", params={"q": f"%.{domain}", "output": "json", "exclude": "expired"}, headers=UA, timeout=30))
-    if not r.text.startswith("["):
-        raise ValueError("crt.sh returned no JSON")
-    return {"hosts": sorted({n.strip().lower().lstrip("*.") for row in r.json()[:3000] for n in (row.get("name_value") or "").split("\n") if n.strip().lower().endswith(domain)}), "targets": []}
+    import radar_collectors as rc
+    body = await rc._capped_get(client, "https://crt.sh/", params={"q": f"%.{domain}", "output": "json", "exclude": "expired"}, headers=UA, timeout=30)
+    if not body or body[:1] != b"[":
+        raise ValueError("crt.sh returned no JSON, or a list too large to read (the next source is used)")
+
+    def parse() -> list:  # in a worker thread: megabytes of JSON on the event loop stall the API (radar_collectors._cert_names)
+        return sorted({n.strip().lower().lstrip("*.") for row in json.loads(body)[:3000] for n in (row.get("name_value") or "").split("\n")
+                       if n.strip().lower().endswith(domain)})
+    return {"hosts": await asyncio.to_thread(parse), "targets": []}
 
 
 async def _sub_certspotter(client, domain):
