@@ -190,8 +190,16 @@ async def capture(session_id: str, fields: dict, *, trusted: bool, page: Optiona
         doc["visitor_id"] = visitor_id[:64]
     doc.update(changed)
     doc["updated_at"] = now
+    import internal_traffic
+    newly_internal = False
+    if not doc.get("internal") and not internal_traffic.locked_out(doc):
+        # A Solix email shared in the chat, or a conversation already known to be internal.
+        await internal_traffic.stamp(doc, visitor_id=doc.get("visitor_id"), session_id=session_id)
+        newly_internal = bool(doc.get("internal"))
     doc["captured"] = sorted(set(doc.get("captured") or []) | {k for k in changed if k in CONTACT_FIELDS})
     await db.submissions.update_one({"id": doc["id"]}, {"$set": doc}, upsert=True)
+    if newly_internal:
+        await internal_traffic.mark_chat_session(session_id, doc["internal_reason"])
     if doc.get("email"):
         try:
             await record_submission(doc, visitor_id=doc.get("visitor_id"), topics=[doc["interest"]] if doc.get("interest") else None,

@@ -306,7 +306,7 @@ async def _engagement_30d() -> dict:
     async def produce():
         since = datetime.fromtimestamp(time.time() - 30 * 86400, tz=timezone.utc).isoformat()
         rows = await db.events.aggregate([
-            {"$match": {"type": {"$in": ["resource_view", "resource_download"]}, "at": {"$gte": since}}},
+            {"$match": {"type": {"$in": ["resource_view", "resource_download"]}, "at": {"$gte": since}, "internal": {"$ne": True}}},  # staff reads don't count
             {"$group": {"_id": {"path": "$path", "type": "$type"}, "n": {"$sum": 1}}},
         ]).to_list(None)
         out: dict = {}

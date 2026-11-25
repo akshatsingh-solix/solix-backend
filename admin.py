@@ -9,18 +9,19 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
 
 import cache
+import internal_traffic
 from database import db, now_iso
 from auth import get_current_admin, require_roles
 from emailer import ALERT_TYPES, get_alert_recipient
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(get_current_admin)])
 
-CSV_FIELDS = ["id", "created_at", "type", "status", "owner", "name", "email", "company", "job_title", "phone", "interest", "role", "resource", "message", "source", "source_page", "notes", "updated_at"]
+CSV_FIELDS = ["id", "created_at", "type", "status", "owner", "name", "email", "company", "job_title", "phone", "interest", "role", "resource", "message", "source", "source_page", "notes", "updated_at", "internal"]
 STATUSES = ("new", "contacted", "qualified")
 
 
-def _query(type: Optional[str], q: Optional[str], status: Optional[str] = None, owner: Optional[str] = None) -> dict:
-    clauses = []
+def _query(type: Optional[str], q: Optional[str], status: Optional[str] = None, owner: Optional[str] = None, mode: str = "exclude") -> dict:
+    clauses = [c for c in [internal_traffic.scope(mode)] if c]
     if type and type != "all":
         clauses.append({"type": type})
     if status and status != "all":
@@ -34,18 +35,20 @@ def _query(type: Optional[str], q: Optional[str], status: Optional[str] = None, 
 
 
 @router.get("/stats")
-async def stats():
+async def stats(mode: str = Depends(internal_traffic.view_mode)):
     week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-    group = lambda field: db.submissions.aggregate([{"$group": {"_id": f"${field}", "count": {"$sum": 1}}}]).to_list(None)  # noqa: E731
-    # Seven independent counts: one round trip's worth of latency instead of seven.
-    total, last_7, types, chat_leads, alerts_sent, statuses, owners = await asyncio.gather(
-        db.submissions.count_documents({}),
-        db.submissions.count_documents({"created_at": {"$gte": week_ago}}),
+    scope = internal_traffic.scope(mode)
+    group = lambda field: db.submissions.aggregate([{"$match": scope}, {"$group": {"_id": f"${field}", "count": {"$sum": 1}}}]).to_list(None)  # noqa: E731
+    # Independent counts: one round trip's worth of latency instead of eight.
+    total, last_7, types, chat_leads, alerts_sent, statuses, owners, internal = await asyncio.gather(
+        db.submissions.count_documents(scope),
+        db.submissions.count_documents(internal_traffic.scoped({"created_at": {"$gte": week_ago}}, mode)),
         group("type"),
-        db.submissions.count_documents({"source": "chat"}),
+        db.submissions.count_documents(internal_traffic.scoped({"source": "chat"}, mode)),
         db.notifications.count_documents({"status": "sent"}),
         group("status"),
         group("owner"),
+        db.submissions.count_documents({"internal": True}),
     )
     by_type = {r["_id"]: r["count"] for r in types}
     by_status, by_owner = {}, {}
@@ -55,12 +58,14 @@ async def stats():
     for r in owners:
         key = r["_id"] or "unassigned"
         by_owner[key] = by_owner.get(key, 0) + r["count"]
-    return {"total": total, "last_7_days": last_7, "by_type": by_type, "by_status": by_status, "by_owner": by_owner, "chat_leads": chat_leads, "alerts_sent": alerts_sent}
+    return {"total": total, "last_7_days": last_7, "by_type": by_type, "by_status": by_status, "by_owner": by_owner, "chat_leads": chat_leads, "alerts_sent": alerts_sent,
+            "internal": {"mode": mode, "submissions": internal}}
 
 
 @router.get("/submissions")
-async def list_submissions(type: Optional[str] = None, q: Optional[str] = None, status: Optional[str] = None, owner: Optional[str] = None, page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=200)):
-    query = _query(type, q, status, owner)
+async def list_submissions(type: Optional[str] = None, q: Optional[str] = None, status: Optional[str] = None, owner: Optional[str] = None, page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=200),
+                           mode: str = Depends(internal_traffic.view_mode)):
+    query = _query(type, q, status, owner, mode)
     cursor = db.submissions.find(query, {"_id": 0}).sort("created_at", -1).skip((page - 1) * page_size).limit(page_size)
     total, items = await asyncio.gather(db.submissions.count_documents(query), cursor.to_list(page_size))
     for it in items:
@@ -69,8 +74,9 @@ async def list_submissions(type: Optional[str] = None, q: Optional[str] = None, 
 
 
 @router.get("/submissions/export")
-async def export_submissions(type: Optional[str] = None, q: Optional[str] = None, status: Optional[str] = None, owner: Optional[str] = None):
-    docs = await db.submissions.find(_query(type, q, status, owner), {"_id": 0}).sort("created_at", -1).to_list(10000)
+async def export_submissions(type: Optional[str] = None, q: Optional[str] = None, status: Optional[str] = None, owner: Optional[str] = None,
+                             mode: str = Depends(internal_traffic.view_mode)):
+    docs = await db.submissions.find(_query(type, q, status, owner, mode), {"_id": 0}).sort("created_at", -1).to_list(10000)
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=CSV_FIELDS, extrasaction="ignore")
     writer.writeheader()
@@ -111,6 +117,15 @@ async def update_submission(submission_id: str, body: LeadUpdate):
     return res
 
 
+@router.post("/submissions/{submission_id}/internal", dependencies=[Depends(require_roles("admin", "sales"))])
+async def set_submission_internal(submission_id: str, body: internal_traffic.FlagIn, user: dict = Depends(get_current_admin)):
+    """Mark a form submission's person internal or not; with a lead behind it, the whole lead follows."""
+    await internal_traffic.clear("submission", submission_id, internal=body.internal, by=user["email"])
+    res = await db.submissions.find_one({"id": submission_id}, {"_id": 0})
+    res.setdefault("status", "new")
+    return res
+
+
 class TeamMember(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     email: EmailStr
@@ -136,6 +151,7 @@ async def put_team(body: Team):
             members.append({"name": m.name.strip(), "email": email})
     await db.settings.update_one({"key": "team"}, {"$set": {"members": members, "updated_at": now_iso()}}, upsert=True)
     cache.bump("radar_ctx")  # the Radar routes accounts to these names
+    cache.bump("internal")  # team members count as internal traffic
     return {"members": members}
 
 
@@ -161,17 +177,19 @@ async def list_notifications(limit: int = Query(20, le=100)) -> List[dict]:
 
 # --- Sol concierge conversations ---
 @router.get("/chats", dependencies=[Depends(require_roles("admin", "sales"))])
-async def list_chats(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), q: Optional[str] = None):
+async def list_chats(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), q: Optional[str] = None,
+                     mode: str = Depends(internal_traffic.view_mode)):
     """One row per conversation, newest first, with whether it produced a lead."""
     match = {"content": {"$regex": q.strip(), "$options": "i"}} if q and q.strip() else {}
     pipeline = [
-        {"$match": match},
+        {"$match": internal_traffic.scoped(match, mode)},
         {"$sort": {"created_at": 1}},
         {"$group": {
             "_id": "$session_id",
             "started_at": {"$first": "$created_at"},
             "last_at": {"$last": "$created_at"},
             "messages": {"$sum": 1},
+            "internal": {"$max": {"$cond": [{"$eq": ["$internal", True]}, 1, 0]}},
             "first_question": {"$first": {"$cond": [{"$eq": ["$role", "user"]}, "$content", None]}},
             "pages": {"$addToSet": "$page"},
             "models": {"$addToSet": "$model"},
@@ -199,8 +217,16 @@ async def list_chats(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1
             "session_id": i["_id"], "started_at": i["started_at"], "last_at": i["last_at"], "messages": i["messages"],
             "first_question": (i["first_question"] or "")[:200], "pages": [p for p in i["pages"] if p][:5],
             "models": [m for m in i["models"] if m], "lead": leads.get(i["_id"]), "contact": contacts.get(i["_id"]) or None,
+            "internal": bool(i.get("internal")),
         } for i in items],
+        "internal_mode": mode,
     }
+
+
+@router.post("/chats/{session_id}/internal", dependencies=[Depends(require_roles("admin", "sales", "editor"))])
+async def set_chat_internal(session_id: str, body: internal_traffic.FlagIn, user: dict = Depends(get_current_admin)):
+    """Mark a Sol conversation internal (a colleague testing Sol) or not; a lead from it follows."""
+    return await internal_traffic.clear("chat", session_id, internal=body.internal, by=user["email"])
 
 
 @router.get("/chats/{session_id}", dependencies=[Depends(require_roles("admin", "sales"))])

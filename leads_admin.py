@@ -16,6 +16,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
 
 import cache
+import internal_traffic
 import scoring
 from auth import ROLES, get_current_admin, hash_password_async, require_roles
 from database import db, now_iso
@@ -47,6 +48,8 @@ class LeadFilters(BaseModel):
     date_to: Optional[str] = None
     active_days: Optional[int] = None
     linked: Optional[Literal["radar", "outbound", "dnc"]] = None
+    # Internal traffic (Solix's own people): exclude (default), include, or only. None = the admin's default.
+    internal: Optional[Literal["exclude", "include", "only"]] = None
 
 
 def filters_dep(
@@ -55,6 +58,7 @@ def filters_dep(
     min_score: Optional[float] = None, date_field: Literal["created_at", "last_activity_at", "mql_at"] = "created_at",
     date_from: Optional[str] = None, date_to: Optional[str] = None, active_days: Optional[int] = Query(None, ge=1, le=365),
     linked: Optional[Literal["radar", "outbound", "dnc"]] = None,
+    internal: Optional[Literal["exclude", "include", "only"]] = None,
 ) -> LeadFilters:
     return LeadFilters(**{k: v for k, v in locals().items()})
 
@@ -67,8 +71,11 @@ def _day_end(s: str) -> str:
     return s if "T" in s else f"{s}T23:59:59.999999+00:00"
 
 
-def lead_query(f: LeadFilters) -> dict:
+def lead_query(f: LeadFilters, mode: Optional[str] = None) -> dict:
     clauses: list = []
+    internal = internal_traffic.scope(mode or f.internal or "exclude")
+    if internal:
+        clauses.append(internal)
     if f.q:
         rx = {"$regex": re.escape(f.q.strip()), "$options": "i"}
         clauses.append({"$or": [{"name": rx}, {"email": rx}, {"company": rx}, {"job_title": rx}, {"notes": rx}, {"tags": rx}]})
@@ -122,12 +129,15 @@ def _decorate(lead: dict) -> dict:
 
 @router.get("/leads")
 async def list_leads(f: LeadFilters = Depends(filters_dep), sort: str = "score", page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=200)):
-    query = lead_query(f)
+    mode = await internal_traffic.view_mode(f.internal)
+    query = lead_query(f, mode)
     cursor = db.leads.find(query, LEAD_LIST_FIELDS)
     for field, direction in SORTS.get(sort, SORTS["score"]):
         cursor = cursor.sort(field, direction)
-    total, items = await asyncio.gather(db.leads.count_documents(query), cursor.skip((page - 1) * page_size).limit(page_size).to_list(page_size))
-    return {"items": [_decorate(i) for i in items], "total": total, "page": page, "page_size": page_size}
+    total, items, hidden = await asyncio.gather(db.leads.count_documents(query), cursor.skip((page - 1) * page_size).limit(page_size).to_list(page_size),
+                                                db.leads.count_documents(lead_query(f, "only")) if mode == "exclude" else _zero())
+    return {"items": [_decorate(i) for i in items], "total": total, "page": page, "page_size": page_size,
+            "internal": {"mode": mode, "hidden": hidden}}  # how many of the team's own leads these filters leave out
 
 
 @router.get("/leads/meta")
@@ -176,6 +186,10 @@ async def get_lead(lead_id: str):
 
 async def _empty() -> list:
     return []
+
+
+async def _zero() -> int:
+    return 0
 
 
 async def _null() -> None:
@@ -288,6 +302,14 @@ async def bulk_patch(body: BulkPatch, user: dict = Depends(get_current_admin)):
     return {"updated": n}
 
 
+@router.post("/leads/{lead_id}/internal", dependencies=[can_work])
+async def set_lead_internal(lead_id: str, body: internal_traffic.FlagIn, user: dict = Depends(get_current_admin)):
+    """Mark a lead internal (one of our own people) or not internal; their forms, browsing and chats follow."""
+    await internal_traffic.clear("lead", lead_id, internal=body.internal, by=user["email"])
+    lead = await db.leads.find_one({"id": lead_id}, LEAD_LIST_FIELDS)
+    return _decorate(lead)
+
+
 @router.post("/leads/{lead_id}/rescore", dependencies=[can_work])
 async def rescore_lead(lead_id: str):
     lead = await rollup_lead(lead_id)
@@ -307,7 +329,7 @@ EXPORT_COLUMNS = [
     ("Channel", "channel"), ("UTM source", "ft:utm_source"), ("UTM medium", "ft:utm_medium"), ("UTM campaign", "ft:utm_campaign"),
     ("Landing page", "ft:landing"), ("Owner", "owner"), ("Forms submitted", "submissions_count"), ("Form types", "submission_types"),
     ("Pages viewed", "pages_viewed"), ("Sessions", "sessions"), ("Created", "created_at"), ("MQL at", "mql_at"),
-    ("Last activity", "last_activity_at"), ("Tags", "tags"), ("Notes", "notes"),
+    ("Last activity", "last_activity_at"), ("Tags", "tags"), ("Notes", "notes"), ("Internal traffic", "internal_label"),
 ]
 
 
@@ -316,6 +338,8 @@ def _cell(lead: dict, key: str):
         return (lead.get("line_scores") or {}).get(key[5:], 0)
     if key.startswith("ft:"):
         return (lead.get("first_touch") or {}).get(key[3:]) or ""
+    if key == "internal_label":
+        return ((lead.get("internal_reason") or {}).get("label") or "Yes") if lead.get("internal") else ""
     v = lead.get(key)
     if isinstance(v, list):
         return ", ".join(str(x) for x in v)
@@ -355,7 +379,7 @@ def _leads_workbook(headers: list, rows: list, leads: list) -> io.BytesIO:
 
 @router.get("/leads-export")
 async def export_leads(f: LeadFilters = Depends(filters_dep), format: Literal["csv", "xlsx"] = "csv", sort: str = "score"):
-    cursor = db.leads.find(lead_query(f), LEAD_LIST_FIELDS)
+    cursor = db.leads.find(lead_query(f, await internal_traffic.view_mode(f.internal)), LEAD_LIST_FIELDS)
     for field, direction in SORTS.get(sort, SORTS["score"]):
         cursor = cursor.sort(field, direction)
     leads = [_decorate(l) for l in await cursor.to_list(20000)]
@@ -394,8 +418,10 @@ def _window(date_from: Optional[str], date_to: Optional[str], days: int) -> tupl
 
 
 @router.get("/reports/overview")
-async def overview(request: Request, date_from: Optional[str] = None, date_to: Optional[str] = None, days: int = Query(30, ge=1, le=365), line: Optional[str] = None):
+async def overview(request: Request, date_from: Optional[str] = None, date_to: Optional[str] = None, days: int = Query(30, ge=1, le=365), line: Optional[str] = None,
+                   mode: str = Depends(internal_traffic.view_mode)):
     start, end, day_keys = _window(date_from, date_to, days)
+    scoped = lambda q: internal_traffic.scoped(q, mode)  # noqa: E731 - every number below follows the internal-traffic view
 
     async def produce():
         lead_filter: dict = {"created_at": {"$gte": start, "$lte": end}}
@@ -407,14 +433,16 @@ async def overview(request: Request, date_from: Optional[str] = None, date_to: O
             mql_filter["mql_line"] = line
         # Independent queries run together; new visitors are counted per day in
         # the database instead of downloading every visitor record.
-        leads, mqls, visitors_by_day, active_visitors = await asyncio.gather(
-            db.leads.find(lead_filter, fields).to_list(50000),
-            db.leads.find(mql_filter, {"_id": 0, "mql_at": 1, "mql_line": 1, "channel": 1, "owner": 1}).to_list(50000),
+        leads, mqls, visitors_by_day, active_visitors, internal_leads, internal_visitors = await asyncio.gather(
+            db.leads.find(scoped(lead_filter), fields).to_list(50000),
+            db.leads.find(scoped(mql_filter), {"_id": 0, "mql_at": 1, "mql_line": 1, "channel": 1, "owner": 1}).to_list(50000),
             db.visitors.aggregate([
-                {"$match": {"created_at": {"$gte": start, "$lte": end}}},
+                {"$match": scoped({"created_at": {"$gte": start, "$lte": end}})},
                 {"$group": {"_id": {"$substr": ["$created_at", 0, 10]}, "n": {"$sum": 1}}},
             ]).to_list(None),
-            db.visitors.count_documents({"last_seen": {"$gte": start, "$lte": end}}),
+            db.visitors.count_documents(scoped({"last_seen": {"$gte": start, "$lte": end}})),
+            db.leads.count_documents({**lead_filter, "internal": True}),
+            db.visitors.count_documents({"last_seen": {"$gte": start, "$lte": end}, "internal": True}),
         )
 
         new_visitors_total = sum(v["n"] for v in visitors_by_day)
@@ -473,7 +501,7 @@ async def overview(request: Request, date_from: Optional[str] = None, date_to: O
             return [{"key": k, "count": c} for k, c in sorted(counts.items(), key=lambda x: -x[1])[:n]]
 
         content_rows: Dict[str, dict] = {}
-        async for e in db.events.find({"at": {"$gte": start, "$lte": end}, "type": {"$in": ["resource_view", "resource_download"]}, "path": {"$regex": "^/resources/"}}, {"_id": 0, "type": 1, "path": 1, "meta": 1}).limit(200000):
+        async for e in db.events.find(scoped({"at": {"$gte": start, "$lte": end}, "type": {"$in": ["resource_view", "resource_download"]}, "path": {"$regex": "^/resources/"}}), {"_id": 0, "type": 1, "path": 1, "meta": 1}).limit(200000):
             row = content_rows.setdefault(e["path"], {"path": e["path"], "title": None, "views": 0, "downloads": 0})
             row["title"] = row["title"] or (e.get("meta") or {}).get("title")
             if e["type"] == "resource_download":
@@ -481,12 +509,12 @@ async def overview(request: Request, date_from: Optional[str] = None, date_to: O
             else:
                 row["views"] += 1
         page_rows: Dict[str, int] = {}
-        async for e in db.events.find({"at": {"$gte": start, "$lte": end}, "type": "page_view"}, {"_id": 0, "path": 1}).limit(200000):
+        async for e in db.events.find(scoped({"at": {"$gte": start, "$lte": end}, "type": "page_view"}), {"_id": 0, "path": 1}).limit(200000):
             page_rows[e["path"]] = page_rows.get(e["path"], 0) + 1
 
         # Product-level interest across all tracked visitors active in the window.
         interest: Dict[str, float] = {}
-        async for v in db.visitors.find({"last_seen": {"$gte": start, "$lte": end}}, {"_id": 0, "product_scores": 1}).limit(100000):
+        async for v in db.visitors.find(scoped({"last_seen": {"$gte": start, "$lte": end}}), {"_id": 0, "product_scores": 1}).limit(100000):
             for p, s in (v.get("product_scores") or {}).items():
                 interest[p] = round(interest.get(p, 0) + s, 1)
 
@@ -522,8 +550,10 @@ async def overview(request: Request, date_from: Optional[str] = None, date_to: O
                 "visitor_to_lead": round(100 * total_leads / new_visitors_total, 1) if new_visitors_total else None,
                 "lead_to_mql": round(100 * mql_count / total_leads, 1) if total_leads else None,
                 "mql_to_sql": round(100 * sql_count / mql_count, 1) if mql_count else None,
-                "unassigned_mqls": await db.leads.count_documents({"stage": "mql", "owner": {"$in": [None, ""]}}),
+                "unassigned_mqls": await db.leads.count_documents(scoped({"stage": "mql", "owner": {"$in": [None, ""]}})),
             },
+            # What the internal-traffic switch is doing to these numbers, so it is never a silent filter.
+            "internal": {"mode": mode, "leads": internal_leads, "visitors": internal_visitors},
             "trend": list(trend.values()),
             "by_line": [r for r in by_line.values() if r["leads"] or r["mqls"] or r["key"] != "none"],
             "by_channel": [r for r in by_channel.values()],
@@ -536,7 +566,7 @@ async def overview(request: Request, date_from: Optional[str] = None, date_to: O
             "influence": influence,
         }
 
-    data = await cache.memo("reports", f"{start}|{end}|{line}", 60, produce)
+    data = await cache.memo("reports", f"{start}|{end}|{line}|{mode}", 60, produce)
     return cache.cached_json(request, data, max_age=30, swr=300, private=True)
 
 
@@ -632,6 +662,7 @@ async def create_user(body: UserIn):
     await db.users.insert_one(dict(doc))
     cache.bump("radar_ctx")  # sales and admin logins are Radar team members
     cache.bump("users")
+    cache.bump("internal")  # staff addresses count as internal traffic
     return {"user": {k: v for k, v in doc.items() if k not in ("password_hash", "_id")}, "temporary_password": password}
 
 
@@ -652,5 +683,6 @@ async def update_user(user_id: str, body: UserPatch, me: dict = Depends(get_curr
         await db.users.update_one({"id": user_id}, {"$set": changes})
         cache.bump("radar_ctx")
         cache.bump("users")
+        cache.bump("internal")  # staff addresses count as internal traffic
     out["user"] = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
     return out

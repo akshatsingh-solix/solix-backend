@@ -256,6 +256,12 @@ async def get_alert_recipient() -> str | None:
 async def notify_lead(sub: dict) -> None:
     if sub["type"] not in ALERT_TYPES:
         return
+    import internal_traffic
+    if not await internal_traffic.should_alert(sub):  # the team testing its own site isn't a lead to alert on
+        await db.notifications.insert_one({"id": str(uuid.uuid4()), "submission_id": sub["id"], "type": sub["type"], "lead_email": sub.get("email"),
+                                           "created_at": now_iso(), "status": "skipped", "internal": True,
+                                           "detail": f"Internal traffic: {(sub.get('internal_reason') or {}).get('label') or 'flagged internal'}"})
+        return
     record = {
         "id": str(uuid.uuid4()),
         "submission_id": sub["id"],
