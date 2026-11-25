@@ -732,3 +732,26 @@ def test_visitors_never_wait_for_the_routine_knowledge_rebuild(monkeypatch):
     quick, after_publish = run_sync(scenario())
     assert quick < 0.2 and after_publish >= 0.4
     sol_search._index = None
+
+
+def test_dead_and_slow_models_rest_long_enough_to_stop_costing_visitors():
+    assert llm.cooldown_for('HTTP 404: {"error":{"message":"This model is unavailable for free"}}') >= 3600
+    assert llm.cooldown_for("HTTP 400: The model `llama-3.3-70b-versatile` has been decommissioned") >= 3600
+    assert llm.cooldown_for("HTTP 429: free-models-per-day limit reached") == llm.COOLDOWN_DAILY_CAP
+    assert llm.cooldown_for("HTTP 429: rate limited upstream") == llm.COOLDOWN_RATE_LIMIT
+    assert llm.cooldown_for("no answer within 12s") == llm.COOLDOWN_SLOW
+    assert llm.cooldown_for("HTTP 500: boom") == llm.COOLDOWN_ERROR
+
+
+def test_groq_reasoning_effort_fits_each_model():
+    bodies = []
+
+    async def handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, text='data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n')
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    groq = llm.Provider("groq", "https://g", "k", ["x"], {"reasoning_effort": "low"})
+    for model in ("openai/gpt-oss-120b", "qwen/qwen3.6-27b", "moonshotai/kimi-k2"):
+        collect(llm._stream_one(client, groq, model, [], None, 50, 0.6))
+    assert [b.get("reasoning_effort") for b in bodies] == ["low", "none", None]

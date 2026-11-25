@@ -409,6 +409,7 @@ def _stream_text(text: str, size: int = 28):
 
 @router.post("/stream")
 async def chat_stream(req: ChatRequest, request: Request):
+    received = time.monotonic()  # prep_ms: how long a visitor waits before any model is asked (the widget times out)
     ip = _client_ip(request)
     if _rate_limited("session", req.session_id) or _rate_limited("ip", ip):
         raise HTTPException(status_code=429, detail="Too many messages. Please wait a moment.")
@@ -591,7 +592,8 @@ async def chat_stream(req: ChatRequest, request: Request):
                 yield sse({"event": "sources", "sources": sources})
             if full:
                 await save_message(req.session_id, "assistant", full, tools=tools_used or None, guard=guard.events or None,
-                                   latency_ms=round((time.monotonic() - started) * 1000), top_score=top_score, **meta)
+                                   latency_ms=round((time.monotonic() - started) * 1000), prep_ms=round((started - received) * 1000),
+                                   top_score=top_score, **meta)
             yield sse({"done": True})
             await _after_answer(full, meta, tools_used, guard, sources)
         finally:
