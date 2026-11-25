@@ -37,7 +37,7 @@ Visitors never trigger web search. Web research is an admin-only tool (see 4).
   OpenAI API. Free tiers (Gemini's free tier, many OpenRouter `:free` models)
   may log prompts or use them for training: check each provider's current
   terms before marking it private.
-- **Behaviour:** temperature (0.2–0.4 for consistency), answer length, answer
+- **Behaviour:** temperature (0.6 default; below about 0.4 replies start to sound templated), answer length, answer
   cache, learning, the coding/abuse block, messages per visitor per day, and a
   **playbook** of standing instructions (for example this quarter's offer).
 - API keys are set only as environment variables on the backend service. The
@@ -129,6 +129,28 @@ in 512 MB: the first version also indexed character 4-grams (93.8% on paraphrase
 Sol's tools go through the shared tool registry ([`ai-tools-mcp.md`](ai-tools-mcp.md)): only the tools a turn
 needs are loaded, and a booking or contact request with an invalid email is refused by its dry-run validation
 before anything is saved.
+
+## 6c. Conversation quality restored (25 Nov 2026)
+
+Transcripts after 17 Nov read like a form, not a consultant. Three causes, none in the protection layer:
+
+* **The prompt led with rules and a sales method.** It now leads with who Sol is and how it talks (listen,
+  acknowledge, remember, match the visitor, most replies need no question), which is how the September prompt
+  read when conversations were at their best. Every boundary is unchanged and still word for word (a test checks
+  it), and the canary is still there. Prompt version `sol-2026.11.25`, so older cached answers are not served.
+* **Every turn told the model which discovery question to ask next.** Sol ended almost every reply with a
+  qualifying question. The hint is now left out of a visitor's first message and right after Sol asked something,
+  and when given it is explicitly optional.
+* **Saved settings kept the 17 Nov defaults.** Anyone who pressed Save in Control before 24 Nov stored
+  temperature 0.35 and 700 tokens. A config still holding exactly those values is read with today's defaults
+  (temperature 0.6, 900 tokens); any other value an admin chose is kept. The next Save marks it current.
+
+Unchanged: the input screen, output guard, canary, key redaction, rate limits, daily cap, concurrency cap,
+privacy mode and tool validation.
+
+Also check **Control → Answer chain**: the built-in order puts `local` first when `SOL_LOCAL_BASE_URL` is set.
+A 7B model on a CPU box is much less fluent than the hosted 70B-class models Sol used in September. If answers
+still feel flat, look at Quality → answers by provider and move a stronger model to the top.
 
 ## 7. Running Sol on your own model (near-zero token cost, data stays with you)
 
