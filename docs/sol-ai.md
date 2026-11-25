@@ -24,7 +24,7 @@ Visitors never trigger web search. Web research is an admin-only tool (see 4).
 ## 2. Control (Admin → Conversations → Control)
 
 - **Answer chain.** Put providers in the order you want, for example
-  `local → openai → groq → openrouter`. Switch each on or off, set its models
+  `openai → local → groq → openrouter`. Switch each on or off, set its models
   (tried left to right), mark it *private*, and cap how many answers it serves at
   once. A provider that is rate limited, down, slow to start (the "move on
   after" setting) or full is skipped and the next one answers.
@@ -148,9 +148,11 @@ Transcripts after 17 Nov read like a form, not a consultant. Three causes, none 
 Unchanged: the input screen, output guard, canary, key redaction, rate limits, daily cap, concurrency cap,
 privacy mode and tool validation.
 
-Also check **Control → Answer chain**: the built-in order puts `local` first when `SOL_LOCAL_BASE_URL` is set.
-A 7B model on a CPU box is much less fluent than the hosted 70B-class models Sol used in September. If answers
-still feel flat, look at Quality → answers by provider and move a stronger model to the top.
+* **A 7B local model answered first.** The built-in order put `local` first whenever `SOL_LOCAL_BASE_URL` was
+  set, and a 7B model on a CPU box is far less fluent than the hosted models Sol used in September. The default
+  order is now `openai,local,groq,…` on Render (OpenAI's API is private by default, so privacy mode is unaffected)
+  and local is last when nothing is set. An answer chain saved in Control still wins: if yours has `local` on top,
+  move a stronger model above it.
 
 ## 7. Running Sol on your own model (near-zero token cost, data stays with you)
 
@@ -166,7 +168,7 @@ OLLAMA_HOST=0.0.0.0 ollama serve
 
 Then on the backend service set `SOL_LOCAL_BASE_URL=https://<your-host>/v1`
 (and `SOL_LOCAL_API_KEY` if you put an auth proxy in front, which you should if
-the host is public), and put **local** first in Control.
+the host is public), and place **local** in Control (second, behind a stronger model, keeps answers fluent; first saves the most cost).
 
 What to expect, honestly:
 
@@ -184,8 +186,8 @@ What to expect, honestly:
 - **Cost.** Your own hardware and power only. The answer cache and the guard
   already remove a large share of model calls.
 
-Recommended chain for privacy with resilience: `local → openai (private, paid
-but cheap mini models) → groq` with privacy mode set to *any*, or *private only*
+Recommended chain for quality with privacy: `openai (private, paid but cheap
+mini models) → local → groq` (local first only when cost matters more than fluency), with privacy mode set to *any*, or *private only*
 if no chat may ever reach a free tier.
 
 ## 8. Measuring it
