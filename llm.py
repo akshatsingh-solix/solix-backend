@@ -27,7 +27,7 @@ Configure with environment variables. Any provider whose key is set is used:
   SOL_CUSTOM_BASE_URL + SOL_CUSTOM_API_KEY + SOL_CUSTOM_MODELS
                       any other OpenAI-compatible endpoint (vLLM, Ollama,
                       Together, Cerebras, a model you host on Render, ...)
-  SOL_PROVIDER_ORDER  comma-separated order, default local,gemini,groq,mistral,openrouter,openai,custom
+  SOL_PROVIDER_ORDER  comma-separated order, default gemini,groq,mistral,openrouter,openai,custom,local
                       (Admin > Conversations > Control overrides this order, the models and
                       which providers may answer, without a redeploy; see sol_config.py)
                       (providers set up but not named are tried after these, in the order above)
@@ -107,7 +107,7 @@ def configured_providers() -> List[Provider]:
                                   _models("SOL_LOCAL_MODELS", "qwen2.5:7b-instruct"))
     if os.environ.get("SOL_CUSTOM_BASE_URL") and os.environ.get("SOL_CUSTOM_MODELS"):
         known["custom"] = Provider("custom", os.environ["SOL_CUSTOM_BASE_URL"].rstrip("/"), os.environ.get("SOL_CUSTOM_API_KEY", ""), _models("SOL_CUSTOM_MODELS", ""))
-    order = [p.strip() for p in os.environ.get("SOL_PROVIDER_ORDER", "local,gemini,groq,mistral,openrouter,openai,custom").split(",")]
+    order = [p.strip() for p in os.environ.get("SOL_PROVIDER_ORDER", "gemini,groq,mistral,openrouter,openai,custom,local").split(",")]
     ordered = [known[p] for p in order if p in known]
     return ordered + [p for n, p in known.items() if n not in order]
 

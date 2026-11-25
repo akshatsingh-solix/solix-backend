@@ -42,8 +42,9 @@ class SolConfig(BaseModel):
     enabled: bool = True
     routing: List[Route] = Field(default_factory=list, max_length=20)
     privacy_mode: Literal["any", "private_only"] = "any"
-    # Lower is steadier: the same question gets the same answer (consistency).
-    temperature: float = Field(default=0.5, ge=0, le=1.2)
+    # 0.6 is what Sol ran at when its conversations read most naturally (Sep 2026). Lower is steadier but
+    # flatter; below about 0.4 replies start to sound templated.
+    temperature: float = Field(default=0.6, ge=0, le=1.2)
     max_output_tokens: int = Field(default=900, ge=150, le=2000)
     first_token_timeout: float = Field(default=12, ge=3, le=60)
     answer_cache: bool = True
@@ -57,6 +58,11 @@ class SolConfig(BaseModel):
 # A local model on a CPU box serves a couple of answers at a time; hosted APIs far more.
 DEFAULT_CONCURRENCY = {"local": 2, "custom": 4}
 
+# Defaults shipped on 17 Nov 2026. An admin who pressed Save then stored them as if chosen, so they outlived the
+# quality fix. A config still holding exactly these, saved before DEFAULTS_REV, gets today's defaults instead.
+STALE_DEFAULTS = {"temperature": 0.35, "max_output_tokens": 700}
+DEFAULTS_REV = 2
+
 _cached: Optional[SolConfig] = None
 _cached_at = 0.0
 
@@ -69,14 +75,19 @@ async def load(fresh: bool = False) -> SolConfig:
         doc = await database.db.settings.find_one({"key": KEY}, {"_id": 0}) or {}
     except Exception:
         doc = {}
-    cfg = SolConfig(**{k: doc[k] for k in SolConfig.model_fields if k in doc})
+    fields = {k: doc[k] for k in SolConfig.model_fields if k in doc}
+    if (doc.get("defaults_rev") or 0) < DEFAULTS_REV:
+        for k, old in STALE_DEFAULTS.items():
+            if fields.get(k) == old:
+                fields.pop(k)
+    cfg = SolConfig(**fields)
     _cached, _cached_at = cfg, time.monotonic()
     return cfg
 
 
 async def save(cfg: SolConfig, by: str) -> SolConfig:
     global _cached
-    await database.db.settings.update_one({"key": KEY}, {"$set": {**cfg.model_dump(), "updated_at": now_iso(), "updated_by": by}}, upsert=True)
+    await database.db.settings.update_one({"key": KEY}, {"$set": {**cfg.model_dump(), "defaults_rev": DEFAULTS_REV, "updated_at": now_iso(), "updated_by": by}}, upsert=True)
     _cached = None
     return await load(fresh=True)
 

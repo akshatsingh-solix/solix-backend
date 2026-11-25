@@ -149,7 +149,7 @@ Set at least one key (Groq alone is enough):
 | Your own local model (Ollama, llama.cpp, vLLM) | `SOL_LOCAL_BASE_URL`, `SOL_LOCAL_API_KEY` (optional) | `qwen2.5:7b-instruct` (`SOL_LOCAL_MODELS`) |
 | Any OpenAI-compatible server | `SOL_CUSTOM_BASE_URL`, `SOL_CUSTOM_API_KEY`, `SOL_CUSTOM_MODELS` | — |
 
-`SOL_PROVIDER_ORDER` (default `local,gemini,groq,mistral,openrouter,openai,custom`)
+`SOL_PROVIDER_ORDER` (default `gemini,groq,mistral,openrouter,openai,custom,local`)
 sets the order among the providers that have keys until an admin saves an
 order in Admin → Conversations → Control, which then wins. With Groq only, free
 limits (per model: 30 requests/min, 1,000/day, 8K tokens/min, 200K

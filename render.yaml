@@ -30,7 +30,7 @@ services:
       - key: MISTRAL_API_KEY
         sync: false
       - key: SOL_PROVIDER_ORDER
-        value: local,openai,groq,openrouter,gemini,mistral,custom
+        value: openai,local,groq,openrouter,gemini,mistral,custom
       # Your own model (Ollama / llama.cpp / vLLM), e.g. https://llm.example.com/v1.
       # Order, models and which providers may answer are set in Admin > Conversations > Control.
       - key: SOL_LOCAL_BASE_URL

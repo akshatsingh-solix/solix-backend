@@ -24,7 +24,7 @@ Visitors never trigger web search. Web research is an admin-only tool (see 4).
 ## 2. Control (Admin → Conversations → Control)
 
 - **Answer chain.** Put providers in the order you want, for example
-  `local → openai → groq → openrouter`. Switch each on or off, set its models
+  `openai → local → groq → openrouter`. Switch each on or off, set its models
   (tried left to right), mark it *private*, and cap how many answers it serves at
   once. A provider that is rate limited, down, slow to start (the "move on
   after" setting) or full is skipped and the next one answers.
@@ -37,7 +37,7 @@ Visitors never trigger web search. Web research is an admin-only tool (see 4).
   OpenAI API. Free tiers (Gemini's free tier, many OpenRouter `:free` models)
   may log prompts or use them for training: check each provider's current
   terms before marking it private.
-- **Behaviour:** temperature (0.2–0.4 for consistency), answer length, answer
+- **Behaviour:** temperature (0.6 default; below about 0.4 replies start to sound templated), answer length, answer
   cache, learning, the coding/abuse block, messages per visitor per day, and a
   **playbook** of standing instructions (for example this quarter's offer).
 - API keys are set only as environment variables on the backend service. The
@@ -130,6 +130,30 @@ Sol's tools go through the shared tool registry ([`ai-tools-mcp.md`](ai-tools-mc
 needs are loaded, and a booking or contact request with an invalid email is refused by its dry-run validation
 before anything is saved.
 
+## 6c. Conversation quality restored (25 Nov 2026)
+
+Transcripts after 17 Nov read like a form, not a consultant. Three causes, none in the protection layer:
+
+* **The prompt led with rules and a sales method.** It now leads with who Sol is and how it talks (listen,
+  acknowledge, remember, match the visitor, most replies need no question), which is how the September prompt
+  read when conversations were at their best. Every boundary is unchanged and still word for word (a test checks
+  it), and the canary is still there. Prompt version `sol-2026.11.25`, so older cached answers are not served.
+* **Every turn told the model which discovery question to ask next.** Sol ended almost every reply with a
+  qualifying question. The hint is now left out of a visitor's first message and right after Sol asked something,
+  and when given it is explicitly optional.
+* **Saved settings kept the 17 Nov defaults.** Anyone who pressed Save in Control before 24 Nov stored
+  temperature 0.35 and 700 tokens. A config still holding exactly those values is read with today's defaults
+  (temperature 0.6, 900 tokens); any other value an admin chose is kept. The next Save marks it current.
+
+Unchanged: the input screen, output guard, canary, key redaction, rate limits, daily cap, concurrency cap,
+privacy mode and tool validation.
+
+* **A 7B local model answered first.** The built-in order put `local` first whenever `SOL_LOCAL_BASE_URL` was
+  set, and a 7B model on a CPU box is far less fluent than the hosted models Sol used in September. The default
+  order is now `openai,local,groq,…` on Render (OpenAI's API is private by default, so privacy mode is unaffected)
+  and local is last when nothing is set. An answer chain saved in Control still wins: if yours has `local` on top,
+  move a stronger model above it.
+
 ## 7. Running Sol on your own model (near-zero token cost, data stays with you)
 
 Any OpenAI-compatible server works. Ollama is the simplest:
@@ -144,7 +168,7 @@ OLLAMA_HOST=0.0.0.0 ollama serve
 
 Then on the backend service set `SOL_LOCAL_BASE_URL=https://<your-host>/v1`
 (and `SOL_LOCAL_API_KEY` if you put an auth proxy in front, which you should if
-the host is public), and put **local** first in Control.
+the host is public), and place **local** in Control (second, behind a stronger model, keeps answers fluent; first saves the most cost).
 
 What to expect, honestly:
 
@@ -162,8 +186,8 @@ What to expect, honestly:
 - **Cost.** Your own hardware and power only. The answer cache and the guard
   already remove a large share of model calls.
 
-Recommended chain for privacy with resilience: `local → openai (private, paid
-but cheap mini models) → groq` with privacy mode set to *any*, or *private only*
+Recommended chain for quality with privacy: `openai (private, paid but cheap
+mini models) → local → groq` (local first only when cost matters more than fluency), with privacy mode set to *any*, or *private only*
 if no chat may ever reach a free tier.
 
 ## 8. Measuring it

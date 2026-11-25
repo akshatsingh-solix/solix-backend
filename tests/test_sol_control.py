@@ -172,7 +172,7 @@ def test_local_model_provider_from_environment(monkeypatch):
     monkeypatch.setenv("SOL_LOCAL_BASE_URL", "http://box:11434/v1/")
     monkeypatch.setenv("GROQ_API_KEY", "x")
     names = [(p.name, p.base_url) for p in llm.configured_providers()]
-    assert names[0] == ("local", "http://box:11434/v1") and names[1][0] == "groq"
+    assert ("local", "http://box:11434/v1") in names and names[0][0] == "groq"  # a 7B model is overflow, not the first voice
 
 
 def test_admin_config_api_is_admin_only_and_never_shows_keys(chat_app, monkeypatch):

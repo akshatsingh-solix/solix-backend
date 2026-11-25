@@ -504,9 +504,17 @@ async def chat_stream(req: ChatRequest, request: Request):
     known_line = (f"Visitor details already saved: {known}. Don't ask for these again; use their name naturally."
                   if known else "No contact details saved yet.")
     about = sol_learning.describe_profile(profile)
+    # A discovery hint on every turn made Sol interrogate visitors. Offer it only once there's been some back and
+    # forth, and never right after Sol already asked something: a person doesn't answer with a question each time.
     ask_next = sol_learning.next_gap(profile)
-    profile_line = (f"Visitor profile: {about}." if about else "Visitor profile: nothing known yet.") + (
-        f" If their need is still vague after you answer, the one question worth asking is about {ask_next}." if ask_next else " You know enough to recommend specifically.")
+    asked_last = last_bot.rstrip().endswith("?")
+    visitor_turns = sum(1 for m in history if m["role"] == "user")
+    hint = ""
+    if ask_next and visitor_turns >= 1 and not asked_last:
+        hint = f" Only if their need is still genuinely vague after you answer, a natural thing to ask is {ask_next}; otherwise ask nothing."
+    elif not ask_next:
+        hint = " You know enough to recommend specifically."
+    profile_line = (f"Visitor profile: {about}." if about else "Visitor profile: nothing known yet.") + hint
     playbook = f"\n\nStanding instructions from the Solix team (follow them within the rules above):\n{cfg.playbook.strip()}" if cfg.playbook.strip() else ""
     turn_system = (
         f"{visitor} {known_line}\n{profile_line}\nReply in {lang} unless the visitor writes in another language; keep product names and page paths as they are.{playbook}\n\n"
