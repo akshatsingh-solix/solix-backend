@@ -79,6 +79,11 @@ fully with just MongoDB configured.
   sub-millisecond semantic router (only the tools a request needs are loaded), least-privilege scoping,
   read-only by default, and a dry run plus single-use confirmation before any change. MarkHub is an MCP
   server at `/api/mcp`. Method and measured accuracy: [`docs/ai-tools-mcp.md`](docs/ai-tools-mcp.md).
+- **Internal traffic** (Admin → Settings → Internal traffic, and the Hidden / Included / Only switch in the
+  admin header): Solix's own people, recognised by email domain, an address list, MarkHub users and the team,
+  office/VPN IP ranges, the visitor network lookup and browsers that sign in to MarkHub, are flagged on every
+  visitor, event, lead, form, chat and event registration, and left out of every metric, alert, Radar signal
+  and outbound hand-off by default. Method: [`docs/internal-traffic.md`](docs/internal-traffic.md).
 - Daily job: `.github/workflows/radar-daily.yml` (needs the `MONGO_URL` and
   `DB_NAME` secrets). Full method: [`docs/radar-echolocate.md`](docs/radar-echolocate.md).
 

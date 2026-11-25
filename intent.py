@@ -91,20 +91,30 @@ async def track(request: Request):
     events = body.get("events") if isinstance(body.get("events"), list) else []
     if not vid or len(vid) < 8 or not events:
         return Response(status_code=204)
-    visitor = await ingest(vid, sid or "none", events[:MAX_EVENTS], body.get("context") if isinstance(body.get("context"), dict) else {})
+    ctx = body.get("context") if isinstance(body.get("context"), dict) else {}
+    ip = _client_ip(request)
+    internal = None
+    try:  # staff: an internal network, or a browser marked internal (MarkHub sign-in, ?solix_internal=1)
+        import internal_traffic
+        internal = await internal_traffic.classify(ip=ip, device=ctx.get("internal") in (True, 1, "1", "true"))
+    except Exception:  # noqa: BLE001 - never affects tracking
+        logger.exception("internal traffic check failed")
+    visitor = await ingest(vid, sid or "none", events[:MAX_EVENTS], ctx, internal=internal)
     try:  # which organisation's network this consenting visitor is on (Radar "visit" signal); the address is never stored
         import radar_visitors
-        radar_visitors.schedule(vid, _client_ip(request), visitor.get("org_checked_at"))
+        radar_visitors.schedule(vid, ip, visitor.get("org_checked_at"))
     except Exception:  # noqa: BLE001 - never affects tracking
         logger.exception("visitor identification could not start")
     return Response(status_code=204)
 
 
-async def ingest(vid: str, sid: str, events: list, ctx: dict) -> dict:
+async def ingest(vid: str, sid: str, events: list, ctx: dict, internal: Optional[dict] = None) -> dict:
     settings = await get_scoring_settings()
     now = now_iso()
     visitor = await db.visitors.find_one({"id": vid}, {"_id": 0})
     new_visitor = visitor is None
+    import internal_traffic
+    newly_internal = bool(internal) and not (visitor or {}).get("internal") and not internal_traffic.locked_out(visitor)
     if new_visitor:
         visitor = {
             "id": vid, "created_at": now, "sessions": 0, "last_session": None, "product_scores": {}, "scored_at": now,
@@ -154,6 +164,7 @@ async def ingest(vid: str, sid: str, events: list, ctx: dict) -> dict:
         docs.append({
             "id": str(uuid.uuid4()), "visitor_id": vid, "session_id": sid, "type": etype, "path": path,
             "topics": topics, "points": points, "meta": meta, "at": now, "at_dt": datetime.now(timezone.utc),
+            **({"internal": True} if visitor.get("internal") or newly_internal else {}),
         })
     if docs:
         await db.events.insert_many(docs)
@@ -162,6 +173,9 @@ async def ingest(vid: str, sid: str, events: list, ctx: dict) -> dict:
         "events_count": (visitor.get("events_count") or 0) + len(docs),
     })
     await db.visitors.update_one({"id": vid}, {"$set": visitor}, upsert=True)
+    if newly_internal:  # flags this browser's history, its chats and its lead too
+        await internal_traffic.mark_visitor(vid, internal)
+        visitor["internal"], visitor["internal_reason"] = True, internal
     if visitor.get("lead_id"):
         await rollup_lead(visitor["lead_id"], settings)
     return visitor
@@ -285,7 +299,13 @@ async def record_submission(sub: dict, *, visitor_id: Optional[str] = None, topi
         "last_submission_type": stype, "submissions_count": (lead.get("submissions_count") or 0) + 1,
     }})
     result = await rollup_lead(lead["id"], settings)
-    if result:
+    import internal_traffic
+    try:  # staff testing a form: flag the lead and everything linked to it, so no metric counts it
+        if result:
+            await internal_traffic.on_lead(result, sub)
+    except Exception:
+        logger.exception("internal traffic check failed for lead %s", lead["id"])
+    if result and not await internal_traffic.keep_out_of_pipeline(result):
         try:  # attach the lead to its Radar account (same email domain); never blocks the lead
             import radar_service
             cid = await radar_service.link_lead(result)

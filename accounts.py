@@ -20,6 +20,7 @@ from auth import hash_password_async, verify_password_async, JWT_ALGORITHM, MAX_
 from database import db, now_iso
 from emailer import notify_lead
 from intent import record_submission
+import internal_traffic
 
 logger = logging.getLogger("solix.accounts")
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
@@ -164,6 +165,7 @@ async def signup(body: SignupRequest):
         "source_page": "/signup",
         "created_at": now_iso(),
     }
+    await internal_traffic.stamp(lead, visitor_id=body.visitor_id)
     await db.submissions.insert_one(dict(lead))
     asyncio.create_task(notify_lead(lead))
     try:
@@ -219,6 +221,7 @@ async def forgot_password(body: ForgotRequest):
             "source_page": "/signin",
             "created_at": now_iso(),
         }
+        await internal_traffic.stamp(lead)
         await db.submissions.insert_one(dict(lead))
         asyncio.create_task(notify_lead(lead))
     return {"ok": True}

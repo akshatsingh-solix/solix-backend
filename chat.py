@@ -22,6 +22,7 @@ import sol_config
 import sol_guard
 import sol_learning
 import sol_search
+import internal_traffic
 
 logger = logging.getLogger("solix.chat")
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -174,6 +175,8 @@ def _client_ip(request: Request) -> str:
 
 
 async def save_message(session_id: str, role: str, content: str, **meta) -> None:
+    if internal_traffic.session_internal(session_id):  # staff chatting with Sol: kept out of chat metrics
+        meta["internal"] = True
     await db.chat_messages.insert_one({"id": str(uuid.uuid4()), "session_id": session_id, "role": role, "content": content, "created_at": now_iso(), **meta})
 
 
@@ -200,6 +203,7 @@ async def _save_lead(session_id: str, kind: str, args: dict, message: Optional[s
         "source_page": f"chat:{session_id}",
         "created_at": now_iso(),
     }
+    await internal_traffic.stamp(doc, session_id=session_id)
     await db.submissions.insert_one(dict(doc))
     asyncio.create_task(notify_lead(doc))
     try:
@@ -382,8 +386,10 @@ async def chat_status():
 @router.post("/capture")
 async def chat_capture(req: ChatRequest, request: Request):
     """Contact capture only, for the widget's offline concierge (no model involved)."""
-    if _rate_limited("session", req.session_id) or _rate_limited("ip", _client_ip(request)):
+    ip = _client_ip(request)
+    if _rate_limited("session", req.session_id) or _rate_limited("ip", ip):
         raise HTTPException(status_code=429, detail="Too many messages. Please wait a moment.")
+    await internal_traffic.check_session(req.session_id, ip=ip, visitor_id=req.visitor_id)
     found = chat_leads.extract_contact(req.message)
     saved = await chat_leads.capture(req.session_id, found, trusted=False, page=req.page, language=req.language, visitor_id=req.visitor_id) if found else {}
     return {"fields": sorted(saved)}
@@ -416,6 +422,8 @@ async def chat_stream(req: ChatRequest, request: Request):
     cfg = await sol_config.load()
     if _daily_limited(ip, cfg.daily_ip_limit):
         raise HTTPException(status_code=429, detail="You've reached today's chat limit. Please contact us at /contact and a Solix expert will help.")
+    # Staff testing Sol (internal network, a browser marked internal, or an internal email shared earlier).
+    internal = await internal_traffic.check_session(req.session_id, ip=ip, visitor_id=req.visitor_id)
     # Contact details are saved from the message itself before any model runs,
     # so a lead is never lost to a model that didn't notice, or wasn't up.
     captured = {}
@@ -604,7 +612,8 @@ async def chat_stream(req: ChatRequest, request: Request):
     async def _after_answer(full, meta, tools_used, guard, sources):
         """Learning and caching; never allowed to break a finished answer."""
         try:
-            if cfg.learning and full and max(best_score) < sol_learning.GAP_SCORE:
+            # The team's own test questions don't count as gaps in what visitors ask.
+            if cfg.learning and full and max(best_score) < sol_learning.GAP_SCORE and not (internal or internal_traffic.session_internal(req.session_id)):
                 await sol_learning.log_gap(req.message, full, round(max(best_score), 2), req.session_id)
             cacheable = cfg.answer_cache and full and not personal and not guard.events and meta.get("provider") and len(full) > 60 and not (
                 set(tools_used) - {"search_site"}) and not captured

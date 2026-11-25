@@ -19,8 +19,11 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends
 
 import database
+import internal_traffic
 import permissions
 from auth import get_current_admin
+
+NOT_INTERNAL = internal_traffic.scope("exclude")  # the home dashboards count prospects, never the team's own activity
 
 router = APIRouter(prefix="/api/admin/home", tags=["home"])
 CARD = {"_id": 0, "id": 1, "name": 1, "score": 1, "strength": 1, "status": 1, "next_action": 1, "segment": 1, "size_status": 1, "surge": 1,
@@ -52,7 +55,7 @@ async def _rep(user: dict, access: dict) -> dict:
             out["replies"] = [{**r, "company_name": names.get(r.get("company_id"))} for r in replies]
             out["active_sequences"] = await _db().enrollments.count_documents({"company_id": {"$in": ids}, "status": {"$in": ["active", "pending_approval"]}})
     if permissions.RANK[access.get("leads", "none")] >= 1:
-        leads = await _db().leads.find({"owner": email}, {"_id": 0, "id": 1, "name": 1, "email": 1, "company": 1, "stage": 1, "score": 1, "last_activity_at": 1}) \
+        leads = await _db().leads.find({"owner": email, **NOT_INTERNAL}, {"_id": 0, "id": 1, "name": 1, "email": 1, "company": 1, "stage": 1, "score": 1, "last_activity_at": 1}) \
             .sort("last_activity_at", -1).to_list(500)
         out["leads"] = {"total": len(leads), "by_stage": dict(Counter(l.get("stage") or "lead" for l in leads)), "recent": leads[:8]}
     return out
@@ -75,7 +78,7 @@ async def _manager(user: dict, access: dict) -> dict:
         segs = await db.companies.aggregate([{"$group": {"_id": "$segment", "n": {"$sum": 1}}}]).to_list(10)
         out["segments"] = {(s["_id"] or "unknown"): s["n"] for s in segs}
     if permissions.RANK[access.get("leads", "none")] >= 1:
-        stages = await _db().leads.aggregate([{"$group": {"_id": "$stage", "n": {"$sum": 1}}}]).to_list(20)
+        stages = await _db().leads.aggregate([{"$match": NOT_INTERNAL}, {"$group": {"_id": "$stage", "n": {"$sum": 1}}}]).to_list(20)
         out["pipeline"] = {(s["_id"] or "lead"): s["n"] for s in stages}
     return out
 
@@ -84,11 +87,11 @@ async def _marketing(user: dict, access: dict) -> dict:
     out: dict = {}
     since = _ago(30)
     if permissions.RANK[access.get("leads", "none")] >= 1:
-        rows = await _db().leads.find({"created_at": {"$gte": since}}, {"_id": 0, "channel": 1, "stage": 1}).to_list(100000)
+        rows = await _db().leads.find({"created_at": {"$gte": since}, **NOT_INTERNAL}, {"_id": 0, "channel": 1, "stage": 1}).to_list(100000)
         out["new_leads"] = {"total": len(rows), "by_channel": dict(Counter(r.get("channel") or "direct" for r in rows)),
                             "mqls": sum(1 for r in rows if r.get("stage") not in (None, "lead", "disqualified"))}
     if permissions.RANK[access.get("inbox", "none")] >= 1:
-        subs = await _db().submissions.find({"created_at": {"$gte": since}}, {"_id": 0, "type": 1}).to_list(100000)
+        subs = await _db().submissions.find({"created_at": {"$gte": since}, **NOT_INTERNAL}, {"_id": 0, "type": 1}).to_list(100000)
         out["submissions"] = dict(Counter(s.get("type") or "other" for s in subs))
     if permissions.RANK[access.get("content", "none")] >= 1:
         out["content"] = {"published_30d": await _db().content.count_documents({"status": {"$in": ["published", "scheduled"]}, "publish_at": {"$gte": since}}),

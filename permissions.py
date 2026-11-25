@@ -45,7 +45,7 @@ FEATURES: Dict[str, dict] = {
     "website": {"label": "Website settings", "paths": ("site",)},
     "events": {"label": "Events", "paths": ("events",)},
     "inbox": {"label": "Form inbox and asset emails", "paths": ("submissions", "deliveries", "delivery")},
-    "settings": {"label": "Settings, team and users", "paths": ("settings", "team", "users", "ops", "access")},
+    "settings": {"label": "Settings, team and users", "paths": ("settings", "team", "users", "ops", "access", "internal")},
 }
 PATH_FEATURE = {p: f for f, spec in FEATURES.items() for p in spec["paths"]}
 

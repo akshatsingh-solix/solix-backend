@@ -165,6 +165,10 @@ api_tool("radar_queue_research", "Queue a deep dive (cited research brief) for o
 
 # --- Leads -----------------------------------------------------------------------------------------------------
 
+# Internal traffic (internal_traffic.py): Solix's own people are left out of every number unless asked for.
+INTERNAL = {"type": "string", "enum": ["exclude", "include", "only"],
+            "description": "Solix's own staff and test traffic: exclude (default), include, or only"}
+
 async def _stage_check(args: dict, cur, ctx) -> List[str]:
     if args.get("stage") and cur and cur.get("stage") == args["stage"]:
         return [f"The lead is already at {args['stage'].upper()}"]
@@ -174,8 +178,10 @@ async def _stage_check(args: dict, cur, ctx) -> List[str]:
 
 api_tool("leads_search", "Search leads (people in the funnel) by name or email, stage, owner, channel, country or minimum score.",
          access="read", feature="leads", method="GET", path="/api/admin/leads",
-         props={"q": S, "stage": {"type": "string", "enum": STAGES}, "owner": S, "channel": S, "country": S, "min_score": {"type": "number", "minimum": 0}, "page_size": PAGE},
-         examples=("show MQLs from this week", "find the lead jane@acme.com", "which leads does pat own", "hot leads over score 60", "leads that came from outbound"))
+         props={"q": S, "stage": {"type": "string", "enum": STAGES}, "owner": S, "channel": S, "country": S, "min_score": {"type": "number", "minimum": 0}, "page_size": PAGE,
+                "internal": INTERNAL},
+         examples=("show MQLs from this week", "find the lead jane@acme.com", "which leads does pat own", "hot leads over score 60", "leads that came from outbound",
+                   "leads from our own staff", "internal test leads"))
 api_tool("lead_get", "One lead in full: score, stage, owner, timeline, linked account and outbound history.", access="read", feature="leads", method="GET",
          path="/api/admin/leads/{lead_id}", props={"lead_id": ID}, required=("lead_id",),
          examples=("open this lead", "what has this person done on the site", "lead timeline", "why is this lead an MQL"))
@@ -184,7 +190,7 @@ api_tool("lead_update", "Move a lead to another stage, change its owner or add n
          props={"lead_id": ID, "stage": {"type": "string", "enum": STAGES}, "owner": S, "notes": {"type": "string", "maxLength": 5000}, "reason": S}, required=("lead_id",),
          examples=("move this lead to SQL", "mark the lead as won", "assign the lead to sam", "disqualify this lead", "change the stage to opportunity"))
 api_tool("reports_overview", "Pipeline and marketing report: leads by source and stage, MQL trend, outbound and Radar influence, account funnel.",
-         access="read", feature="dashboard", method="GET", path="/api/admin/reports/overview", props={},
+         access="read", feature="dashboard", method="GET", path="/api/admin/reports/overview", props={"internal": INTERNAL},
          examples=("how is pipeline looking", "marketing report", "how many MQLs this month", "what did outbound contribute to pipeline", "funnel conversion"))
 
 

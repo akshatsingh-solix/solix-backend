@@ -31,6 +31,7 @@ from outbound import router as outbound_router, webhooks as outbound_webhooks
 from compliance import router as compliance_router, public as outbound_public
 import ops
 import mcp_server
+import internal_traffic
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("solix")
@@ -80,6 +81,9 @@ async def create_submission(payload: SubmissionCreate, request: Request, backgro
     doc["id"] = str(uuid.uuid4())
     doc["created_at"] = now_iso()
     doc["source"] = "web"
+    # Staff testing the forms (internal email, office network, or a browser marked internal) are flagged now, so
+    # the sales alert is skipped and no metric counts them.
+    await internal_traffic.stamp(doc, ip=internal_traffic.client_ip(request), visitor_id=payload.visitor_id)
     await db.submissions.insert_one(dict(doc))
     asyncio.create_task(notify_lead(doc))
     asyncio.create_task(deliver_for_submission(doc, api_base(request)))
@@ -139,6 +143,7 @@ app.include_router(permissions.router)
 app.include_router(home.router)
 import intelligence  # noqa: E402
 app.include_router(intelligence.router)
+app.include_router(internal_traffic.router)
 
 # Innermost first: readable JSON errors, then idempotent writes (resilience.py). Both sit inside CORS, so the
 # browser can always read what they send instead of reporting a bare "Network Error".
@@ -271,6 +276,7 @@ async def on_startup():
         db.idempotency.create_index("key", unique=True),  # a retried write runs once (resilience.py)
         db.idempotency.create_index("expires_at", expireAfterSeconds=0),
     )
+    await internal_traffic.ensure_indexes()
     await seed_admin()
     # Build the tool router's indexes now, so the first request routes in well under a millisecond, not ~13 ms.
     import tool_registry

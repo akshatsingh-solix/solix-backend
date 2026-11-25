@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 import database
+import internal_traffic
 from auth import get_current_admin, require_roles
 import llm
 import sol_config
@@ -250,9 +251,9 @@ async def get_profile(session_id: str):
 
 # --- quality: what the four tests (accuracy, latency, concurrency, consistency) look like in production ---
 @router.get("/insights", dependencies=[readers])
-async def insights(days: int = Query(7, ge=1, le=90)):
+async def insights(days: int = Query(7, ge=1, le=90), mode: str = Depends(internal_traffic.view_mode)):
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    answers = await database.db.chat_messages.find({"role": "assistant", "created_at": {"$gte": since}},
+    answers = await database.db.chat_messages.find(internal_traffic.scoped({"role": "assistant", "created_at": {"$gte": since}}, mode),
                                                    {"_id": 0, "provider": 1, "model": 1, "latency_ms": 1, "top_score": 1}).to_list(20000)
     by_source: dict = {}
     for a in answers:
@@ -265,6 +266,7 @@ async def insights(days: int = Query(7, ge=1, le=90)):
     grounded = [a for a in answers if a.get("top_score") is not None]
     return {
         "days": days,
+        "internal_mode": mode,
         "answers": len(answers),
         "by_source": dict(sorted(by_source.items(), key=lambda kv: -kv[1])),
         "latency_ms": {"p50": pct(0.5), "p95": pct(0.95)},

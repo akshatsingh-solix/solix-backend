@@ -75,6 +75,14 @@ async def identify(visitor_id: str, ip: str) -> Optional[dict]:
         logger.info("visitor identification failed", exc_info=True)
         return None
     keep = {k: org.get(k) for k in ("org", "domain", "type", "country", "via")} if org else None
+    try:  # browsing from Solix's own network is the team, not a prospect: flag it before it's dropped
+        import internal_traffic
+        s = await internal_traffic.load_settings()
+        dom = internal_traffic.domain_matches((keep or {}).get("domain") or "", s["domains"]) if s["enabled"] else None
+        if dom:
+            await internal_traffic.mark_visitor(visitor_id, internal_traffic._reason("network", keep.get("org") or dom))
+    except Exception:  # noqa: BLE001
+        logger.info("internal network check failed", exc_info=True)
     if keep and keep.get("domain") in NOT_PROSPECTS:
         keep = None
     await _db().visitors.update_one({"id": visitor_id}, {"$set": {"org": keep, "org_checked_at": datetime.now(timezone.utc).isoformat()}})
@@ -89,7 +97,9 @@ async def signals(days: int = 30) -> List[dict]:
     """One "visit" signal per organisation and ISO week, from identified visitors seen in the last `days`."""
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     groups: Dict[tuple, dict] = {}
-    async for v in _db().visitors.find({"org.domain": {"$ne": None}, "org.type": {"$in": ["business", "government", "education"]}, "last_seen": {"$gte": since}},
+    # Internal visitors (staff on a client's network, a consultant's laptop) never make a prospect "visit".
+    async for v in _db().visitors.find({"org.domain": {"$ne": None}, "org.type": {"$in": ["business", "government", "education"]}, "last_seen": {"$gte": since},
+                                        "internal": {"$ne": True}},
                                        {"_id": 0, "id": 1, "org": 1, "last_seen": 1, "pages_count": 1, "sessions": 1, "product_scores": 1, "lead_id": 1}):
         org = v.get("org") or {}
         dom = org.get("domain")

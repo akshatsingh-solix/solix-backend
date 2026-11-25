@@ -40,6 +40,7 @@ from auth import get_current_admin, require_roles
 from database import db, now_iso
 from emailer import email_provider, notify_lead, send_email
 from intent import get_scoring_settings, record_submission, rollup_lead
+import internal_traffic
 
 logger = logging.getLogger("solix.events")
 public = APIRouter(prefix="/api/events", tags=["events"])
@@ -331,6 +332,8 @@ async def register(slug: str, body: RegistrationIn, request: Request, background
     else:
         reg["status"] = "pending_payment"
     reg["payment"] = _payment_instructions(event, ticket, reg) if reg["status"] == "pending_payment" else None
+    # Staff registering (speakers, booth team): the seat counts, the attendee numbers and sales alert don't.
+    await internal_traffic.stamp(reg, ip=internal_traffic.client_ip(request), visitor_id=body.visitor_id)
     await db.event_registrations.insert_one(dict(reg))
     if promo:
         await db.event_configs.update_one({"slug": slug, "promo_codes.code": promo["code"]}, {"$inc": {"promo_codes.$.uses": 1}})
@@ -344,6 +347,8 @@ async def register(slug: str, body: RegistrationIn, request: Request, background
         "resource": event["name"], "message": f"{reg['ticket_name']} · {reg['status'].replace('_', ' ')} · code {reg['code']}",
         "source": "empower", "source_page": f"empower:{slug}", "created_at": now_iso(),
     }
+    if reg.get("internal"):
+        sub["internal"], sub["internal_reason"] = True, reg["internal_reason"]
     await db.submissions.insert_one(dict(sub))
     asyncio.create_task(notify_lead(sub))
     topics = [t for i in reg["interests"] for t in INTERESTS[i]["topics"]]
@@ -492,8 +497,9 @@ async def update_event(slug: str, body: EventSettingsIn, user: dict = Depends(ge
     return await get_event(slug)
 
 
-def _reg_query(slug: str, q: Optional[str], status: Optional[str], ticket: Optional[str], interest: Optional[str], checked_in: Optional[bool]) -> dict:
-    query: dict = {"event": slug}
+def _reg_query(slug: str, q: Optional[str], status: Optional[str], ticket: Optional[str], interest: Optional[str], checked_in: Optional[bool],
+               mode: str = "exclude") -> dict:
+    query: dict = {"event": slug, **internal_traffic.scope(mode)}
     if status and status != "all":
         query["status"] = {"$in": list(ACTIVE)} if status == "active" else status
     if ticket and ticket != "all":
@@ -510,14 +516,18 @@ def _reg_query(slug: str, q: Optional[str], status: Optional[str], ticket: Optio
 
 @admin.get("/{slug}/registrations")
 async def registrations(slug: str, q: Optional[str] = None, status: Optional[str] = None, ticket: Optional[str] = None, interest: Optional[str] = None,
-                        checked_in: Optional[bool] = None, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200)):
+                        checked_in: Optional[bool] = None, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200),
+                        mode: str = Depends(internal_traffic.view_mode)):
     event = await get_event(slug)
-    query = _reg_query(slug, q, status, ticket, interest, checked_in)
+    query = _reg_query(slug, q, status, ticket, interest, checked_in, mode)
     total, items, everyone = await asyncio.gather(
         db.event_registrations.count_documents(query),
         db.event_registrations.find(query, {"_id": 0}).sort("created_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size),
         db.event_registrations.find({"event": slug}, {"_id": 0, "status": 1, "ticket_id": 1, "interests": 1, "days": 1, "dinners": 1,
-                                                     "checked_in": 1, "amount": 1, "currency": 1, "created_at": 1, "utm": 1, "hackathon": 1}).to_list(50000))
+                                                     "checked_in": 1, "amount": 1, "currency": 1, "created_at": 1, "utm": 1, "hackathon": 1, "internal": 1}).to_list(50000))
+    seats_taken = sum(1 for r in everyone if r["status"] in ACTIVE)  # staff still take a seat
+    internal_n = sum(1 for r in everyone if r.get("internal") and r["status"] in ACTIVE)
+    everyone = [r for r in everyone if mode == "include" or bool(r.get("internal")) == (mode == "only")]
     active = [r for r in everyone if r["status"] in ACTIVE]
     by = lambda key: dict(sorted({k: sum(1 for r in active if k in (r.get(key) or [])) for k in {x for r in active for x in (r.get(key) or [])}}.items()))
     trend: Dict[str, int] = {}
@@ -534,7 +544,8 @@ async def registrations(slug: str, q: Optional[str] = None, status: Optional[str
         "by_interest": by("interests"), "by_day": by("days"), "dinners": by("dinners"),
         "hackathon": sum(1 for r in active if r.get("hackathon")),
         "revenue": sum(r.get("amount") or 0 for r in everyone if r["status"] in ("paid", "confirmed", "payment_reported")),
-        "seats_left": max(0, event["capacity"] - len(active)) if event.get("capacity") else None,
+        "seats_left": max(0, event["capacity"] - seats_taken) if event.get("capacity") else None,
+        "internal": {"mode": mode, "registrations": internal_n},
         "trend": [{"date": d, "registrations": n} for d, n in sorted(trend.items())[-60:]],
         "sources": sorted(({"source": k, "count": v} for k, v in sources.items()), key=lambda x: -x["count"])[:8],
     }
@@ -598,7 +609,7 @@ EXPORT = [("Code", "code"), ("Status", "status"), ("Pass", "ticket_name"), ("Fir
           ("Dinners", "dinners"), ("Hackathon", "hackathon"), ("Dietary", "dietary"), ("Accessibility", "accessibility"), ("Amount (cents)", "amount"),
           ("Currency", "currency"), ("Promo code", "promo_code"), ("Payment reference", "payment_reference"), ("PO number", "po_number"),
           ("Billing contact", "billing_contact"), ("How heard", "how_heard"), ("UTM source", "utm.utm_source"), ("UTM campaign", "utm.utm_campaign"),
-          ("Checked in", "checked_in"), ("Registered", "created_at"), ("Notes", "notes")]
+          ("Checked in", "checked_in"), ("Registered", "created_at"), ("Notes", "notes"), ("Internal", "internal")]
 
 
 def _cell(r: dict, key: str):
@@ -635,8 +646,8 @@ def _registrations_workbook(headers: list, data: list) -> io.BytesIO:
 
 @admin.get("/{slug}/registrations-export")
 async def export(slug: str, format: Literal["csv", "xlsx"] = "csv", q: Optional[str] = None, status: Optional[str] = None, ticket: Optional[str] = None,
-                 interest: Optional[str] = None, checked_in: Optional[bool] = None):
-    rows = await db.event_registrations.find(_reg_query(slug, q, status, ticket, interest, checked_in), {"_id": 0}).sort("created_at", 1).to_list(50000)
+                 interest: Optional[str] = None, checked_in: Optional[bool] = None, mode: str = Depends(internal_traffic.view_mode)):
+    rows = await db.event_registrations.find(_reg_query(slug, q, status, ticket, interest, checked_in, mode), {"_id": 0}).sort("created_at", 1).to_list(50000)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
     headers = [h for h, _ in EXPORT]
     data = [[_cell(r, k) for _, k in EXPORT] for r in rows]
