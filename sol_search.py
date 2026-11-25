@@ -189,6 +189,7 @@ _cms_items = 0
 _learned_items = 0
 _built_at: Optional[str] = None
 _lock: Optional[asyncio.Lock] = None
+_rebuild_must_wait = False  # the running rebuild carries a publish/edit, so answers must wait for it
 
 
 def bundled_chunks() -> List[dict]:
@@ -299,7 +300,7 @@ async def refresh_site(force: bool = False) -> bool:
 
 async def refresh_cms(db, force: bool = False) -> None:
     """Merge live CMS content and learned answers into the index; cheap no-op between refreshes."""
-    global _index, _cms_checked, _content_gen, _version, _cms_items, _learned_items, _built_at, _lock
+    global _index, _cms_checked, _content_gen, _version, _cms_items, _learned_items, _built_at, _lock, _rebuild_must_wait
     import cache
 
     if await refresh_site():
@@ -319,6 +320,7 @@ async def refresh_cms(db, force: bool = False) -> None:
     if not force and _cms_checked is not None and time.monotonic() - _cms_checked < CMS_REFRESH_SECONDS:
         return
     async with _lock:
+        _rebuild_must_wait = _index is None or gen != _content_gen
         _cms_checked, _content_gen = time.monotonic(), gen
         now = datetime.now(timezone.utc).isoformat()
         try:
@@ -342,7 +344,24 @@ async def refresh_cms(db, force: bool = False) -> None:
         _index, _cms_items, _learned_items = built, len(docs), len(learned)
         _version += 1
         _built_at = now
+        _rebuild_must_wait = False
         logger.info("Sol knowledge rebuilt: %d chunks (%d site, %d CMS items, %d learned)", len(chunks), len(bundled_chunks()), len(docs), len(learned))
+
+
+async def ensure_fresh(db) -> None:
+    """What a visitor's message waits for: the first build, or a rebuild that carries a publish or edit.
+
+    The routine refresh (server.py, every CMS_REFRESH_SECONDS) runs in the background. On a small instance a
+    rebuild takes several seconds, and waiting for it pushed the chat's first byte past the widget's timeout,
+    which then switched the visitor to the scripted concierge for the rest of the session.
+    """
+    import cache
+
+    if _index is None or cache.generation("content") != _content_gen:
+        await refresh_cms(db)
+    elif _lock is not None and _lock.locked() and _rebuild_must_wait:
+        async with _lock:
+            return
 
 
 SHARDS = (("learned", lambda c: c.get("kind") == "learned" or not c.get("url")), ("products", lambda c: c["url"].startswith("/products")),

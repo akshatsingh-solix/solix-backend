@@ -696,3 +696,39 @@ def test_stale_saved_defaults_are_lifted_but_real_choices_kept(monkeypatch):
         monkeypatch.setattr(database, "db", db)
         cfg = run_sync(sol_config.load(fresh=True))
         assert (cfg.temperature, cfg.max_output_tokens) == (want_t, want_n), doc
+
+
+def test_visitors_never_wait_for_the_routine_knowledge_rebuild(monkeypatch):
+    """A rebuild takes seconds on a small instance; waiting for it pushed the chat past the widget's timeout."""
+    import cache
+
+    class SlowContent:
+        def find(self, *a, **k):
+            class Cursor:
+                async def to_list(self, n):
+                    await asyncio.sleep(0.5)
+                    return []
+            return Cursor()
+
+    class FakeDb:
+        content = SlowContent()
+
+    async def scenario():
+        sol_search._index = None
+        await sol_search.refresh_cms(FakeDb(), force=True)  # first build: must be waited for
+        assert sol_search._index is not None
+        periodic = asyncio.create_task(sol_search.refresh_cms(FakeDb(), force=True))
+        await asyncio.sleep(0.05)
+        t = asyncio.get_running_loop().time()
+        await sol_search.ensure_fresh(FakeDb())
+        quick = asyncio.get_running_loop().time() - t
+        await periodic
+        # A publish in this process: the answer must come from the new index.
+        cache.bump("content")
+        t = asyncio.get_running_loop().time()
+        await sol_search.ensure_fresh(FakeDb())
+        return quick, asyncio.get_running_loop().time() - t
+
+    quick, after_publish = run_sync(scenario())
+    assert quick < 0.2 and after_publish >= 0.4
+    sol_search._index = None
