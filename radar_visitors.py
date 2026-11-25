@@ -31,8 +31,7 @@ logger = logging.getLogger("solix.radar.visitors")
 RECHECK_DAYS = 7
 _tasks: set = set()
 # Vendors and the site's own company: their staff browsing isn't a buying signal.
-NOT_PROSPECTS = {"solix.com", "solixtechnologies.com", "opentext.com", "informatica.com", "smarsh.com", "globalrelay.com", "globalrelay.net", "mimecast.com",
-                 "proofpoint.com", "veritas.com", "archive360.com", "delphix.com", "perforce.com", "platform3solutions.com", "jivs.com"}
+NOT_PROSPECTS = rm.VENDOR_DOMAINS  # one list for every Radar source (radar_model.is_vendor)
 
 
 def _db():

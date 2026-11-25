@@ -69,10 +69,29 @@ the Team list or the rep-email overrides. A person's owner choice is never
 overwritten. Accounts the rules can't place are flagged "needs routing" and the
 watchdog alerts on them.
 
+## 4b. Competitors are never prospects
+
+Smarsh, OpenText, Proofpoint, Mimecast, Global Relay, Informatica, IBM, Veritas,
+Archive360, Delphix/Perforce, Platform 3, JiVS and Solix itself
+(`radar_model.is_vendor`: exact company name, legal suffixes dropped, or their
+domains) are dropped at every source before they can become an account: their
+own postings name their own product, their DNS fingerprints itself, and they
+otherwise ranked as the strongest "accounts" and took the day's deep dives.
+Vendor accounts that already exist are excluded on the next recompute
+("Competitor (vendor), not a prospect"): kept with their signals for
+competitive intel, never researched, digested or contacted. Add other names
+in Radar settings `vendor_names`; set `vendor_override: true` on an account
+to treat a vendor as a prospect (for example a partner deal).
+
 ## 5. Deep dives (Master Prospector)
 
 Up to `research_per_run` accounts a day (Strong, two or more signal types, or
-surging; not researched in 30 days) get a deep dive: numbered sources from their
+surging; not researched in 30 days), plus up to `research_backlog_per_run` (5)
+accounts that have never had a deep dive, best score first, get a deep dive.
+Accounts that already have a dive waiting don't count against the day's slots,
+and a dive left "running" by a restart goes back in the queue after 30 minutes
+(failed after 3 cut-offs, so one account can't block the queue). Run counts show
+`never_researched`, the backlog still waiting. A deep dive has: numbered sources from their
 own signals and fresh news, Solix facts from the site knowledge base, and a model
 from `llm.py` (free tiers first). Without a model, a rules-based brief is drafted
 from the signals. Every draft is checked:

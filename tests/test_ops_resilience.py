@@ -95,7 +95,8 @@ def test_resume_continues_from_the_checkpoint(db, monkeypatch):
     monkeypatch.setattr(rs, "recompute_many", recompute_many)
     monkeypatch.setattr(rs, "ensure_size_migration", nothing)
     run(db.companies.insert_many([{"id": f"c{i}"} for i in range(1, 6)]))
-    started = datetime.now(timezone.utc) - timedelta(hours=1)
+    now = datetime.now(timezone.utc)
+    started = now - (now - ops.radar_slot(now)) / 2  # earlier today, inside the current daily slot
     run(db.ops_runs.insert_one({"id": "cut", "job": "radar_daily", "status": "running", "started_at": started.isoformat(),
                                 "heartbeat_at": (started + timedelta(minutes=5)).isoformat(),
                                 "progress": {"steps_done": ["collect", "enrich", "migration"], "touched": ["c1", "c2"], "scored": ["c1", "c2", "c3"],

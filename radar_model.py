@@ -22,7 +22,7 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 import scoring
 
@@ -188,6 +188,30 @@ def domain_of(value: Optional[str]) -> Optional[str]:
 
 def is_staffing(name: str) -> bool:
     return bool(STAFFING.search(name or ""))
+
+
+# --- Vendors: competitors (and Solix itself) are never prospects -------------------------------
+# A competitor's own postings name its own product ("Smarsh is hiring a Smarsh support engineer"), its DNS
+# fingerprints itself and its news is about itself, so without this gate the vendors become the Radar's
+# strongest "accounts" and take the day's deep dives. Matched on the exact company key (legal suffixes
+# dropped) or the domain, never on a substring, so "Veritas Capital" or "Proofpoint Bank" stay prospects.
+VENDOR_DOMAINS = {"solix.com", "solixtechnologies.com", "opentext.com", "informatica.com", "smarsh.com", "globalrelay.com", "globalrelay.net",
+                  "mimecast.com", "proofpoint.com", "veritas.com", "archive360.com", "delphix.com", "perforce.com", "platform3solutions.com", "jivs.com",
+                  "ibm.com"}
+VENDOR_NAMES = {"solix", "solix technologies", "opentext", "open text", "informatica", "ibm", "international business machines", "delphix",
+                "perforce", "perforce software", "archive360", "archive 360", "smarsh", "global relay", "global relay communications", "mimecast",
+                "mimecast services", "proofpoint", "veritas", "veritas technologies", "platform 3", "platform 3 solutions", "platform3 solutions",
+                "data migration services", "jivs"} | {company_key(c["vendor"]) for c in COMPETITORS}
+
+
+def is_vendor(name: Optional[str], domains: Iterable[str] = (), extra: Iterable[str] = ()) -> bool:
+    """True for a competitor or Solix itself: by company key (exact, legal suffixes dropped) or by domain."""
+    if any(domain_of(d) in VENDOR_DOMAINS for d in domains or () if d):
+        return True
+    key = company_key(name or "")
+    if not key:
+        return False
+    return key in VENDOR_NAMES or key in {company_key(x) for x in extra or () if x}
 
 
 def dedupe_key(*parts) -> str:

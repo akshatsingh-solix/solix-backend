@@ -25,7 +25,11 @@ Deferred on purpose; nothing is broken without them. Tick them off here when don
       long loops pause so health checks are answered; the run checkpoints after each step and every 50 accounts
       scored; a run that goes quiet for 15 minutes is resumed from its checkpoint (never skipped, never started over,
       no digest emailed twice), as many times as it takes. After 3 interruptions in a day the watchdog also says so
-      (`radar_interrupted`). After the next 05:00 UTC run, Ops > Health > "Radar daily run" should show a successful
+      (`radar_interrupted`). Since the second 25 Nov fix, collect saves each source (job boards, job market,
+      filings, tenders, DNS...) as soon as it finishes: before, the whole day's signals were written only at the very
+      end of collect, so a restart anywhere in it created no new accounts at all. The run also beats every minute
+      while alive, and a run left over from the previous day is closed instead of resumed. In the run record, check
+      `companies_new`, `signals_new` and `progress.collect_done`. After the next 05:00 UTC run, Ops > Health > "Radar daily run" should show a successful
       run, and Render should show no "HTTP health check failed" events. If interruptions keep showing up, move the
       run to GitHub Actions (free, 2 CPUs): add the `MONGO_URL` and `DB_NAME` repository secrets, set
       `RADAR_DAILY_UTC=off` on Render, and add a `schedule:` trigger to `.github/workflows/radar-daily.yml`.

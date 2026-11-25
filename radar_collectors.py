@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
 import os
 import re
@@ -76,8 +77,8 @@ def classify_posting(company: str, title: str, text: str, *, url: str, location:
 
     `matched_term` is the phrase a job-search API matched in the full posting when it only returns a snippet:
     if the snippet doesn't show a competitor, the API's phrase match stands as the evidence."""
-    if rm.is_staffing(company):
-        return []
+    if rm.is_staffing(company) or rm.is_vendor(company, [domain] if domain else ()):
+        return []  # recruiters and the competitors themselves aren't buyers
     body = f"{title}\n{text}"
     out = []
     base = {"company": company, "domain": domain, "title": title, "role_title": title, "role_strength": rm.role_strength(title), "evidence_url": url,
@@ -341,6 +342,32 @@ def _fingerprint(value: str) -> Optional[str]:
     return None
 
 
+CRTSH_MAX_BYTES = 8 * 1024 * 1024  # a large company's full certificate list runs to tens of MB
+
+
+async def _capped_get(client: httpx.AsyncClient, url: str, *, max_bytes: int = CRTSH_MAX_BYTES, **kw) -> Optional[bytes]:
+    """The body of a 200 response, or None when it fails or is larger than `max_bytes` (then the caller falls back to a
+    smaller source). Reading is streamed, so an oversized answer is dropped without ever being held in memory whole."""
+    async with client.stream("GET", url, **kw) as r:
+        if r.status_code != 200:
+            return None
+        chunks, size = [], 0
+        async for chunk in r.aiter_bytes():
+            size += len(chunk)
+            if size > max_bytes:
+                return None
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _cert_names(body: bytes, domain: str) -> List[str]:
+    """Certificate names under `domain` from crt.sh's JSON. Runs in a worker thread: parsing megabytes of JSON on the
+    event loop of a 0.1-CPU instance held it past Render's 5-second health check and the API was restarted."""
+    rows = json.loads(body)[:2000]
+    names = {n.strip().lower() for row in rows for n in (row.get("name_value") or "").split("\n")}
+    return sorted(n for n in names if n.endswith(domain))
+
+
 async def dns_records(client: httpx.AsyncClient, domain: str, use_crtsh: bool = True) -> Dict[str, List[str]]:
     """Current MX and TXT records (and certificate names from crt.sh) by type. A type whose lookup failed is
     left out, so a failed lookup never reads as "records removed" when compared with the last scan."""
@@ -363,10 +390,9 @@ async def dns_records(client: httpx.AsyncClient, domain: str, use_crtsh: bool = 
                     out[rtype] = got
     if use_crtsh:
         try:
-            r = await client.get("https://crt.sh/", params={"q": f"%.{domain}", "output": "json", "exclude": "expired"}, timeout=25)
-            if r.status_code == 200 and r.text.startswith("["):
-                names = {n.strip().lower() for row in r.json()[:2000] for n in (row.get("name_value") or "").split("\n")}
-                out["CERT"] = sorted(n for n in names if n.endswith(domain))
+            body = await _capped_get(client, "https://crt.sh/", params={"q": f"%.{domain}", "output": "json", "exclude": "expired"}, timeout=25)
+            if body and body[:1] == b"[":
+                out["CERT"] = await asyncio.to_thread(_cert_names, body, domain)
         except (httpx.HTTPError, ValueError):
             pass
         if "CERT" not in out and pv.keyless_on():  # crt.sh is often overloaded: Cert Spotter is the same public logs

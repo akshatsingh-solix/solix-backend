@@ -59,13 +59,58 @@ async def sync_provider_accounts() -> None:
             pass
 
 
-async def collect(run: dict) -> set:
+COLLECT_SOURCES = ("ats", "ats_xray", "jobs_api", "crustdata", "visitors", "filings", "tenders", "public_sector", "news", "dns", "subdomains")
+
+
+async def collect(run: dict, done: Optional[set] = None, touched: Optional[set] = None, on_saved=None) -> set:
+    """Every signal source in turn; each source's signals are saved (new accounts created, signals upserted) as soon as
+    that source finishes, then checkpointed through `on_saved(name)`.
+
+    Saving per source matters on a small host: the run used to hold the whole day's signals in memory and write them
+    only at the very end, so a restart anywhere in collect (Render's health check, a deploy, memory) threw away every
+    signal and every new account, and the resumed run started collect from scratch and hit the same wall. Now a
+    restart costs at most the source in progress, and a resumed run skips the sources already saved."""
+    done = done if done is not None else set()
+    touched = touched if touched is not None else set()
     await sync_provider_accounts()
     settings = await rs.radar_settings()
     on = settings["collectors"]
     budget = {"credits": 0.0, "cap": float(settings.get("credit_cap") or 0)}
-    signals: list = []
     counts = run["counts"]
+    vendors = settings.get("vendor_names") or ()
+    resolver = await rs.Resolver.load()  # once per run; postings are resolved in memory and written in bulk per source
+
+    async def save(name: str, signals: list) -> None:
+        """Resolve the source's signals to accounts and write them; competitors and Solix itself are never accounts."""
+        writes = []
+        for sig in signals:
+            await ops.breathe()
+            if not sig.get("company"):
+                continue
+            if rm.is_vendor(sig["company"], [sig["domain"]] if sig.get("domain") else (), vendors):
+                counts["vendor_signals_dropped"] = counts.get("vendor_signals_dropped", 0) + 1
+                continue
+            company = resolver.resolve(sig["company"], sig.get("domain"), sig.get("source") or "radar")
+            if sig.get("public_sector") and not company.get("industry"):
+                resolver.set(company, {"industry": "Public sector"})
+            # A headcount from a job listing counts only when the listing's company domain is this account's
+            # (never on a name match: "RS Ltd" with 11 staff must not size "RS Group plc").
+            if sig.get("employees") and sig.get("domain") and rm.domain_of(sig["domain"]) in (company.get("domains") or []):
+                cand = rm.size_candidate(sig["employees"], sig.get("source") or "jobs", "domain")
+                resolver.set(company, {"size_candidates": rm.merge_candidates(company.get("size_candidates"), [cand])})
+            writes.append(rs._signal_op(company, sig, run["id"]))
+            touched.add(company["id"])
+        created = len(resolver.created)
+        await resolver.flush()
+        new = await rs.save_signals(writes)
+        counts["signals_new"] = counts.get("signals_new", 0) + new
+        counts["signals_seen"] = counts.get("signals_seen", 0) + len(writes) - new
+        counts["companies_new"] = counts.get("companies_new", 0) + created
+        counts["companies_touched"] = len(touched)
+        done.add(name)
+        if on_saved:
+            await on_saved(name)
+
     async with httpx.AsyncClient(headers=rc.UA, follow_redirects=True) as client:
         async def guarded(name, coro):
             try:
@@ -77,25 +122,28 @@ async def collect(run: dict) -> set:
                 run["notes"].append(f"{name}: {type(exc).__name__}")
                 return []
 
-        if on.get("ats"):
+        async def ats():
+            out = []
             for t in settings.get("targets") or []:
                 fn = rc.ATS.get((t.get("ats") or "").lower())
                 if fn and (t.get("board") or t.get("workday_url")):
-                    signals += await guarded("ats", fn(client, t))
-        if on.get("ats_xray") and pv.any_configured("web_search") and await pv.enabled("ats_xray"):
-            signals += await guarded("ats_xray", xray_boards(client, settings, run))
-        if on.get("jobs_api") and pv.any_configured("jobs", list(srcs.JOB_ADAPTERS)):
-            signals += await guarded("jobs_api", market_jobs(client, settings, run))
-        if on.get("crustdata") and os.environ.get("CRUSTDATA_API_KEY") and await pv.enabled("crustdata"):
-            signals += await guarded("crustdata", rc.crustdata(client, settings, budget))
+                    out += await guarded("ats", fn(client, t))
+                    await ops.breathe()
+            return out
+
+        async def crustdata():
+            got = await guarded("crustdata", rc.crustdata(client, settings, budget))
             await pv.succeeded("crustdata", int(budget["credits"] / 0.03))
-        if on.get("dns"):
+            return got
+
+        async def dns():
             domains = set(settings.get("dns_domains") or [])
             owners = {}
             async for c in _db().companies.find({"domains.0": {"$exists": True}}, {"_id": 0, "name": 1, "domains": 1}):
                 for d in c["domains"]:
                     owners[d] = c["name"]
                     domains.add(d)
+            domains = {d for d in domains if not rm.is_vendor(None, [d])}  # a vendor's own DNS fingerprints itself
             sem = asyncio.Semaphore(8)
             scan = sorted(domains)[:800]
             # Each scan is compared with the last one, so a fingerprint that appears or disappears is a signal of its own.
@@ -107,53 +155,51 @@ async def collect(run: dict) -> set:
                     records = await guarded("dns_lookup", _as_list(rc.dns_records(client, d, use_crtsh=len(domains) <= 200)))
                     if not records:
                         return []
+                    await ops.breathe()
                     found = rc.dns_signals_from(owners.get(d) or d.split(".")[0].title(), d, records[0], snaps.get(d))
                     snap_ops.append(UpdateOne({"domain": d}, {"$set": {**{f"records.{t}": v for t, v in records[0].items()}, "scanned_at": now_iso()}}, upsert=True))
                     counts["dns_found"] = counts.get("dns_found", 0) + len(found)
                     counts["dns_changes"] = counts.get("dns_changes", 0) + sum(1 for x in found if x.get("action") in ("added", "removed"))
                     return found
+            out = []
             for got in await asyncio.gather(*(one(d) for d in scan)):
-                signals += got
+                out += got
             if snap_ops:
                 await _db().radar_dns.bulk_write(snap_ops, ordered=False)
-        if on.get("news"):
+            return out
+
+        async def news():
+            out = []
             hot = await _db().companies.find({"strength": "Strong", "excluded_reason": None}, {"_id": 0, "name": 1, "domains": 1}).sort("score", -1).to_list(15)
             for c in hot:
-                signals += await guarded("news", rc.news_signals(client, c["name"], (c.get("domains") or [None])[0]))
-        if on.get("filings"):
-            signals += await guarded("filings", rc.edgar_signals(client))
-        if on.get("tenders") and await pv.enabled("ted"):
-            signals += await guarded("tenders", rc.ted_tenders(client, settings))
-        if on.get("public_sector"):
-            signals += await guarded("public_sector", srcs.public_sector(client))
-        if on.get("subdomains") and pv.any_configured("dns_history"):
-            signals += await guarded("subdomains", subdomain_scan(client, settings))
-        if on.get("visitors"):
+                out += await guarded("news", rc.news_signals(client, c["name"], (c.get("domains") or [None])[0]))
+            return out
+
+        async def visitors():
             import radar_visitors
-            signals += await guarded("visitors", radar_visitors.signals(int(settings.get("visitor_days") or 30)))
-    counts["credits_used"] = budget["credits"]
-    touched = set()
-    resolver = await rs.Resolver.load()  # every posting saved in bulk: a round trip each adds up against Atlas
-    import ops as ops_mod  # (the name `ops` below is this function's list of writes)
-    ops = []
-    for sig in signals:
-        await ops_mod.breathe()
-        if not sig.get("company"):
-            continue
-        company = resolver.resolve(sig["company"], sig.get("domain"), sig.get("source") or "radar")
-        if sig.get("public_sector") and not company.get("industry"):
-            resolver.set(company, {"industry": "Public sector"})
-        # A headcount from a job listing counts only when the listing's company domain is this account's
-        # (never on a name match: "RS Ltd" with 11 staff must not size "RS Group plc").
-        if sig.get("employees") and sig.get("domain") and rm.domain_of(sig["domain"]) in (company.get("domains") or []):
-            cand = rm.size_candidate(sig["employees"], sig.get("source") or "jobs", "domain")
-            resolver.set(company, {"size_candidates": rm.merge_candidates(company.get("size_candidates"), [cand])})
-        ops.append(rs._signal_op(company, sig, run["id"]))
-        touched.add(company["id"])
-    await resolver.flush()
-    counts["signals_new"] = await rs.save_signals(ops)
-    counts["signals_seen"] = len(ops) - counts["signals_new"]
-    counts["companies_touched"] = len(touched)
+            return await guarded("visitors", radar_visitors.signals(int(settings.get("visitor_days") or 30)))
+
+        # Cheapest and richest in new accounts first (job boards and the job market), the slow DNS sweeps last.
+        plan = {
+            "ats": (on.get("ats"), ats),
+            "ats_xray": (on.get("ats_xray") and pv.any_configured("web_search") and await pv.enabled("ats_xray"),
+                         lambda: guarded("ats_xray", xray_boards(client, settings, run))),
+            "jobs_api": (on.get("jobs_api") and pv.any_configured("jobs", list(srcs.JOB_ADAPTERS)), lambda: guarded("jobs_api", market_jobs(client, settings, run))),
+            "crustdata": (on.get("crustdata") and os.environ.get("CRUSTDATA_API_KEY") and await pv.enabled("crustdata"), crustdata),
+            "visitors": (on.get("visitors"), visitors),
+            "filings": (on.get("filings"), lambda: guarded("filings", rc.edgar_signals(client))),
+            "tenders": (on.get("tenders") and await pv.enabled("ted"), lambda: guarded("tenders", rc.ted_tenders(client, settings))),
+            "public_sector": (on.get("public_sector"), lambda: guarded("public_sector", srcs.public_sector(client))),
+            "news": (on.get("news"), news),
+            "dns": (on.get("dns"), dns),
+            "subdomains": (on.get("subdomains") and pv.any_configured("dns_history"), lambda: guarded("subdomains", subdomain_scan(client, settings))),
+        }
+        for name in COLLECT_SOURCES:
+            wanted, produce = plan[name]
+            if not wanted or name in done:
+                continue
+            await save(name, await produce())
+    counts["credits_used"] = counts.get("credits_used", 0) + budget["credits"]
     return touched
 
 
@@ -224,7 +270,7 @@ async def xray_boards(client: httpx.AsyncClient, settings: dict, run: dict) -> l
                 continue
             known.add(key)
             company = await board_company(client, b)
-            if not company or rm.is_staffing(company):
+            if not company or rm.is_staffing(company) or rm.is_vendor(company, (), settings.get("vendor_names") or ()):
                 continue
             added.append({"company": company, "ats": b["ats"], "board": b["board"], **({"workday_url": b["workday_url"]} if b.get("workday_url") else {}),
                           **({"region": b["region"]} if b.get("region") else {}), "source": "ats_xray", "added_at": now_iso()})
@@ -351,24 +397,47 @@ async def detect_boards(client: httpx.AsyncClient, settings: dict, limit: int = 
 
 
 async def research(run: dict, per_run: Optional[int] = None) -> dict:
+    """Queue the day's deep dives, then run the queue (oldest first, so dives requested earlier aren't overtaken).
+
+    Two lanes: `research_per_run` hot accounts (strong, two or more signal types, or surging) as before, plus
+    `research_backlog_per_run` accounts that have never had a deep dive at all, best score first. Accounts that already
+    have a dive waiting are skipped and not counted: they used to take the day's slots, so nothing new was queued."""
     import radar_research
     settings = await rs.radar_settings()
-    n = settings.get("research_per_run", 5) if per_run is None else per_run
-    queued = 0
-    if n:
+    n = int(settings.get("research_per_run", 5) if per_run is None else per_run)
+    backlog = int(settings.get("research_backlog_per_run", 0) or 0) if per_run is None else 0
+    await radar_research.requeue_stale()  # dives cut off by a restart go back in the queue before anything new is added
+    pending = set(await _db().radar_research.distinct("company_id", {"status": {"$in": ["queued", "running"]}}))
+    queued = queued_backlog = 0
+    if n or backlog:
         now = now_iso()
-        candidates = await _db().companies.find({"excluded_reason": None, "status": {"$in": ["new", "researching", "ready"]}}, {"_id": 0}).sort("score", -1).to_list(500)
+        candidates = await _db().companies.find({"excluded_reason": None, "status": {"$in": ["new", "researching", "ready"]}}, {"_id": 0, "history": 0, "search_text": 0}
+                                                ).sort("score", -1).to_list(500)
         # Target segments (enterprise and mid-market by default) first; an account of unknown size still qualifies.
         targets = set(settings.get("target_segments") or [])
         candidates.sort(key=lambda c: 1 if targets and c.get("segment") and c["segment"] not in targets else 0)
+        candidates = [c for c in candidates if c["id"] not in pending and not rm.is_vendor(c.get("name"), c.get("domains") or (), settings.get("vendor_names") or ())]
+        picked: set = set()
         for c in candidates:
             if queued >= n:
                 break
             if rm.is_research_candidate(c, now, settings.get("refresh_days", 30)):
                 await radar_research.queue(c)
+                picked.add(c["id"])
                 queued += 1
-    done = await radar_research.run_queue(limit=max(n, 1))
-    run["counts"].update({"research_queued": queued, **{f"research_{k}": v for k, v in done.items()}})
+        for c in candidates:  # never researched: no brief, no overview, no signal search yet
+            if queued_backlog >= backlog:
+                break
+            if c["id"] in picked or c.get("research_at") or not (c.get("signal_count") or 0):
+                continue
+            if targets and c.get("segment") and c["segment"] not in targets:
+                continue
+            await radar_research.queue(c)
+            queued_backlog += 1
+    done = await radar_research.run_queue(limit=max(n + backlog, 1))
+    never = await _db().companies.count_documents({"excluded_reason": None, "research_at": None, "signal_count": {"$gt": 0}})
+    run["counts"].update({"research_queued": queued, "research_backlog_queued": queued_backlog, "research_waiting": len(pending),
+                          "never_researched": never, **{f"research_{k}": v for k, v in done.items()}})
     return done
 
 
@@ -423,15 +492,37 @@ async def digest(run: dict) -> int:
 
 
 async def _resume_point(run: dict) -> dict:
-    """Progress of today's run if it was cut off: the completed steps, the accounts touched, the accounts already scored.
-    The cut-off record is marked 'interrupted' so the day's history shows what happened."""
-    since = (datetime.fromisoformat(run["started_at"]) - timedelta(hours=24)).isoformat()  # the last day, not the calendar date
-    prev = await _db().ops_runs.find_one({"job": "radar_daily", "status": "running", "id": {"$ne": run["id"]}, "started_at": {"$gte": since}},
-                                         {"_id": 0}, sort=[("started_at", -1)])
+    """Progress of today's run if it was cut off: the completed steps and sources, the accounts touched, the accounts
+    already scored. The cut-off record is marked 'interrupted' so the day's history shows what happened.
+
+    Only a run started in the current daily slot is resumed. A run from the previous day that was cut off before
+    today's slot is closed, not continued: inheriting its "collect done" would skip today's discovery entirely."""
+    started = datetime.fromisoformat(run["started_at"])
+    slot = ops.radar_slot(started)
+    since = (slot or started - timedelta(hours=24)).isoformat()
+    stale = {"job": "radar_daily", "status": "running", "id": {"$ne": run["id"]}}
+    old = await _db().ops_runs.update_many({**stale, "started_at": {"$lt": since}}, {"$set": {"status": "interrupted", "finished_at": now_iso(), "resumed_by": None}})
+    if old.modified_count:
+        run["counts"]["closed_earlier_runs"] = old.modified_count
+    prev = await _db().ops_runs.find_one({**stale, "started_at": {"$gte": since}}, {"_id": 0}, sort=[("started_at", -1)])
     if not prev:
         return {}
     await _db().ops_runs.update_one({"id": prev["id"]}, {"$set": {"status": "interrupted", "finished_at": now_iso(), "resumed_by": run["id"]}})
     return prev.get("progress") or {}
+
+
+PULSE_SECONDS = 60
+
+
+async def _pulse(run: dict) -> None:
+    """A heartbeat every minute for as long as the run is alive, whatever step it is in. Without it a long step (the
+    job market, a DNS sweep, a deep dive) went 15 minutes without a beat and read as cut off."""
+    while True:
+        await asyncio.sleep(PULSE_SECONDS)
+        try:
+            await ops.heartbeat(run)
+        except Exception:  # noqa: BLE001 - a missed beat is retried next minute
+            logger.info("radar heartbeat failed", exc_info=True)
 
 
 SCORE_CHUNK = 50  # accounts scored between checkpoints
@@ -467,41 +558,56 @@ async def daily(steps: Iterable[str] = ("collect", "enrich", "score", "research"
             run["counts"]["resumed_after"] = ",".join(sorted(done_steps)) or "start"
             run["progress"] = dict(prior)
 
-        async def checkpoint(step: str) -> None:
-            done_steps.add(step)
-            await ops.heartbeat(run, steps_done=sorted(done_steps), touched=sorted(touched), started_at=since_start)
+        collected: set = set(prior.get("collect_done") or [])
+        pulse = asyncio.create_task(_pulse(run))
 
-        if "migration" not in done_steps:
-            repaired = await rs.ensure_size_migration()
-            if repaired:
-                run["counts"].update({f"migration_{k}": v for k, v in repaired.items()})
-            await checkpoint("migration")
-        if "collect" in steps and "collect" not in done_steps:
-            touched |= await collect(run)
-            await checkpoint("collect")
-        if "enrich" in steps and "enrich" not in done_steps:
-            touched |= await enrich(run)
-            await checkpoint("enrich")
-        if "score" in steps and "score" not in done_steps:
-            if "collect" in steps:
-                # The accounts with new signals first, then the rest: decay moves every score a little each day.
-                n = await _score(run, list(touched), scored)
-                n += await _score(run, [c["id"] async for c in _db().companies.find({"id": {"$nin": list(touched)}}, {"_id": 0, "id": 1})], scored)
-            else:
-                n = await _score(run, [c["id"] async for c in _db().companies.find({}, {"_id": 0, "id": 1})], scored)
-            run["counts"]["recomputed"] = n + int(prior.get("recomputed") or 0)
-            strong_new = await _db().companies.count_documents({"strength": "Strong", "created_at": {"$gte": since_start}})
-            if strong_new:
-                await ops.notify("pipeline", f"Radar: {strong_new} new strong account(s) today.", event="radar_new_strong",
-                                 key=f"radar_new_strong:{run['started_at'][:10]}")
-            await checkpoint("score")
-        if "research" in steps and "research" not in done_steps:
-            await research(run)  # each deep dive is saved as it finishes, so a resume only picks up the rest
-            await checkpoint("research")
-        if "digest" in steps and "digest" not in done_steps:
-            await digest(run)
-            await checkpoint("digest")
+        async def checkpoint(step: Optional[str] = None) -> None:
+            if step:
+                done_steps.add(step)
+            await ops.heartbeat(run, steps_done=sorted(done_steps), collect_done=sorted(collected), touched=sorted(touched), started_at=since_start)
+
+        async def source_saved(name: str) -> None:
+            await checkpoint()
+
+        try:
+            await _daily_steps(run, steps, prior, done_steps, touched, scored, collected, since_start, checkpoint, source_saved)
+        finally:
+            pulse.cancel()
     return run["counts"]
+
+
+async def _daily_steps(run, steps, prior, done_steps, touched, scored, collected, since_start, checkpoint, source_saved) -> None:
+    """The steps of `daily`, each skipped when a resumed run already finished it."""
+    if "migration" not in done_steps:
+        repaired = await rs.ensure_size_migration()
+        if repaired:
+            run["counts"].update({f"migration_{k}": v for k, v in repaired.items()})
+        await checkpoint("migration")
+    if "collect" in steps and "collect" not in done_steps:
+        touched |= await collect(run, collected, touched, on_saved=source_saved)
+        await checkpoint("collect")
+    if "enrich" in steps and "enrich" not in done_steps:
+        touched |= await enrich(run)
+        await checkpoint("enrich")
+    if "score" in steps and "score" not in done_steps:
+        if "collect" in steps:
+            # The accounts with new signals first, then the rest: decay moves every score a little each day.
+            n = await _score(run, list(touched), scored)
+            n += await _score(run, [c["id"] async for c in _db().companies.find({"id": {"$nin": list(touched)}}, {"_id": 0, "id": 1})], scored)
+        else:
+            n = await _score(run, [c["id"] async for c in _db().companies.find({}, {"_id": 0, "id": 1})], scored)
+        run["counts"]["recomputed"] = n + int(prior.get("recomputed") or 0)
+        strong_new = await _db().companies.count_documents({"strength": "Strong", "created_at": {"$gte": since_start}})
+        if strong_new:
+            await ops.notify("pipeline", f"Radar: {strong_new} new strong account(s) today.", event="radar_new_strong",
+                             key=f"radar_new_strong:{run['started_at'][:10]}")
+        await checkpoint("score")
+    if "research" in steps and "research" not in done_steps:
+        await research(run)  # each deep dive is saved as it finishes, so a resume only picks up the rest
+        await checkpoint("research")
+    if "digest" in steps and "digest" not in done_steps:
+        await digest(run)
+        await checkpoint("digest")
 
 
 def main(argv: list) -> int:

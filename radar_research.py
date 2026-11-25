@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 import httpx
@@ -39,7 +40,31 @@ def _db():
     return database.db
 
 
+STALE_RUNNING = timedelta(minutes=30)  # a deep dive takes a few minutes; "running" for longer was cut off by a restart
+MAX_ATTEMPTS = 3                       # cut off this many times: marked failed, so one account can't block the queue
+
+
+async def requeue_stale(company_id: Optional[str] = None) -> int:
+    """Deep dives left "running" by a restart go back in the queue (or fail after MAX_ATTEMPTS).
+
+    Before this, a dive cut off mid-way stayed "running" for ever: the daily run only picks "queued" jobs, `queue()`
+    returned the stuck job instead of a new one (so the Deep dive button silently did nothing), the account stayed
+    "Researching" with no brief, and it still used up one of the day's research slots, every day."""
+    cutoff = (datetime.now(timezone.utc) - STALE_RUNNING).isoformat()
+    q = {"status": "running", "$or": [{"started_at": {"$lt": cutoff}}, {"started_at": None}], **({"company_id": company_id} if company_id else {})}
+    n = 0
+    async for job in _db().radar_research.find(q, {"_id": 0, "id": 1, "attempts": 1}):
+        attempts = int(job.get("attempts") or 1)
+        if attempts >= MAX_ATTEMPTS:
+            await _db().radar_research.update_one({"id": job["id"]}, {"$set": {"status": "failed", "error": f"cut off {attempts} times (instance restarts)", "finished_at": now_iso()}})
+        else:
+            await _db().radar_research.update_one({"id": job["id"]}, {"$set": {"status": "queued", "requeued_at": now_iso()}})
+        n += 1
+    return n
+
+
 async def queue(company: dict, by: str = "system") -> dict:
+    await requeue_stale(company["id"])
     existing = await _db().radar_research.find_one({"company_id": company["id"], "status": {"$in": ["queued", "running"]}}, {"_id": 0})
     if existing:
         return existing
@@ -52,13 +77,21 @@ async def queue(company: dict, by: str = "system") -> dict:
 
 
 async def run_queue(limit: int = 5, only: Optional[str] = None) -> dict:
-    counts = {"done": 0, "failed": 0, "rules": 0}
+    counts = {"done": 0, "failed": 0, "rules": 0, "skipped": 0, "requeued": await requeue_stale()}
     q = {"status": "queued", **({"id": only} if only else {})}
     jobs = await _db().radar_research.find(q, {"_id": 0}).sort("created_at", 1).to_list(limit)
     async with httpx.AsyncClient(follow_redirects=True, headers={"User-Agent": "SolixRadar/1.0 (+https://www.solix.com)"}) as client:
         for job in jobs:
-            await _db().radar_research.update_one({"id": job["id"]}, {"$set": {"status": "running", "started_at": now_iso()}})
             company = await _db().companies.find_one({"id": job["company_id"]}, {"_id": 0})
+            # Competitors, customers and closed accounts aren't researched by the system (a person asking still counts).
+            why = "account deleted" if not company else (company.get("excluded_reason") if job.get("requested_by") == "system" else None)
+            if why:
+                await _db().radar_research.update_one({"id": job["id"]}, {"$set": {"status": "skipped", "error": str(why)[:300], "finished_at": now_iso()}})
+                counts["skipped"] += 1
+                if company:
+                    await rs.recompute(job["company_id"])
+                continue
+            await _db().radar_research.update_one({"id": job["id"]}, {"$set": {"status": "running", "started_at": now_iso()}, "$inc": {"attempts": 1}})
             try:
                 brief = await research(client, company)
                 brief["checks"] = validate(brief, company)

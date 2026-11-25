@@ -389,18 +389,26 @@ RADAR_STALE = timedelta(minutes=15)  # no heartbeat for this long: the run was c
 _radar_task: Optional[asyncio.Task] = None
 
 
+def radar_slot(now: Optional[datetime] = None) -> Optional[datetime]:
+    """Start of the current daily Radar slot (RADAR_DAILY_UTC today, or yesterday when that time hasn't come yet);
+    None when the daily run is switched off."""
+    at = (os.environ.get("RADAR_DAILY_UTC") or "05:00").strip().lower()
+    if at in ("off", "0", "none"):
+        return None
+    hour, minute = (int(x) for x in at.split(":"))
+    now = now or datetime.now(timezone.utc)
+    slot = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return slot - timedelta(days=1) if now < slot else slot  # before today's time, yesterday's run must have happened
+
+
 async def radar_due(now: Optional[datetime] = None) -> bool:
     """The Radar's daily run (collect, score, research, digest) is due once a day from RADAR_DAILY_UTC (default 05:00;
     "off" turns it off), unless a run has started since then: "Run now" counts, and a run cut off by a restart is retried.
     It runs inside the API, so the database credentials never have to be copied into GitHub."""
-    at = (os.environ.get("RADAR_DAILY_UTC") or "05:00").strip().lower()
-    if at in ("off", "0", "none"):
-        return False
-    hour, minute = (int(x) for x in at.split(":"))
     now = now or datetime.now(timezone.utc)
-    slot = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if now < slot:
-        slot -= timedelta(days=1)  # before today's time, yesterday's run must have happened
+    slot = radar_slot(now)
+    if slot is None:
+        return False
     last = await _db().ops_runs.find_one({"job": "radar_daily", "started_at": {"$gte": slot.isoformat()}}, {"_id": 0, "status": 1, "started_at": 1, "heartbeat_at": 1},
                                          sort=[("started_at", -1)])
     if not last:
