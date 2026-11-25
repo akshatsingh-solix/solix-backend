@@ -140,6 +140,12 @@ app.include_router(home.router)
 import intelligence  # noqa: E402
 app.include_router(intelligence.router)
 
+# Innermost first: readable JSON errors, then idempotent writes (resilience.py). Both sit inside CORS, so the
+# browser can always read what they send instead of reporting a bare "Network Error".
+import resilience  # noqa: E402
+app.add_middleware(resilience.JSONErrors)
+app.add_middleware(resilience.Idempotency)
+
 # Compress JSON/CSV responses; tiny responses aren't worth the CPU.
 app.add_middleware(GZipMiddleware, minimum_size=800)
 
@@ -262,6 +268,8 @@ async def on_startup():
         db.tool_confirmations.create_index("expires_at", expireAfterSeconds=0),
         db.mcp_tokens.create_index("jti", unique=True),
         db.mcp_tokens.create_index("user_id"),
+        db.idempotency.create_index("key", unique=True),  # a retried write runs once (resilience.py)
+        db.idempotency.create_index("expires_at", expireAfterSeconds=0),
     )
     await seed_admin()
     # Build the tool router's indexes now, so the first request routes in well under a millisecond, not ~13 ms.
