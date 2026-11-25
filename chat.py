@@ -459,7 +459,7 @@ async def chat_stream(req: ChatRequest, request: Request):
     recent = await db.chat_messages.find({"session_id": req.session_id}, {"_id": 0, "role": 1, "content": 1}).sort("created_at", -1).to_list(HISTORY_LIMIT)
     history = [{"role": m["role"], "content": m["content"][:HISTORY_CHARS]} for m in reversed(recent)]
 
-    await sol_search.refresh_cms(db)
+    await sol_search.ensure_fresh(db)
     contact = await chat_leads.get_contact(req.session_id) or {}
     # What this message alone says is part of the question itself; anything known from before makes it personal.
     personal = bool(history or contact or sol_learning.describe_profile(prior))
