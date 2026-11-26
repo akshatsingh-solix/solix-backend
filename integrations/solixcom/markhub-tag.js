@@ -152,7 +152,11 @@
     return t;
   })();
 
-  if (/[?&]solix_internal=1\b/.test(location.search)) set("localStorage", INTERNAL_KEY, "1");
+  // Staff: ?solix_internal=1 marks this browser as Solix's own (kept out of every MarkHub metric), ?solix_internal=0
+  // clears it. Signing in to MarkHub can't mark it here: www.solix.com has its own browser storage.
+  var internalFlag = (location.search.match(/[?&]solix_internal=([01])\b/) || [])[1];
+  if (internalFlag === "1") set("localStorage", INTERNAL_KEY, "1");
+  else if (internalFlag === "0") del("localStorage", INTERNAL_KEY);
 
   function context() {
     var c = {};
@@ -297,7 +301,25 @@
     if (granted()) start();
   }
 
+  // A browser marked internal tells the form plugin so, with or without analytics consent: it identifies no one,
+  // it only keeps Solix's own test submissions out of the numbers.
+  function stampInternal() {
+    if (get("localStorage", INTERNAL_KEY) !== "1") return;
+    var forms = document.getElementsByTagName("form");
+    for (var i = 0; i < forms.length; i++) {
+      if (forms[i].querySelector('input[name="markhub_internal"]')) continue;
+      var input = document.createElement("input");
+      input.type = "hidden";
+      input.name = "markhub_internal";
+      input.value = "1";
+      forms[i].appendChild(input);
+    }
+  }
+
   function boot() {
+    stampInternal();
+    document.addEventListener("submit", stampInternal, true);
+    document.addEventListener("click", stampInternal, true); // AJAX forms are sent from a button click, not a submit
     if (cfg.ownBanner !== true) {
       // CookieYes loads asynchronously: its cookie or API is usually there at once, otherwise wait for it.
       if (cookieYes() || typeof window.getCkyConsent === "function") { useCookieYes(); return; }

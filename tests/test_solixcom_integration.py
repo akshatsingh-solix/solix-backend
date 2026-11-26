@@ -252,3 +252,46 @@ def test_cloudfront_viewer_address_loses_its_port(monkeypatch):
         return Request({"type": "http", "headers": [(b"x-real-ip", value.encode())], "client": ("10.0.0.1", 1), "method": "GET", "path": "/"})
 
     assert client_ip.client_ip(real("2001:db8::3")) == "2001:db8::3" and client_ip.client_ip(real("203.0.113.9:8080")) == "203.0.113.9"
+
+
+# --- internal traffic from solix.com --------------------------------------------------------------------------------
+
+def _internal_settings(db, **over):
+    import cache
+    run(db.settings.update_one({"key": "internal_traffic"}, {"$set": {"key": "internal_traffic", "enabled": True,
+        "ip_ranges": [{"cidr": "203.0.113.0/24", "label": "Test office"}], **over}}, upsert=True))
+    cache.bump("internal")
+    cache.clear()
+
+
+def test_a_solixcom_form_from_the_office_network_is_internal(app, wp):
+    _, db = app
+    _internal_settings(db)
+    r = wp.post(URL, headers={"X-MarkHub-Key": KEY}, json={"type": "demo", "form": "request-demo", "email": "tester@gmail.example",
+                                                           "client_ip": "203.0.113.44"})
+    assert r.status_code == 201
+    sub = run(db.submissions.find_one({"email": "tester@gmail.example"}))
+    assert sub["internal"] is True and sub["internal_reason"]["kind"] == "ip" and "client_ip" not in sub
+
+
+def test_a_solixcom_form_from_a_marked_browser_is_internal(app, wp):
+    _, db = app
+    _internal_settings(db)
+    wp.post(URL, headers={"X-MarkHub-Key": KEY}, json={"type": "contact", "form": "contact-sales", "email": "qa.home@outlook.example",
+                                                       "client_ip": "198.51.100.200", "internal_device": True})
+    sub = run(db.submissions.find_one({"email": "qa.home@outlook.example"}))
+    assert sub["internal"] is True and sub["internal_reason"]["kind"] == "device"
+    # A real prospect from elsewhere stays counted.
+    wp.post(URL, headers={"X-MarkHub-Key": KEY}, json={"type": "contact", "form": "contact-sales", "email": "buyer@prospect.example",
+                                                       "client_ip": "198.51.100.201"})
+    assert not run(db.submissions.find_one({"email": "buyer@prospect.example"})).get("internal")
+
+
+def test_solixcom_browsing_from_a_marked_browser_is_internal(app):
+    _, db = app
+    _internal_settings(db)
+    anon = TestClient(app[0].app)
+    beacon = {"visitor_id": "vis-staff-0001", "session_id": "s9", "context": {"site": "www.solix.com", "internal": 1},
+              "events": [{"type": "page_view", "path": "/products/data-ask/"}]}
+    assert anon.post("/api/track", content=__import__("json").dumps(beacon), headers={"Content-Type": "text/plain", "X-Forwarded-For": "198.51.100.77"}).status_code == 204
+    assert run(db.visitors.find_one({"id": "vis-staff-0001"}))["internal"] is True

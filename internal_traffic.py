@@ -258,7 +258,8 @@ async def classify(*, email: Optional[str] = None, ip: Optional[str] = None, vis
     return reason
 
 
-async def stamp(doc: dict, *, ip: Optional[str] = None, visitor_id: Optional[str] = None, session_id: Optional[str] = None) -> dict:
+async def stamp(doc: dict, *, ip: Optional[str] = None, visitor_id: Optional[str] = None, session_id: Optional[str] = None,
+                device: bool = False) -> dict:
     """Flag a new submission or registration (before it is saved), unless its person was cleared by hand."""
     try:
         email = (doc.get("email") or "").lower()
@@ -269,7 +270,7 @@ async def stamp(doc: dict, *, ip: Optional[str] = None, visitor_id: Optional[str
             if lead and lead.get("internal"):
                 doc["internal"], doc["internal_reason"] = True, _reason("linked", "Lead is internal")
                 return doc
-        reason = await classify(email=email, ip=ip, visitor_id=visitor_id, session_id=session_id)
+        reason = await classify(email=email, ip=ip, visitor_id=visitor_id, session_id=session_id, device=device)
         if reason:
             doc["internal"], doc["internal_reason"] = True, reason
     except Exception:  # noqa: BLE001 - flagging must never lose a form
