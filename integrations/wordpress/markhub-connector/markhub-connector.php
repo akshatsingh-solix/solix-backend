@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       MarkHub Connector
  * Description:       Sends www.solix.com form submissions (demo, contact sales, trials, gated downloads, partner, newsletter) to MarkHub, server to server, so every lead lands in the MarkHub inbox, gets scored and is linked to the visitor's browsing.
- * Version:           1.1.0
+ * Version:           1.2.0
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * Author:            Solix Technologies
@@ -276,11 +276,52 @@ function markhub_connector_payload(array $fields, $form_id)
     if ($vid && preg_match('/^[A-Za-z0-9_-]{8,64}$/', $vid)) {
         $p['visitor_id'] = $vid;
     }
-    $ip = isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR'])) : '';
+    $ip = markhub_connector_client_ip();
     if ($ip !== '') {
         $p['client_ip'] = mb_substr($ip, 0, 64);
     }
+    // The MarkHub tag adds markhub_internal=1 in browsers staff marked with ?solix_internal=1.
+    $flag = markhub_connector_field($fields, 'markhub_internal', 2);
+    if ($flag === null && isset($_POST['markhub_internal'])) { // phpcs:ignore WordPress.Security.NonceVerification
+        $flag = markhub_connector_field(wp_unslash($_POST), 'markhub_internal', 2);
+    }
+    if ($flag === '1') {
+        $p['internal_device'] = true;
+    }
     return apply_filters('markhub_connector_payload', array_filter($p, function ($v) { return $v !== null && $v !== ''; }), $form_id, $fields);
+}
+
+/**
+ * The visitor's address, used by MarkHub only to recognise Solix's office and VPN ranges (never stored).
+ * Behind a load balancer or proxy, REMOTE_ADDR is the proxy: then the right-most public address in
+ * X-Forwarded-For is the visitor (entries further left can be forged by the client). A trusted edge header can be
+ * named instead: define('MARKHUB_CLIENT_IP_HEADER', 'HTTP_CF_CONNECTING_IP');
+ */
+function markhub_connector_client_ip()
+{
+    $public = function ($ip) {
+        return (bool) filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
+    };
+    if (defined('MARKHUB_CLIENT_IP_HEADER') && !empty($_SERVER[MARKHUB_CLIENT_IP_HEADER])) {
+        $parts = explode(',', sanitize_text_field(wp_unslash($_SERVER[MARKHUB_CLIENT_IP_HEADER])));
+        $ip = trim($parts[0]);
+        if (filter_var($ip, FILTER_VALIDATE_IP)) {
+            return $ip;
+        }
+    }
+    $remote = isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR'])) : '';
+    if ($remote !== '' && $public($remote)) {
+        return $remote;
+    }
+    if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+        $chain = array_map('trim', explode(',', sanitize_text_field(wp_unslash($_SERVER['HTTP_X_FORWARDED_FOR']))));
+        for ($i = count($chain) - 1; $i >= 0; $i--) {
+            if ($public($chain[$i])) {
+                return $chain[$i];
+            }
+        }
+    }
+    return $remote;
 }
 
 /** POST one lead to MarkHub. Returns true on success, or an error string. */

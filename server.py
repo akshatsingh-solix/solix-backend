@@ -96,6 +96,8 @@ class WordPressSubmission(SubmissionCreate):
     client_ip: Optional[str] = Field(default=None, max_length=64)
     # Which WordPress form sent it (e.g. "request-demo", "contact-sales", "gated-download").
     form: Optional[str] = Field(default=None, max_length=60)
+    # Sent from a browser staff marked with ?solix_internal=1 on www.solix.com.
+    internal_device: bool = False
 
 
 def _wordpress_key(request: Request) -> None:
@@ -112,18 +114,18 @@ def _wordpress_key(request: Request) -> None:
                  dependencies=[Depends(_wordpress_key)])
 async def wordpress_submission(payload: WordPressSubmission, request: Request, background: BackgroundTasks):
     """Forms on www.solix.com, forwarded server-to-server by the MarkHub Connector WordPress plugin."""
-    base = SubmissionCreate(**payload.model_dump(exclude={"client_ip", "form"}))
+    base = SubmissionCreate(**payload.model_dump(exclude={"client_ip", "form", "internal_device"}))
     # The product line: what they said they want, then the page or asset the form was on (the solix.com page map).
     import site_map
     derived = site_map.lead_topics(payload.source_page or "", payload.interest or "", payload.resource_slug or "")
     if derived:
         base.topics = list(dict.fromkeys([*(base.topics or []), *derived]))[:10]
     return await _intake(base, request, background, source="solix.com", ip=(payload.client_ip or "").strip() or None,
-                         extra={"form": payload.form} if payload.form else None)
+                         extra={"form": payload.form} if payload.form else None, device=payload.internal_device)
 
 
 async def _intake(payload: SubmissionCreate, request: Request, background: BackgroundTasks, *, source: str,
-                  ip: Optional[str], extra: Optional[dict] = None):
+                  ip: Optional[str], extra: Optional[dict] = None, device: bool = False):
     doc = payload.model_dump(exclude={"visitor_id", "topics"})
     doc["id"] = str(uuid.uuid4())
     doc["created_at"] = now_iso()
@@ -132,7 +134,7 @@ async def _intake(payload: SubmissionCreate, request: Request, background: Backg
         doc.update(extra)
     # Staff testing the forms (internal email, office network, or a browser marked internal) are flagged now, so
     # the sales alert is skipped and no metric counts them.
-    await internal_traffic.stamp(doc, ip=ip or "", visitor_id=payload.visitor_id)
+    await internal_traffic.stamp(doc, ip=ip or "", visitor_id=payload.visitor_id, device=device)
     await db.submissions.insert_one(dict(doc))
     # solix.com already alerts sales (Digiprise) and emails the download itself: MarkHub observes those leads without
     # sending a second alert or a second email. WP_INTAKE_ALERTS=1 turns MarkHub's sales alert on for them.
