@@ -27,7 +27,16 @@ services:
       - key: TRUSTED_PROXY_HOPS
         sync: false
       - key: CORS_ORIGINS
-        value: https://akshatsingh-solix.github.io
+        value: https://akshatsingh-solix.github.io,https://www.solix.com,https://solix.com
+      # www.solix.com (WordPress): the MarkHub Connector plugin forwards its forms with this key (Settings > MarkHub).
+      # Those leads are observed only: no MarkHub sales alert (Digiprise has them) unless WP_INTAKE_ALERTS=1.
+      - key: WP_INTAKE_SECRET
+        generateValue: true
+      - key: WP_INTAKE_ALERTS
+        sync: false
+      # Sol also learns these WordPress sites' pages, KB and glossary (site_knowledge.py), synced daily.
+      - key: SOL_WORDPRESS_SITES
+        value: https://www.solix.com
       # Sol, the AI concierge: set at least one key. Providers are tried in
       # SOL_PROVIDER_ORDER and Sol fails over when one is rate limited.
       # GROQ_API_KEY alone is enough. See README "Sol".

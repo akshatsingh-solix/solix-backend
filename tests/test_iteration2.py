@@ -6,7 +6,12 @@ import json
 import requests
 import pytest
 
-BASE_URL = (os.environ.get('REACT_APP_BACKEND_URL') or open('/app/frontend/.env').read().split('REACT_APP_BACKEND_URL=')[1].split('\n')[0].strip()).rstrip('/')
+# End-to-end: these call a running API (and create real submissions on it). Set REACT_APP_BACKEND_URL to a test
+# deployment to run them; otherwise they are skipped. /app/frontend/.env is the original hosting layout.
+_ENV_FILE = '/app/frontend/.env'
+if not os.environ.get('REACT_APP_BACKEND_URL') and not os.path.exists(_ENV_FILE):
+    pytest.skip('end-to-end suite: set REACT_APP_BACKEND_URL to a running test API', allow_module_level=True)
+BASE_URL = (os.environ.get('REACT_APP_BACKEND_URL') or open(_ENV_FILE).read().split('REACT_APP_BACKEND_URL=')[1].split('\n')[0].strip()).rstrip('/')
 API = f"{BASE_URL}/api"
 
 ADMIN_EMAIL = "admin@solix.com"

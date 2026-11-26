@@ -75,18 +75,66 @@ async def root():
     return {"service": "solix-api", "status": "ok"}
 
 
+_MARKHUB_TAG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "integrations", "solixcom", "markhub-tag.js")
+
+
+@api_router.get("/markhub.js", include_in_schema=False)
+async def markhub_tag():
+    """The consent + tracking tag www.solix.com loads through Google Tag Manager (integrations/solixcom)."""
+    from fastapi.responses import FileResponse
+    return FileResponse(_MARKHUB_TAG, media_type="application/javascript",
+                        headers={"Cache-Control": "public, max-age=3600", "Cross-Origin-Resource-Policy": "cross-origin"})
+
+
 @api_router.post("/submissions", response_model=Submission, status_code=201)
 async def create_submission(payload: SubmissionCreate, request: Request, background: BackgroundTasks):
+    return await _intake(payload, request, background, source="web", ip=internal_traffic.client_ip(request))
+
+
+class WordPressSubmission(SubmissionCreate):
+    # The visitor's address as WordPress saw it (only used to spot office traffic; never stored).
+    client_ip: Optional[str] = Field(default=None, max_length=64)
+    # Which WordPress form sent it (e.g. "request-demo", "contact-sales", "gated-download").
+    form: Optional[str] = Field(default=None, max_length=60)
+
+
+def _wordpress_key(request: Request) -> None:
+    import hmac
+    secret = (os.environ.get("WP_INTAKE_SECRET") or "").strip()
+    if not secret:
+        raise HTTPException(status_code=503, detail="WordPress intake is not configured (set WP_INTAKE_SECRET)")
+    given = request.headers.get("x-markhub-key") or ""
+    if not hmac.compare_digest(given.encode(), secret.encode()):
+        raise HTTPException(status_code=401, detail="Invalid MarkHub key")
+
+
+@api_router.post("/integrations/wordpress/submissions", response_model=Submission, status_code=201,
+                 dependencies=[Depends(_wordpress_key)])
+async def wordpress_submission(payload: WordPressSubmission, request: Request, background: BackgroundTasks):
+    """Forms on www.solix.com, forwarded server-to-server by the MarkHub Connector WordPress plugin."""
+    base = SubmissionCreate(**payload.model_dump(exclude={"client_ip", "form"}))
+    return await _intake(base, request, background, source="solix.com", ip=(payload.client_ip or "").strip() or None,
+                         extra={"form": payload.form} if payload.form else None)
+
+
+async def _intake(payload: SubmissionCreate, request: Request, background: BackgroundTasks, *, source: str,
+                  ip: Optional[str], extra: Optional[dict] = None):
     doc = payload.model_dump(exclude={"visitor_id", "topics"})
     doc["id"] = str(uuid.uuid4())
     doc["created_at"] = now_iso()
-    doc["source"] = "web"
+    doc["source"] = source
+    if extra:
+        doc.update(extra)
     # Staff testing the forms (internal email, office network, or a browser marked internal) are flagged now, so
     # the sales alert is skipped and no metric counts them.
-    await internal_traffic.stamp(doc, ip=internal_traffic.client_ip(request), visitor_id=payload.visitor_id)
+    await internal_traffic.stamp(doc, ip=ip or "", visitor_id=payload.visitor_id)
     await db.submissions.insert_one(dict(doc))
-    asyncio.create_task(notify_lead(doc))
-    asyncio.create_task(deliver_for_submission(doc, api_base(request)))
+    # solix.com already alerts sales (Digiprise) and emails the download itself: MarkHub observes those leads without
+    # sending a second alert or a second email. WP_INTAKE_ALERTS=1 turns MarkHub's sales alert on for them.
+    if source == "web" or os.environ.get("WP_INTAKE_ALERTS", "").strip() == "1":
+        asyncio.create_task(notify_lead(doc))
+    if source == "web":  # solix.com's own form delivers its assets
+        asyncio.create_task(deliver_for_submission(doc, api_base(request)))
     # The visitor gets their answer now; scoring, account linking and the outbound hand-off follow it.
     background.add_task(_score_submission, doc, payload.visitor_id, payload.topics)
     logger.info("submission %s from %s", doc["type"], doc["email"])
@@ -192,6 +240,8 @@ async def on_startup():
         # Raw events expire after 180 days to keep the free database tier small.
         db.events.create_index("at_dt", expireAfterSeconds=180 * 86400),
         db.content.create_index("id", unique=True),
+        db.site_pages.create_index("url", unique=True),
+        db.site_pages.create_index([("site", 1), ("modified", -1)]),
         db.content.create_index("slug", unique=True),
         db.content.create_index([("status", 1), ("publish_at", -1)]),
         db.content_versions.create_index([("content_id", 1), ("version", -1)]),
@@ -297,6 +347,9 @@ async def on_startup():
     asyncio.create_task(_rescore_loop())
     # Sol knows every published item from the first message, and keeps up on its own.
     asyncio.create_task(_sol_knowledge_loop())
+    import site_knowledge
+    if site_knowledge.sites():  # Sol learns www.solix.com (SOL_WORDPRESS_SITES); daily, after a warm-up
+        asyncio.create_task(site_knowledge.loop())
     # Outbox, outbound sender and watchdog (Radar + EchoLocate); OPS_LOOP=0 turns it off.
     ops.start_background()
 

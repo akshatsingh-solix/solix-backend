@@ -755,3 +755,9 @@ def test_groq_reasoning_effort_fits_each_model():
     for model in ("openai/gpt-oss-120b", "qwen/qwen3.6-27b", "moonshotai/kimi-k2"):
         collect(llm._stream_one(client, groq, model, [], None, 50, 0.6))
     assert [b.get("reasoning_effort") for b in bodies] == ["low", "none", None]
+
+
+def test_chat_message_times_always_increase():
+    import chat
+    stamps = [chat._message_time() for _ in range(2000)]  # far faster than the clock ticks
+    assert stamps == sorted(stamps) and len(set(stamps)) == len(stamps)

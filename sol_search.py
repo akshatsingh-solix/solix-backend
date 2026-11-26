@@ -336,16 +336,23 @@ async def refresh_cms(db, force: bool = False) -> None:
         import sol_learning
 
         learned = await sol_learning.learned_chunks()
+        try:  # www.solix.com pages (site_knowledge.py), when SOL_WORDPRESS_SITES is set
+            import site_knowledge
+            external = await site_knowledge.chunks()
+        except Exception:
+            logger.exception("Sol could not load solix.com pages; answering without them")
+            external = []
         # A CMS item replaces the built-in article at the same address.
         urls = {c["url"] for c in cms}
-        chunks = [c for c in bundled_chunks() if c["url"] not in urls] + cms + learned
+        chunks = [c for c in bundled_chunks() if c["url"] not in urls] + cms + learned + external
         # Tokenising a few thousand chunks takes a moment: off the event loop, so other visitors aren't held up.
         built = await asyncio.get_running_loop().run_in_executor(None, Index, chunks)
         _index, _cms_items, _learned_items = built, len(docs), len(learned)
         _version += 1
         _built_at = now
         _rebuild_must_wait = False
-        logger.info("Sol knowledge rebuilt: %d chunks (%d site, %d CMS items, %d learned)", len(chunks), len(bundled_chunks()), len(docs), len(learned))
+        logger.info("Sol knowledge rebuilt: %d chunks (%d site, %d CMS items, %d learned, %d solix.com)", len(chunks), len(bundled_chunks()),
+                    len(docs), len(learned), len(external))
 
 
 async def ensure_fresh(db) -> None:
@@ -375,6 +382,10 @@ CONFIDENT_KEYWORD_SCORE = 7.0  # a BM25 top score this high means the question u
 
 
 def shard_of(chunk: dict) -> str:
+    url = chunk.get("url") or ""
+    if url.startswith("http"):  # a page on www.solix.com: shard it by its path like the site's own pages
+        from urllib.parse import urlparse
+        chunk = {**chunk, "url": urlparse(url).path or "/"}
     for name, test in SHARDS:
         try:
             if test(chunk):

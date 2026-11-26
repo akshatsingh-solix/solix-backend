@@ -1849,7 +1849,9 @@ async def instantly_webhook(request: Request, x_solix_webhook_secret: Optional[s
                 "provider": "instantly", "status": "delivered", "sent_at": now_iso(), "channel": "email", "sending_domain": sending_domain}}, upsert=True)
     elif event == "email_bounced":
         # Only the email that bounced counts as bounced: the latest one to this address, not every send ever made to them.
-        latest = await _db().sends.find_one({"contact_id": contact["id"], "status": {"$in": ["sent", "delivered", "handed_off"]}}, {"_id": 0, "id": 1}, sort=[("sent_at", -1)])
+        # Ties (two webhooks in the same clock tick, or retries) go to the later step: that is the email sent last.
+        latest = await _db().sends.find_one({"contact_id": contact["id"], "status": {"$in": ["sent", "delivered", "handed_off"]}}, {"_id": 0, "id": 1},
+                                            sort=[("sent_at", -1), ("step", -1)])
         if latest:
             await _db().sends.update_one({"id": latest["id"]}, {"$set": {"bounced": True, "bounced_at": now_iso(), **({"sending_domain": sending_domain} if sending_domain else {})}})
         await _db().contacts.update_one({"id": contact["id"]}, {"$set": {"email_status": "invalid", "verify_detail": "Hard bounce"}})
