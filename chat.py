@@ -170,8 +170,9 @@ def _rate_limited(kind: str, key: str) -> bool:
 
 
 def _client_ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for", "")
-    return fwd.split(",")[0].strip() or (request.client.host if request.client else "unknown")
+    """The client address, resolved by client_ip.py (configurable, not the spoofable first entry)."""
+    import client_ip as _cip
+    return _cip.client_ip(request)
 
 
 async def save_message(session_id: str, role: str, content: str, **meta) -> None:
@@ -395,14 +396,30 @@ async def chat_capture(req: ChatRequest, request: Request):
     return {"fields": sorted(saved)}
 
 
+# Reading or clearing a transcript needs nothing but its session id, so the id is the secret: it must be long and
+# random enough not to guess (the widget uses crypto.randomUUID, 36 characters), and lookups are rate limited per
+# address so ids can't be tried in bulk. Shorter ids can still chat; their transcripts just can't be fetched here.
+HISTORY_ID_RX = re.compile(r"^[A-Za-z0-9_-]{32,80}$")
+LIMITS["history"] = (30, 300)
+
+
+def _history_guard(session_id: str, request: Request) -> None:
+    if _rate_limited("history", _client_ip(request)):
+        raise HTTPException(status_code=429, detail="Too many requests. Please wait a few minutes.")
+    if not HISTORY_ID_RX.match(session_id or ""):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+
 @router.get("/{session_id}", response_model=List[ChatMessage])
-async def get_chat_history(session_id: str):
+async def get_chat_history(session_id: str, request: Request):
+    _history_guard(session_id, request)
     docs = await db.chat_messages.find({"session_id": session_id}, {"_id": 0}).sort("created_at", 1).to_list(200)
     return [ChatMessage(**d) for d in docs]
 
 
 @router.delete("/{session_id}", status_code=204)
-async def clear_chat_history(session_id: str):
+async def clear_chat_history(session_id: str, request: Request):
+    _history_guard(session_id, request)
     await db.chat_messages.delete_many({"session_id": session_id})
     return None
 

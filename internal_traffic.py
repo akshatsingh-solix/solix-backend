@@ -194,8 +194,10 @@ def match_ip(ip: Optional[str], s: dict) -> Optional[dict]:
 
 
 def client_ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for", "")
-    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "")
+    """The client address, resolved by client_ip.py (configurable, not the spoofable first entry)."""
+    import client_ip as _cip
+    ip = _cip.client_ip(request)
+    return "" if ip == "unknown" else ip
 
 
 def locked_out(doc: Optional[dict]) -> bool:

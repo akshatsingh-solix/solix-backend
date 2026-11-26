@@ -113,8 +113,9 @@ def _rate_limited(key: str, limit: int = 12, window: int = 60) -> bool:
 
 
 def _ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for", "")
-    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "unknown")
+    """The client address, resolved by client_ip.py (configurable, not the spoofable first entry)."""
+    import client_ip as _cip
+    return _cip.client_ip(request)
 
 
 def _new_code() -> str:

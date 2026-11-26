@@ -20,6 +20,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 JWT_ALGORITHM = "HS256"
 ACCESS_TTL = timedelta(hours=12)
 MAX_ATTEMPTS = 5
+EMAIL_MAX_ATTEMPTS = 20
 LOCKOUT = timedelta(minutes=15)
 
 # Staff roles. admin: everything; sales: work leads; editor: publish content;
@@ -59,9 +60,13 @@ async def seed_admin() -> None:
     if existing is None:
         await db.users.insert_one({"id": str(uuid.uuid4()), "email": email, "password_hash": await hash_password_async(password), "name": "Solix Admin", "role": "admin", "created_at": now_iso()})
         logger.info("admin user seeded")
-    elif not await verify_password_async(password, existing["password_hash"]):
-        await db.users.update_one({"email": email}, {"$set": {"password_hash": await hash_password_async(password)}})
-        logger.info("admin password updated from env")
+    elif os.environ.get("ADMIN_PASSWORD_RESET", "").strip().lower() in ("1", "true", "yes"):
+        # Recovery only: ADMIN_PASSWORD is the first password, not a standing one. Without this flag a password the
+        # admin changed in MarkHub survives restarts; with it, the env value wins (set it, restart, then unset it).
+        if not await verify_password_async(password, existing["password_hash"]):
+            await db.users.update_one({"email": email}, {"$set": {"password_hash": await hash_password_async(password), "password_changed_at": now_iso()}})
+            cache.bump("users")
+            logger.warning("admin password reset from ADMIN_PASSWORD (ADMIN_PASSWORD_RESET is set; unset it now)")
 
 
 async def get_current_admin(request: Request) -> dict:
@@ -122,28 +127,48 @@ class LoginResponse(BaseModel):
 
 
 def _client_ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for")
-    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "unknown")
+    """The client address, resolved by client_ip.py (configurable, not the spoofable first entry)."""
+    import client_ip as _cip
+    return _cip.client_ip(request)
+
+
+def attempt_keys(prefix: str, ip: str, email: str) -> list:
+    """Lockout counters for one sign-in: per address + email (5 tries), and per email alone (20 tries), so changing
+    the address a request claims to come from never buys unlimited guesses at one account."""
+    return [(f"{prefix}{ip}:{email}", MAX_ATTEMPTS), (f"{prefix}email:{email}", EMAIL_MAX_ATTEMPTS)]
+
+
+async def check_lockout(keys: list, now: datetime) -> None:
+    for identifier, limit in keys:
+        attempt = await db.login_attempts.find_one({"identifier": identifier})
+        if attempt and attempt.get("count", 0) >= limit:
+            if now < datetime.fromisoformat(attempt["last_attempt"]) + LOCKOUT:
+                raise HTTPException(status_code=429, detail="Too many failed attempts. Try again in 15 minutes.")
+            await db.login_attempts.delete_one({"identifier": identifier})
+
+
+async def record_failure(keys: list, now: datetime) -> None:
+    for identifier, _ in keys:
+        await db.login_attempts.update_one({"identifier": identifier}, {"$inc": {"count": 1}, "$set": {"last_attempt": now.isoformat()}}, upsert=True)
+
+
+async def clear_attempts(keys: list) -> None:
+    await db.login_attempts.delete_many({"identifier": {"$in": [identifier for identifier, _ in keys]}})
 
 
 @router.post("/login", response_model=LoginResponse)
 async def login(body: LoginRequest, request: Request):
     email = body.email.lower()
-    identifier = f"{_client_ip(request)}:{email}"
-    attempt = await db.login_attempts.find_one({"identifier": identifier})
+    keys = attempt_keys("", _client_ip(request), email)
     now = datetime.now(timezone.utc)
-    if attempt and attempt.get("count", 0) >= MAX_ATTEMPTS:
-        locked_until = datetime.fromisoformat(attempt["last_attempt"]) + LOCKOUT
-        if now < locked_until:
-            raise HTTPException(status_code=429, detail="Too many failed attempts. Try again in 15 minutes.")
-        await db.login_attempts.delete_one({"identifier": identifier})
+    await check_lockout(keys, now)
 
     user = await db.users.find_one({"email": email, "role": {"$in": list(ROLES)}})
     if not user or user.get("disabled") or not await verify_password_async(body.password, user["password_hash"]):
-        await db.login_attempts.update_one({"identifier": identifier}, {"$inc": {"count": 1}, "$set": {"last_attempt": now.isoformat()}}, upsert=True)
+        await record_failure(keys, now)
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    await db.login_attempts.delete_one({"identifier": identifier})
+    await clear_attempts(keys)
     import permissions
     return LoginResponse(access_token=create_access_token(user["id"], user["email"]),
                          user=AdminUser(id=user["id"], email=user["email"], name=user["name"], role=user["role"], **await permissions.profile(user)))

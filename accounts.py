@@ -16,7 +16,7 @@ import jwt
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
-from auth import hash_password_async, verify_password_async, JWT_ALGORITHM, MAX_ATTEMPTS, LOCKOUT, _client_ip
+from auth import hash_password_async, verify_password_async, JWT_ALGORITHM, _client_ip, attempt_keys, check_lockout, record_failure, clear_attempts
 from database import db, now_iso
 from emailer import notify_lead
 from intent import record_submission
@@ -179,20 +179,16 @@ async def signup(body: SignupRequest):
 @router.post("/signin", response_model=AuthResponse)
 async def signin(body: SigninRequest, request: Request):
     email = body.email.lower()
-    identifier = f"acct:{_client_ip(request)}:{email}"
+    keys = attempt_keys("acct:", _client_ip(request), email)
     now = datetime.now(timezone.utc)
-    attempt = await db.login_attempts.find_one({"identifier": identifier})
-    if attempt and attempt.get("count", 0) >= MAX_ATTEMPTS:
-        if now < datetime.fromisoformat(attempt["last_attempt"]) + LOCKOUT:
-            raise HTTPException(status_code=429, detail="Too many failed attempts. Try again in 15 minutes.")
-        await db.login_attempts.delete_one({"identifier": identifier})
+    await check_lockout(keys, now)
 
     account = await db.accounts.find_one({"email": email})
     if not account or not await verify_password_async(body.password, account["password_hash"]):
-        await db.login_attempts.update_one({"identifier": identifier}, {"$inc": {"count": 1}, "$set": {"last_attempt": now.isoformat()}}, upsert=True)
+        await record_failure(keys, now)
         raise HTTPException(status_code=401, detail="Incorrect email or password.")
 
-    await db.login_attempts.delete_one({"identifier": identifier})
+    await clear_attempts(keys)
     await db.accounts.update_one({"id": account["id"]}, {"$set": {"last_signin_at": now.isoformat()}})
     return AuthResponse(access_token=_token(account["id"], email), account=_public(account))
 
