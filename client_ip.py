@@ -5,7 +5,8 @@ whatever the client sent at the front. Trusting the first entry therefore lets a
 defeats per-IP limits and can mark a visitor as office traffic. Which entry is real depends on the proxies in front of
 this service, so it is configured, and GET /api/admin/ops/client-ip shows the live headers to choose from:
 
-- CLIENT_IP_HEADER: a header a trusted edge proxy always overwrites (e.g. cf-connecting-ip, true-client-ip).
+- CLIENT_IP_HEADER: a header a trusted edge proxy always overwrites (e.g. cloudfront-viewer-address on AWS CloudFront,
+  cf-connecting-ip, true-client-ip). A trailing :port is removed.
   Used when present. Only set this when every request passes through that proxy, or clients can forge it too.
 - TRUSTED_PROXY_HOPS: how many entries at the right of X-Forwarded-For were added by your own proxies. The entry
   just left of those is the client: 1 means the last entry. Anything the client prepended is ignored.
@@ -28,6 +29,28 @@ def _hops() -> Optional[int]:
     return n if n >= 1 else None
 
 
+def _without_port(value: str) -> str:
+    """CloudFront-Viewer-Address is "ip:port" ("198.51.100.7:46532", "2001:db8::1:46532"); others may be "[v6]:port"."""
+    import ipaddress
+    if not value:
+        return value
+    if value.startswith("[") and "]" in value:
+        return value[1:value.index("]")]
+    try:
+        ipaddress.ip_address(value)
+        return value  # already a bare address (an IPv6 address has colons of its own)
+    except ValueError:
+        pass
+    head, _, tail = value.rpartition(":")
+    if head and tail.isdigit():
+        try:
+            ipaddress.ip_address(head)
+            return head
+        except ValueError:
+            return value
+    return value
+
+
 def forwarded_chain(request: Request) -> List[str]:
     # Several X-Forwarded-For headers are one list, in order.
     parts: List[str] = []
@@ -44,6 +67,8 @@ def client_ip(request: Request) -> str:
     header = (os.environ.get("CLIENT_IP_HEADER") or "").strip().lower()
     if header:
         value = (request.headers.get(header) or "").split(",")[0].strip()
+        # CloudFront always appends the port, and "2001:db8::1:443" would otherwise read as a valid IPv6 address.
+        value = value.rpartition(":")[0] if header == "cloudfront-viewer-address" and ":" in value else _without_port(value)
         if value:
             return value
     chain = forwarded_chain(request)
@@ -66,7 +91,7 @@ def describe(request: Request) -> dict:
         "peer": _peer(request),
         "x_forwarded_for": chain,
         "candidate_headers": {h: request.headers.get(h) for h in
-                              ("cf-connecting-ip", "true-client-ip", "x-real-ip", "x-client-ip", "fly-client-ip")
+                              ("cloudfront-viewer-address", "cf-connecting-ip", "true-client-ip", "x-real-ip", "x-client-ip", "fly-client-ip")
                               if request.headers.get(h)},
         "by_hops": {str(n): chain[-n] for n in range(1, len(chain) + 1)},
     }

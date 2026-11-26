@@ -113,6 +113,11 @@ def _wordpress_key(request: Request) -> None:
 async def wordpress_submission(payload: WordPressSubmission, request: Request, background: BackgroundTasks):
     """Forms on www.solix.com, forwarded server-to-server by the MarkHub Connector WordPress plugin."""
     base = SubmissionCreate(**payload.model_dump(exclude={"client_ip", "form"}))
+    # The product line: what they said they want, then the page or asset the form was on (the solix.com page map).
+    import site_map
+    derived = site_map.lead_topics(payload.source_page or "", payload.interest or "", payload.resource_slug or "")
+    if derived:
+        base.topics = list(dict.fromkeys([*(base.topics or []), *derived]))[:10]
     return await _intake(base, request, background, source="solix.com", ip=(payload.client_ip or "").strip() or None,
                          extra={"form": payload.form} if payload.form else None)
 
@@ -343,15 +348,20 @@ async def on_startup():
     import radar_service  # Settings → Sales team becomes the Leads Radar's reps, once
     if await radar_service.ensure_sales_team():
         asyncio.create_task(radar_service.recompute_all())
-    await resume_interrupted()
-    asyncio.create_task(_rescore_loop())
-    # Sol knows every published item from the first message, and keeps up on its own.
+    # Sol knows every published item from the first message, and keeps up on its own. Every process needs its own
+    # copy of the index, so this one runs everywhere.
     asyncio.create_task(_sol_knowledge_loop())
-    import site_knowledge
-    if site_knowledge.sites():  # Sol learns www.solix.com (SOL_WORDPRESS_SITES); daily, after a warm-up
-        asyncio.create_task(site_knowledge.loop())
-    # Outbox, outbound sender and watchdog (Radar + EchoLocate); OPS_LOOP=0 turns it off.
-    ops.start_background()
+    # Scheduled work writes data and sends email, so it must run in exactly one process. OPS_LOOP=0 marks a process
+    # that only serves requests: with several API containers (e.g. on AWS ECS behind a load balancer) set it on all
+    # of them but one, or run one separate worker container with OPS_LOOP=1 and the rest with 0.
+    if os.environ.get("OPS_LOOP", "1") != "0":
+        await resume_interrupted()  # website migration jobs cut short by a restart
+        asyncio.create_task(_rescore_loop())
+        import site_knowledge
+        if site_knowledge.sites():  # Sol learns www.solix.com (SOL_WORDPRESS_SITES); daily, after a warm-up
+            asyncio.create_task(site_knowledge.loop())
+        # Outbox, outbound sender, watchdog and the Radar's daily run (Radar + EchoLocate).
+        ops.start_background()
 
 
 async def _rescore_loop():

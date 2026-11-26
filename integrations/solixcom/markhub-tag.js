@@ -1,21 +1,18 @@
-/*! MarkHub tag for www.solix.com: cookie consent, product-interest tracking and form linking.
+/*! MarkHub tag for www.solix.com: product-interest tracking and form linking, under the site's CookieYes consent.
  *
  * Loaded by one Google Tag Manager "Custom HTML" tag on All Pages:
- *   <script src="https://solix-backend-mf5w.onrender.com/api/markhub.js" async></script>
+ *   <script src="https://<markhub-api-host>/api/markhub.js" async></script>
  *
- * What it does
- * - Shows a small cookie banner until the visitor chooses. Nothing is tracked and no identifier is stored before
- *   "Accept"; "Essential only" (or the browser's Global Privacy Control signal) keeps it that way.
- * - After consent: an anonymous visitor id, and page views, engaged reading (45s active), deep scroll (75%),
- *   demo/contact/download clicks, resource views and lead-form views, batched to MarkHub's /api/track.
- * - Adds a hidden "markhub_visitor_id" field to every form, so the WordPress plugin can link the submission to the
- *   visitor's browsing (and therefore to their product interest) when it forwards the lead.
- * - Pushes "markhub_consent" to the GTM dataLayer ({ analytics: "granted" | "denied" }), so other tags (Clarity,
- *   LinkedIn Insight, GA) can be gated on the same choice, and updates Google Consent Mode when gtag is present.
- * - window.markhub.openConsent() reopens the banner (link it from the footer as "Cookie settings").
- * - ?solix_internal=1 marks this browser as Solix staff, so its activity stays out of every metric.
+ * Consent: follows the CookieYes banner already on solix.com. Nothing is tracked and no identifier is stored until
+ * the visitor accepts the "Analytics" category; withdrawing it later stops tracking and removes the identifier.
+ * MarkHub shows no banner of its own (markhubConfig.ownBanner = true turns one on, for a site without a consent tool).
  *
- * Optional settings, before this script loads: window.markhubConfig = { api: "https://...", privacyUrl: "/privacy-policy/" }
+ * After consent: an anonymous visitor id, and page views, engaged reading (45s active), deep scroll (75%),
+ * demo/contact/trial clicks, resource views, PDF downloads (by file) and lead-form views, batched to /api/track.
+ * Adds a hidden "markhub_visitor_id" field to every form, so the WordPress plugin can link the submission to the
+ * visitor's browsing. ?solix_internal=1 marks this browser as Solix staff (kept out of every metric).
+ *
+ * Optional settings, before this script loads: window.markhubConfig = { api: "https://...", ownBanner: false }
  */
 (function () {
   "use strict";
@@ -47,11 +44,37 @@
   }
 
   // --- consent --------------------------------------------------------------------------------------------------
+  // www.solix.com already asks through its CookieYes banner: MarkHub follows that choice (the "Analytics" category)
+  // and shows nothing of its own. Its own banner below is only for a site without a consent tool, and only when
+  // markhubConfig.ownBanner is true.
   var gpc = navigator.globalPrivacyControl === true;
-  function consent() { return get("localStorage", CONSENT_KEY) || (gpc ? "essential" : null); }
+  var cmp = null; // "cookieyes" once detected
+
+  function cookieYes() {
+    try {
+      if (typeof window.getCkyConsent === "function") {
+        var c = window.getCkyConsent();
+        if (c && c.categories) return { done: !!c.isUserActionCompleted, analytics: c.categories.analytics === true };
+      }
+    } catch (e) { /* fall through to the cookie */ }
+    var m = document.cookie.match(/(?:^|;\s*)cookieyes-consent=([^;]*)/);
+    if (!m) return null;
+    var v = decodeURIComponent(m[1]);
+    return { done: /action:yes/.test(v), analytics: /analytics:yes/.test(v) };
+  }
+
+  function consent() {
+    if (cmp === "cookieyes") {
+      var c = cookieYes();
+      if (!c) return null;
+      return c.analytics ? "all" : c.done ? "essential" : null;
+    }
+    return get("localStorage", CONSENT_KEY) || (gpc ? "essential" : null);
+  }
   function granted() { return consent() === "all"; }
 
   function announce(value) {
+    if (cmp) return; // the consent tool updates Google Consent Mode and GTM itself
     var analytics = value === "all" ? "granted" : "denied";
     window.dataLayer = window.dataLayer || [];
     window.dataLayer.push({ event: "markhub_consent", analytics: analytics });
@@ -159,9 +182,9 @@
     if (queue.length) flush(beacon);
   }
 
-  function track(type, meta) {
+  function track(type, meta, path) {
     if (!granted()) return;
-    var ev = { type: type, path: location.pathname };
+    var ev = { type: type, path: path || location.pathname };
     if (meta) ev.meta = meta;
     queue.push(ev);
     if (!timer) timer = setTimeout(function () { timer = null; flush(true); }, FLUSH_MS);
@@ -224,6 +247,8 @@
     }, { passive: true });
   }
 
+  var wired = false;
+
   function start() {
     if (started || !granted()) return;
     started = true;
@@ -231,21 +256,62 @@
     if (session.fresh) track("session_start");
     track(/^\/resources\//.test(location.pathname) ? "resource_view" : "page_view", { title: (document.title || "").slice(0, 150) });
     stampForms();
+    if (wired) return; // consent withdrawn and given again: the listeners below are already in place
+    wired = true;
     watchForms();
     watchReading();
-    document.addEventListener("submit", stampForms, true);
+    document.addEventListener("submit", function () { if (started) stampForms(); }, true);
     document.addEventListener("click", function (e) {
       var a = e.target && e.target.closest ? e.target.closest("a[href]") : null;
       if (!a) return;
       var href = a.getAttribute("href") || "";
       if (CTA_RX.test(href)) track("cta_click", { cta: (a.textContent || "").trim().slice(0, 60), to: href.slice(0, 150) });
-      else if (/\.pdf(\?|$)/i.test(href)) track("resource_download", { file: href.slice(0, 150) });
+      else if (/\.pdf(\?|#|$)/i.test(href)) {
+        // The file's own path (/documents/<kind>/<slug>.pdf) is what the page map knows the product of.
+        var filePath = "";
+        try { filePath = new URL(href, location.href).pathname; } catch (err) { filePath = ""; }
+        track("resource_download", { file: href.slice(0, 150) }, filePath || undefined);
+      }
     }, true);
     document.addEventListener("visibilitychange", function () { if (document.visibilityState === "hidden") flush(true); });
     window.addEventListener("pagehide", function () { flush(true); });
   }
 
+  function stop() {
+    started = false;
+    queue = [];
+    del("localStorage", VID_KEY);
+    del("sessionStorage", SESSION_KEY);
+    var inputs = document.querySelectorAll('input[name="markhub_visitor_id"]');
+    for (var i = 0; i < inputs.length; i++) inputs[i].parentNode.removeChild(inputs[i]);
+  }
+
+  function useCookieYes() {
+    cmp = "cookieyes";
+    // Accept / Reject / Customise in the CookieYes banner, now or later in the session.
+    document.addEventListener("cookieyes_consent_update", function (e) {
+      var accepted = (e && e.detail && e.detail.accepted) || [];
+      if (accepted.indexOf("analytics") !== -1) start();
+      else stop();
+    });
+    if (granted()) start();
+  }
+
   function boot() {
+    if (cfg.ownBanner !== true) {
+      // CookieYes loads asynchronously: its cookie or API is usually there at once, otherwise wait for it.
+      if (cookieYes() || typeof window.getCkyConsent === "function") { useCookieYes(); return; }
+      var tries = 0;
+      var wait = setInterval(function () {
+        tries++;
+        if (cookieYes() || typeof window.getCkyConsent === "function" || tries > 40) {
+          clearInterval(wait);
+          useCookieYes(); // no consent tool after 10s: nothing is tracked (granted() stays false)
+        }
+      }, 250);
+      document.addEventListener("cookieyes_banner_load", function () { if (!cmp) { clearInterval(wait); useCookieYes(); } });
+      return;
+    }
     var c = consent();
     if (c) announce(c);
     if (c === "all") start();
@@ -254,7 +320,10 @@
 
   window.markhub = {
     loaded: true,
-    openConsent: showBanner,
+    openConsent: function () {
+      if (cmp === "cookieyes" && typeof window.revisitCkyConsent === "function") window.revisitCkyConsent();
+      else showBanner();
+    },
     consent: consent,
     visitorId: visitorId,
     track: track,

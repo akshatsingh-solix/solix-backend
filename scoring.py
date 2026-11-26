@@ -138,7 +138,21 @@ def _norm_path(path: str) -> str:
 
 
 def topics_for_path(path: str) -> list[str]:
-    """Server-side mapping of site paths to products (authoritative for page views)."""
+    """Server-side mapping of site paths to products (authoritative for page views): the address rules below, then
+    the reviewed www.solix.com page map (site_map.py) for every other solix.com page and file."""
+    topics = rule_topics(path)
+    if topics:
+        return topics
+    try:
+        import site_map
+        entry = site_map.lookup(path)
+    except Exception:  # noqa: BLE001 - a missing or broken map never stops scoring
+        entry = None
+    return [p for p in (entry or {}).get("products", []) if p in PRODUCTS]
+
+
+def rule_topics(path: str) -> list[str]:
+    """Products from the address alone (product pages and their solix.com aliases)."""
     path = _norm_path(path)
     if path in SOLIXCOM_PATHS:
         return list(SOLIXCOM_PATHS[path])
@@ -155,6 +169,19 @@ def topics_for_path(path: str) -> list[str]:
 
 
 def industry_for_path(path: str) -> Optional[str]:
+    found = rule_industry(path)
+    if found:
+        return found
+    try:
+        import site_map
+        entry = site_map.lookup(path)
+    except Exception:  # noqa: BLE001
+        entry = None
+    ind = (entry or {}).get("industry")
+    return ind if ind in INDUSTRIES else None
+
+
+def rule_industry(path: str) -> Optional[str]:
     path = _norm_path(path)
     if path in SOLIXCOM_INDUSTRIES:
         return SOLIXCOM_INDUSTRIES[path]
