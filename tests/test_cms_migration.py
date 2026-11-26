@@ -181,7 +181,9 @@ def test_builtin_article_gets_a_reopen_link_and_settings_apply(client, outbox):
     client.put("/api/admin/delivery", json={"enabled": False, "subject": "x {title}", "message": "Your file.", "attach": True, "attach_max_mb": 5, "link_days": 7}, headers=h)
     client.post("/api/submissions", json={"type": "download", "email": "li2@corp.com", "resource_slug": "archive-first-fastest-path-to-s4hana"})
     log = _deliveries(client, h, 2)
-    assert log[0]["status"] == "skipped" and len(outbox) == 1
+    # By address, not position: two deliveries logged in the same clock tick have no defined order.
+    second = next(d for d in log if d["email"] == "li2@corp.com")
+    assert second["status"] == "skipped" and len(outbox) == 1
     # Other form types never trigger a delivery.
     client.post("/api/submissions", json={"type": "demo", "email": "x@corp.com"})
     time.sleep(0.2)

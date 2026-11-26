@@ -149,12 +149,17 @@ def _price(ticket: dict, promo: Optional[dict]) -> dict:
     return {"price": base, "discount": discount, "total": max(0, base - discount), "currency": ticket.get("currency") or "USD"}
 
 
+def _now() -> datetime:
+    """The current time; tests pin it so ticket sale windows don't expire with the calendar."""
+    return datetime.now(timezone.utc)
+
+
 def _sales_ended(ticket: dict) -> bool:
     end = ticket.get("sales_end_at")
     if not end:
         return False
     try:
-        return datetime.now(timezone.utc) > datetime.fromisoformat(end)
+        return _now() > datetime.fromisoformat(end)
     except ValueError:
         return False
 

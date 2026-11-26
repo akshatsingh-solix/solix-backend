@@ -175,10 +175,27 @@ def _client_ip(request: Request) -> str:
     return _cip.client_ip(request)
 
 
+_last_message_at = None
+
+
+def _message_time() -> str:
+    """created_at for a chat message, strictly after the previous one this process saved. History is read back sorted
+    by it, and a visitor's message and Sol's reply can land in the same clock tick (about 15 ms on Windows), which made
+    their order, and so "what did Sol say last", arbitrary."""
+    from datetime import datetime, timedelta, timezone
+    global _last_message_at
+    now = datetime.now(timezone.utc)
+    if _last_message_at is not None and now <= _last_message_at:
+        now = _last_message_at + timedelta(microseconds=1)
+    _last_message_at = now
+    return now.isoformat(timespec="microseconds")
+
+
 async def save_message(session_id: str, role: str, content: str, **meta) -> None:
     if internal_traffic.session_internal(session_id):  # staff chatting with Sol: kept out of chat metrics
         meta["internal"] = True
-    await db.chat_messages.insert_one({"id": str(uuid.uuid4()), "session_id": session_id, "role": role, "content": content, "created_at": now_iso(), **meta})
+    await db.chat_messages.insert_one({"id": str(uuid.uuid4()), "session_id": session_id, "role": role, "content": content,
+                                       "created_at": _message_time(), **meta})
 
 
 def sse(data: dict) -> str:

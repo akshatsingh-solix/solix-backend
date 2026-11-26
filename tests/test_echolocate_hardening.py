@@ -118,6 +118,19 @@ def test_a_bounce_marks_only_the_email_that_bounced(client):
     assert [bool(r.get("bounced")) for r in rows] == [False, True]
 
 
+def test_a_bounce_in_a_timestamp_tie_goes_to_the_later_step(client):
+    # Two sends recorded in the same clock tick: the later step is the email that was sent last.
+    same = "2026-11-28T12:00:00+00:00"
+    base = {"enrollment_id": "h-tie", "contact_id": "h-inst-c", "status": "delivered", "sent_at": same, "provider": "instantly"}
+    run(db().sends.delete_many({"enrollment_id": "h-tie"}))
+    run(db().sends.update_many({"contact_id": "h-inst-c"}, {"$set": {"sent_at": "2000-01-01T00:00:00+00:00"}}))  # older sends stay out of it
+    run(db().sends.insert_many([{**base, "id": "h-tie-2", "step": 2}, {**base, "id": "h-tie-1", "step": 1}]))  # inserted out of order on purpose
+    client.post("/api/outbound/webhooks/instantly", json={"event_type": "email_bounced", "lead_email": "inst@initech.example", "timestamp": "2026-11-29T10:00:00Z"}, headers=HOOK)
+    rows = sorted(run(db().sends.find({"enrollment_id": "h-tie"}).to_list(10)), key=lambda r: r["step"])
+    assert [bool(r.get("bounced")) for r in rows] == [False, True]
+    run(db().sends.delete_many({"enrollment_id": "h-tie"}))
+
+
 def test_instantly_label_after_our_classification_doesnt_act_twice(client, monkeypatch):
     monkeypatch.setattr(outbound, "verify_email", _valid)
     run(db().contacts.insert_one({"id": "h-rep-c", "email": "rep@initech.example", "name": "Re Ply"}))

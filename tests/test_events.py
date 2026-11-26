@@ -21,7 +21,11 @@ SLUG = "empower-2026"
 
 
 @pytest.fixture()
-def client():
+def client(monkeypatch):
+    # The seeded event is the real SOLIXEmpower 2026 (28-30 Oct 2026): pin the clock before its ticket sales close,
+    # so these tests don't start failing once that date has passed.
+    from datetime import datetime, timezone
+    monkeypatch.setattr(events, "_now", lambda: datetime(2026, 10, 1, tzinfo=timezone.utc))
     mock = AsyncMongoMockClient()["solix_test"]
     previous = {m: getattr(m, "db", None) for m in MODULES}
     previous_database = database.db
