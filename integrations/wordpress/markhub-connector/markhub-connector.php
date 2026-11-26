@@ -1,22 +1,27 @@
 <?php
 /**
  * Plugin Name:       MarkHub Connector
- * Description:       Sends www.solix.com form submissions (request a demo, contact sales, gated downloads) to MarkHub, server to server, so every lead lands in the MarkHub inbox, gets scored and is linked to the visitor's browsing.
- * Version:           1.0.0
+ * Description:       Sends www.solix.com form submissions (demo, contact sales, trials, gated downloads, partner, newsletter) to MarkHub, server to server, so every lead lands in the MarkHub inbox, gets scored and is linked to the visitor's browsing.
+ * Version:           1.1.0
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * Author:            Solix Technologies
  * License:           Proprietary
  *
  * How it works
- * - Runs after WordPress (the theme's own form handler) has processed a POST, so the site's existing emails and
- *   CRM hand-offs keep working unchanged. Only POSTs whose fields match a known form are forwarded; anything else
- *   (logins, comments, search) is ignored.
- * - The MarkHub tag (loaded through Google Tag Manager) adds a hidden "markhub_visitor_id" field to forms once the
- *   visitor has accepted analytics cookies; it is passed on so MarkHub can link the lead to their browsing.
- * - If MarkHub can't be reached, the lead is queued and retried every five minutes (wp-cron), so a slow or sleeping
- *   API never loses one. Settings > MarkHub shows the last forwards and lets you test the connection.
- * - Other forms can be added with the "markhub_connector_forms" filter (see markhub_connector_forms()).
+ * - solix.com's forms reach the server two ways, and both are covered:
+ *   1. Full-page posts back to the page (request a demo, gated white papers): fields at the top level of $_POST.
+ *   2. jQuery AJAX posts to the theme's templates/ajax-*.php handlers (contact sales, ECS demo, free trials,
+ *      partner, newsletter): fields nested under one key, e.g. contact_us[cts_email].
+ *   For (2) the handler must load WordPress (require wp-load.php) for this plugin to run. If one doesn't, add one
+ *   line after its successful save:  do_action('markhub_capture', 'contact-sales', $fields);
+ * - It runs after the site's own handler, so the site's emails and the Digiprise hand-off are unchanged. Only
+ *   submissions the handler accepted are forwarded: an HTTP error, or an AJAX reply of {"result": 0}, is skipped.
+ * - The MarkHub tag adds a hidden "markhub_visitor_id" field to forms once the visitor has accepted analytics cookies
+ *   in the CookieYes banner; it is passed on so MarkHub can link the lead to their browsing.
+ * - If MarkHub can't be reached, the lead is queued and retried every five minutes (wp-cron) for a week.
+ *   Settings > MarkHub shows the last forwards and tests the connection.
+ * - More forms: the "markhub_connector_forms" filter (see markhub_connector_forms()).
  */
 
 if (!defined('ABSPATH')) {
@@ -35,19 +40,67 @@ function markhub_connector_settings()
 {
     $o = get_option(MARKHUB_OPT, array());
     return array(
-        'api' => rtrim(defined('MARKHUB_API_URL') ? MARKHUB_API_URL : (isset($o['api']) ? $o['api'] : 'https://solix-backend-mf5w.onrender.com'), '/'),
+        'api' => rtrim(defined('MARKHUB_API_URL') ? MARKHUB_API_URL : (isset($o['api']) ? $o['api'] : ''), '/'),
         'key' => defined('MARKHUB_INTAKE_KEY') ? MARKHUB_INTAKE_KEY : (isset($o['key']) ? $o['key'] : ''),
         'enabled' => defined('MARKHUB_ENABLED') ? (bool) MARKHUB_ENABLED : !empty($o['enabled']),
     );
 }
 
 /**
- * Known forms on www.solix.com. Each entry: the field that identifies it ("detect"), the MarkHub submission type, and
- * a map of MarkHub field => WordPress field name (or a list of names, joined with a space, e.g. first + last name).
+ * Known forms on www.solix.com (field names read from the live site, November 2026). Each entry:
+ * - wrap:   the POST key holding the fields, for the AJAX handlers (absent for full-page forms)
+ * - detect: a field that must be present
+ * - type:   the MarkHub submission type
+ * - map:    MarkHub field => WordPress field name(s), or "auto" to find email/name/company/phone by field name
+ * - interest: a fixed product interest for forms that belong to one product
+ * AJAX forms come first: their wrapper key is the surest signal.
  */
 function markhub_connector_forms()
 {
     $forms = array(
+        'contact-sales' => array(
+            'wrap' => 'contact_us',
+            'detect' => 'cts_email',
+            'type' => 'contact',
+            'map' => array(
+                'email' => 'cts_email',
+                'name' => array('cts_first_name', 'cts_last_name'),
+                'company' => 'cts_company_name',
+                'phone' => 'cts_phone',
+                'interest' => array('cts_interest', 'cts_enquiry'),
+                'message' => 'cts_message',
+            ),
+        ),
+        'ecs-demo' => array(
+            'wrap' => 'ecs_finance_demo',
+            'detect' => 'new_email',
+            'type' => 'demo',
+            'interest' => 'Enterprise Content Services',
+            'map' => array(
+                'email' => 'new_email',
+                'name' => array('first_name', 'last_name'),
+                'company' => 'company_name',
+                'phone' => 'user_phone',
+                'country' => 'user_country',
+                'job_title' => 'job_title',
+            ),
+        ),
+        'cdp-trial' => array(
+            'wrap' => 'cdp_demo_getStarted',
+            'detect' => 'new_email',
+            'type' => 'trial',
+            'interest' => 'Common Data Platform',
+            'map' => array('email' => 'new_email'),
+        ),
+        'ecs-trial' => array(
+            'wrap' => 'ecs_finance_getStarted',
+            'detect' => 'new_email',
+            'type' => 'trial',
+            'interest' => 'Enterprise Content Services',
+            'map' => array('email' => 'new_email'),
+        ),
+        'partner' => array('wrap' => 'partnerForm', 'type' => 'partner', 'map' => 'auto'),
+        'newsletter' => array('wrap' => 'newsletterHomeForm', 'type' => 'newsletter', 'map' => 'auto'),
         'request-demo' => array(
             'detect' => 'demo_email',
             'type' => 'demo',
@@ -58,18 +111,6 @@ function markhub_connector_forms()
                 'job_title' => 'demo_jobtitle',
                 'message' => 'reg_message',
                 'interest' => 'reg_solution_name',
-            ),
-        ),
-        'contact-sales' => array(
-            'detect' => 'cts_email',
-            'type' => 'contact',
-            'map' => array(
-                'email' => 'cts_email',
-                'name' => array('cts_first_name', 'cts_last_name'),
-                'company' => 'cts_company_name',
-                'phone' => 'cts_phone',
-                'interest' => array('cts_interest', 'cts_enquiry'),
-                'message' => 'cts_message',
             ),
         ),
         'contact-question' => array(
@@ -99,21 +140,74 @@ function markhub_connector_forms()
     return apply_filters('markhub_connector_forms', $forms);
 }
 
-/** Which known form this POST is, or null. */
+/** For forms built in JavaScript: the first field whose name says email and that holds an address. */
+function markhub_connector_auto_email(array $src)
+{
+    foreach ($src as $k => $v) {
+        if (is_string($k) && is_scalar($v) && stripos($k, 'mail') !== false && is_email(trim((string) $v))) {
+            return $k;
+        }
+    }
+    return null;
+}
+
+function markhub_connector_auto_map(array $src)
+{
+    $map = array('email' => markhub_connector_auto_email($src));
+    $first = $last = $full = null;
+    foreach (array_keys($src) as $k) {
+        if (!is_string($k)) {
+            continue;
+        }
+        $l = strtolower($k);
+        if ($first === null && preg_match('/first_?name|fname/', $l)) {
+            $first = $k;
+        } elseif ($last === null && preg_match('/last_?name|lname|surname/', $l)) {
+            $last = $k;
+        } elseif ($full === null && preg_match('/(^|_)name$|full_?name/', $l)) {
+            $full = $k;
+        } elseif (!isset($map['company']) && preg_match('/company|organi[sz]ation|business/', $l)) {
+            $map['company'] = $k;
+        } elseif (!isset($map['phone']) && preg_match('/phone|mobile|tel/', $l)) {
+            $map['phone'] = $k;
+        } elseif (!isset($map['job_title']) && preg_match('/title|designation|role/', $l)) {
+            $map['job_title'] = $k;
+        } elseif (!isset($map['country']) && strpos($l, 'country') !== false) {
+            $map['country'] = $k;
+        } elseif (!isset($map['message']) && preg_match('/message|msg|comment/', $l)) {
+            $map['message'] = $k;
+        }
+    }
+    $map['name'] = ($first || $last) ? array_values(array_filter(array($first, $last))) : $full;
+    return array_filter($map);
+}
+
+/** Which known form this POST is: array(form id, its fields), or null. */
 function markhub_connector_match(array $post)
 {
     foreach (markhub_connector_forms() as $id => $form) {
-        if (empty($post[$form['detect']])) {
+        if (!empty($form['wrap'])) {
+            if (empty($post[$form['wrap']]) || !is_array($post[$form['wrap']])) {
+                continue;
+            }
+            $src = $post[$form['wrap']];
+        } else {
+            $src = $post;
+        }
+        if (!empty($form['detect']) && empty($src[$form['detect']])) {
+            continue;
+        }
+        if ($form['map'] === 'auto' && markhub_connector_auto_email($src) === null) {
             continue;
         }
         if (!empty($form['requires'])) {
             foreach ($form['requires'] as $f) {
-                if (empty($post[$f])) {
+                if (empty($src[$f])) {
                     continue 2;
                 }
             }
         }
-        return $id;
+        return array($id, $src);
     }
     return null;
 }
@@ -123,7 +217,7 @@ function markhub_connector_field(array $post, $names, $max = 500)
     $parts = array();
     foreach ((array) $names as $n) {
         if (isset($post[$n]) && is_scalar($post[$n])) {
-            $v = trim(sanitize_text_field(wp_unslash((string) $post[$n])));
+            $v = trim(sanitize_text_field((string) $post[$n]));
             if ($v !== '') {
                 $parts[] = $v;
             }
@@ -133,15 +227,19 @@ function markhub_connector_field(array $post, $names, $max = 500)
     return $v === '' ? null : mb_substr($v, 0, $max);
 }
 
-/** The MarkHub payload for this POST, or null when it isn't a lead form we know. */
-function markhub_connector_payload(array $post, $form_id)
+/** The MarkHub payload for one form's fields, or null when there is no usable email. */
+function markhub_connector_payload(array $fields, $form_id)
 {
     $forms = markhub_connector_forms();
     $form = $forms[$form_id];
     $limits = array('message' => 5000, 'country' => 80, 'interest' => 300);
     $p = array('type' => $form['type'], 'form' => $form_id);
-    foreach ($form['map'] as $to => $from) {
-        $v = markhub_connector_field($post, $from, isset($limits[$to]) ? $limits[$to] : 300);
+    if (!empty($form['interest'])) {
+        $p['interest'] = $form['interest'];
+    }
+    $map = $form['map'] === 'auto' ? markhub_connector_auto_map($fields) : $form['map'];
+    foreach ($map as $to => $from) {
+        $v = markhub_connector_field($fields, $from, isset($limits[$to]) ? $limits[$to] : 300);
         if ($v !== null) {
             $p[$to] = $v;
         }
@@ -152,19 +250,29 @@ function markhub_connector_payload(array $post, $form_id)
     $scheme = is_ssl() ? 'https://' : 'http://';
     $host = isset($_SERVER['HTTP_HOST']) ? sanitize_text_field(wp_unslash($_SERVER['HTTP_HOST'])) : parse_url(home_url(), PHP_URL_HOST);
     $uri = isset($_SERVER['REQUEST_URI']) ? esc_url_raw(wp_unslash($_SERVER['REQUEST_URI'])) : '/';
-    // Forms posted through admin-ajax.php: the page they were on is the referer.
-    $page = (strpos($uri, 'admin-ajax.php') !== false && wp_get_referer()) ? wp_get_referer() : $scheme . $host . $uri;
+    // AJAX forms post to admin-ajax.php or the theme's templates/ajax-*.php: the page they were on is the form's own
+    // page_url field, else the referer.
+    $ajax = strpos($uri, 'admin-ajax.php') !== false || strpos($uri, '/wp-content/') !== false;
+    $referer = isset($_SERVER['HTTP_REFERER']) ? esc_url_raw(wp_unslash($_SERVER['HTTP_REFERER'])) : '';
+    $given = markhub_connector_field($fields, 'page_url', 300);
+    if ($ajax) {
+        $page = ($given && strpos($given, 'http') === 0) ? $given : ($referer !== '' ? $referer : $scheme . $host . $uri);
+    } else {
+        $page = $scheme . $host . $uri;
+    }
     $p['source_page'] = mb_substr(strtok($page, '?'), 0, 300);
     if ($form['type'] === 'download') {
         $path = trim((string) parse_url($p['source_page'], PHP_URL_PATH), '/');
         $slug = $path === '' ? '' : basename($path);
-        $p['resource_slug'] = $slug !== '' ? mb_substr(sanitize_title($slug), 0, 120) : null;
-        $title = $slug !== '' ? ucwords(str_replace('-', ' ', $slug)) : '';
-        if ($title !== '') {
-            $p['resource'] = mb_substr($title, 0, 300);
+        if ($slug !== '') {
+            $p['resource_slug'] = mb_substr(sanitize_title($slug), 0, 120);
+            $p['resource'] = mb_substr(ucwords(str_replace('-', ' ', $slug)), 0, 300);
         }
     }
-    $vid = markhub_connector_field($post, 'markhub_visitor_id', 64);
+    $vid = markhub_connector_field($fields, 'markhub_visitor_id', 64);
+    if (!$vid && isset($_POST['markhub_visitor_id'])) { // phpcs:ignore WordPress.Security.NonceVerification
+        $vid = markhub_connector_field(wp_unslash($_POST), 'markhub_visitor_id', 64);
+    }
     if ($vid && preg_match('/^[A-Za-z0-9_-]{8,64}$/', $vid)) {
         $p['visitor_id'] = $vid;
     }
@@ -172,7 +280,7 @@ function markhub_connector_payload(array $post, $form_id)
     if ($ip !== '') {
         $p['client_ip'] = mb_substr($ip, 0, 64);
     }
-    return apply_filters('markhub_connector_payload', array_filter($p, function ($v) { return $v !== null && $v !== ''; }), $form_id, $post);
+    return apply_filters('markhub_connector_payload', array_filter($p, function ($v) { return $v !== null && $v !== ''; }), $form_id, $fields);
 }
 
 /** POST one lead to MarkHub. Returns true on success, or an error string. */
@@ -224,24 +332,35 @@ function markhub_connector_enqueue(array $payload)
     }
 }
 
-// --- capture: after the theme has handled the POST ----------------------------------------------------------------
+// --- capture: after the site's own handler has run ----------------------------------------------------------------
 
 $GLOBALS['markhub_connector_pending'] = null;
+$GLOBALS['markhub_connector_output'] = '';
 
 add_action('init', function () {
-    if (empty($_SERVER['REQUEST_METHOD']) || $_SERVER['REQUEST_METHOD'] !== 'POST' || empty($_POST) || is_admin() && !wp_doing_ajax()) {
+    if (empty($_SERVER['REQUEST_METHOD']) || $_SERVER['REQUEST_METHOD'] !== 'POST' || empty($_POST) || (is_admin() && !wp_doing_ajax())) {
         return;
     }
+    $match = markhub_connector_match(wp_unslash($_POST)); // phpcs:ignore WordPress.Security.NonceVerification -- read-only; the theme verifies its own forms
+    if ($match === null) {
+        return;
+    }
+    markhub_connector_queue_capture($match[0], $match[1]);
+}, 0);
+
+/**
+ * Remember one submission to forward at shutdown (deduplicated). Also the entry point for theme handlers that run
+ * without WordPress hooks: after a successful save they can call
+ *   do_action('markhub_capture', 'contact-sales', $fields);
+ */
+function markhub_connector_queue_capture($form, array $fields)
+{
     $s = markhub_connector_settings();
-    if (!$s['enabled']) {
+    $forms = markhub_connector_forms();
+    if (!$s['enabled'] || !isset($forms[$form])) {
         return;
     }
-    $post = $_POST; // phpcs:ignore WordPress.Security.NonceVerification -- read-only copy; the theme verifies its own forms
-    $form = markhub_connector_match($post);
-    if ($form === null) {
-        return;
-    }
-    $payload = markhub_connector_payload($post, $form);
+    $payload = markhub_connector_payload($fields, $form);
     if ($payload === null) {
         return;
     }
@@ -252,24 +371,45 @@ add_action('init', function () {
     }
     set_transient($dedupe, 1, 2 * MINUTE_IN_SECONDS);
     $GLOBALS['markhub_connector_pending'] = $payload;
-}, 0);
+    // The theme's AJAX handlers answer {"result": 1, ...}: keep a copy of the answer so only successes are forwarded.
+    $GLOBALS['markhub_connector_output'] = '';
+    ob_start(function ($buffer) {
+        $GLOBALS['markhub_connector_output'] .= $buffer;
+        return $buffer;
+    });
+}
+
+add_action('markhub_capture', function ($form, $fields = array()) {
+    markhub_connector_queue_capture((string) $form, is_array($fields) ? $fields : array());
+}, 10, 2);
 
 add_action('shutdown', function () {
     $payload = $GLOBALS['markhub_connector_pending'];
     if (!$payload) {
         return;
     }
-    // The theme rejected it (validation, captcha): nothing to forward.
+    // The site rejected it (validation, captcha): nothing to forward.
     $code = function_exists('http_response_code') ? (int) http_response_code() : 200;
     if ($code >= 400) {
         return;
     }
+    $reply = json_decode(trim((string) $GLOBALS['markhub_connector_output']), true);
+    if (is_array($reply) && array_key_exists('result', $reply) && empty($reply['result'])) {
+        return; // an AJAX handler said no: not a lead
+    }
     // Finish the visitor's response first, so they never wait on MarkHub.
+    while (ob_get_level() > 0) {
+        ob_end_flush();
+    }
     if (function_exists('fastcgi_finish_request')) {
         fastcgi_finish_request();
         $result = markhub_connector_send($payload, 8);
+    } elseif (function_exists('litespeed_finish_request')) {
+        litespeed_finish_request();
+        $result = markhub_connector_send($payload, 8);
     } else {
-        $result = markhub_connector_send($payload, 3);
+        // mod_php can't close the connection early: don't make the visitor wait, queue it for wp-cron instead.
+        $result = 'deferred';
     }
     if ($result !== true) {
         markhub_connector_enqueue($payload);
@@ -301,11 +441,11 @@ function markhub_connector_retry()
         }
         $result = markhub_connector_send($item['payload'], 15);
         if ($result === true) {
-            markhub_connector_log($item['payload']['form'], $item['payload']['email'], 'sent (retry)');
+            markhub_connector_log($item['payload']['form'], $item['payload']['email'], 'sent (queued)');
             continue;
         }
         $item['tries']++;
-        // Keep trying for a week; after that the lead is still in the site's own records, but the log says so.
+        // Keep trying for a week; the lead is safe in the site's own records and Digiprise either way.
         if (time() - $item['since'] < 7 * DAY_IN_SECONDS) {
             $left[] = $item;
         } else {
@@ -351,7 +491,7 @@ add_action('admin_post_markhub_connector_test', function () {
     $s = markhub_connector_settings();
     // An empty body: a valid key gets 422 (missing fields), a wrong key 401. Nothing is created either way.
     $r = wp_remote_post($s['api'] . '/api/integrations/wordpress/submissions', array(
-        'timeout' => 60, // a sleeping free-tier API can take most of a minute to wake
+        'timeout' => 60,
         'headers' => array('Content-Type' => 'application/json', 'X-MarkHub-Key' => $s['key']),
         'body' => '{}',
     ));
@@ -390,17 +530,17 @@ function markhub_connector_page()
     <div class="wrap">
         <h1>MarkHub</h1>
         <?php if ($notice) : ?><div class="notice notice-info"><p><?php echo esc_html($notice); ?></p></div><?php endif; ?>
-        <p>Sends request-a-demo, contact-sales and gated-download submissions to MarkHub. The site's own handling of
-            those forms is unchanged.</p>
+        <p>Copies demo, contact, trial, gated-download, partner and newsletter submissions to MarkHub. The site's own
+            handling of those forms, its emails and the Digiprise hand-off are unchanged.</p>
         <form method="post" action="options.php">
             <?php settings_fields('markhub_connector'); ?>
             <table class="form-table" role="presentation">
                 <tr><th scope="row"><label for="mh-api">MarkHub API address</label></th>
-                    <td><input id="mh-api" class="regular-text" name="<?php echo esc_attr(MARKHUB_OPT); ?>[api]" value="<?php echo esc_attr($s['api']); ?>" <?php disabled(defined('MARKHUB_API_URL')); ?>></td></tr>
+                    <td><input id="mh-api" class="regular-text" placeholder="https://markhub-api.solix.com" name="<?php echo esc_attr(MARKHUB_OPT); ?>[api]" value="<?php echo esc_attr($s['api']); ?>" <?php disabled(defined('MARKHUB_API_URL')); ?>></td></tr>
                 <tr><th scope="row"><label for="mh-key">Intake key</label></th>
                     <td><input id="mh-key" class="regular-text" type="password" autocomplete="new-password" name="<?php echo esc_attr(MARKHUB_OPT); ?>[key]"
                                placeholder="<?php echo $s['key'] ? esc_attr__('Saved (leave empty to keep)') : ''; ?>" <?php disabled(defined('MARKHUB_INTAKE_KEY')); ?>>
-                        <p class="description">The value of WP_INTAKE_SECRET in MarkHub's environment (Render).</p></td></tr>
+                        <p class="description">The value of WP_INTAKE_SECRET in MarkHub's environment.</p></td></tr>
                 <tr><th scope="row">Forward submissions</th>
                     <td><label><input type="checkbox" name="<?php echo esc_attr(MARKHUB_OPT); ?>[enabled]" value="1" <?php checked(!empty($o['enabled']) || (defined('MARKHUB_ENABLED') && MARKHUB_ENABLED)); ?>> On</label></td></tr>
             </table>
@@ -413,7 +553,7 @@ function markhub_connector_page()
         <?php if ($queue) : ?>
             <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline;margin-left:8px">
                 <input type="hidden" name="action" value="markhub_connector_flush"><?php wp_nonce_field('markhub_connector_flush'); ?>
-                <?php submit_button(sprintf('Retry %d queued now', count($queue)), 'secondary', 'submit', false); ?>
+                <?php submit_button(sprintf('Send %d queued now', count($queue)), 'secondary', 'submit', false); ?>
             </form>
         <?php endif; ?>
         <h2>Recent forwards</h2>

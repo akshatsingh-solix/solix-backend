@@ -198,3 +198,57 @@ def test_sync_status_is_for_staff(app, monkeypatch):
     r = admin.get("/api/admin/sol/site-knowledge")
     assert r.status_code == 200 and r.json()["sites"] == [SITE]
     assert TestClient(admin.app).get("/api/admin/sol/site-knowledge").status_code == 401
+
+
+# --- page and asset map -------------------------------------------------------------------------------------------
+
+def test_page_map_covers_pages_gated_twins_and_files():
+    import scoring
+    import site_map
+    assert site_map.lookup("") is None and site_map.lookup("/no/such/page/") is None
+    open_page = site_map.lookup("https://www.solix.com/resources/datasheets/data-ask/")
+    assert open_page and open_page["products"][0] == "data-ask" and open_page["type"] == "datasheet" and open_page["stage"] == "decision"
+    assert site_map.lookup("/resources/lg/datasheets/data-ask/")["products"][0] == "data-ask"  # the form page
+    assert scoring.topics_for_path("/documents/datasheets/data-ask.pdf")[0] == "data-ask"  # the file itself
+    assert scoring.topics_for_path("/kb/hipaa/") and scoring.industry_for_path("/kb/hipaa/") == "healthcare"
+    # Address rules still win over the map.
+    assert scoring.topics_for_path("/products/application-retirement-solution/") == ["application-retirement"]
+
+
+def test_classify_and_free_text():
+    import site_map
+    c = site_map.classify("https://www.solix.com/resources/white-papers/sap-archiving-guide/", "Archive-first SAP S/4HANA migration")
+    assert c["type"] == "white-paper" and c["stage"] == "consideration" and c["products"][0] == "sap-archiving" and "archiving" in c["lines"]
+    assert site_map.products_for_text("Solix ECS for Accounts Payable") == ["enterprise-content-services"]
+    assert site_map.lead_topics("", "", "data-ask")[0] == "data-ask"
+
+
+def test_solixcom_lead_gets_its_product_line_from_the_page(app, wp):
+    _, db = app
+    r = wp.post(URL, headers={"X-MarkHub-Key": KEY}, json={
+        "type": "download", "form": "gated-download", "email": "ria.patel@example.org",
+        "source_page": "https://www.solix.com/resources/lg/datasheets/data-ask/", "resource_slug": "data-ask"})
+    assert r.status_code == 201, r.text
+    lead = run(db.leads.find_one({"email": "ria.patel@example.org"}))
+    assert (lead.get("product_scores") or {}).get("data-ask", 0) > 0
+
+
+# --- client address behind AWS CloudFront ----------------------------------------------------------------------------
+
+def test_cloudfront_viewer_address_loses_its_port(monkeypatch):
+    import client_ip
+    from starlette.requests import Request
+    monkeypatch.setenv("CLIENT_IP_HEADER", "CloudFront-Viewer-Address")
+
+    def req(value):
+        return Request({"type": "http", "headers": [(b"cloudfront-viewer-address", value.encode())], "client": ("10.0.0.1", 1), "method": "GET", "path": "/"})
+
+    assert client_ip.client_ip(req("198.51.100.7:46532")) == "198.51.100.7"
+    assert client_ip.client_ip(req("2001:db8::1:46532")) == "2001:db8::1"
+    assert client_ip.client_ip(req("2001:db8::4:443")) == "2001:db8::4"  # looks like an address, but the port is there
+    monkeypatch.setenv("CLIENT_IP_HEADER", "X-Real-IP")  # other headers: only an unmistakable port is removed
+
+    def real(value):
+        return Request({"type": "http", "headers": [(b"x-real-ip", value.encode())], "client": ("10.0.0.1", 1), "method": "GET", "path": "/"})
+
+    assert client_ip.client_ip(real("2001:db8::3")) == "2001:db8::3" and client_ip.client_ip(real("203.0.113.9:8080")) == "203.0.113.9"
