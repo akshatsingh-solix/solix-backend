@@ -275,3 +275,23 @@ async def insights(days: int = Query(7, ge=1, le=90), mode: str = Depends(intern
         "learned": await database.db.sol_learned.count_documents({"active": {"$ne": False}}),
         "cached_answers": await database.db.sol_answer_cache.count_documents({}),
     }
+
+
+# --- www.solix.com knowledge (site_knowledge.py) -------------------------------------------------------------------
+
+@router.get("/site-knowledge", dependencies=[readers])
+async def site_knowledge_status():
+    """Which solix.com pages Sol knows, and when they were last synced."""
+    import site_knowledge
+    return await site_knowledge.status()
+
+
+@router.post("/site-knowledge/sync", dependencies=[teachers])
+async def site_knowledge_sync(full: bool = Query(False)):
+    """Fetch new and changed solix.com pages now (full=true refetches everything). Runs in the background."""
+    import asyncio
+    import site_knowledge
+    if not site_knowledge.sites():
+        raise HTTPException(status_code=409, detail="Set SOL_WORDPRESS_SITES (e.g. https://www.solix.com) first")
+    asyncio.create_task(site_knowledge.sync(full=full))
+    return {"status": "started", "full": full}

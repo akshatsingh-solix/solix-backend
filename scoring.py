@@ -103,10 +103,45 @@ def clean_topics(topics: Optional[Iterable[str]]) -> list[str]:
     return out
 
 
+# www.solix.com (WordPress) names some pages differently from MarkHub's product slugs. Paths not listed here and
+# shaped like /products/<slug>/ map directly when the slug is a known product.
+SOLIXCOM_PATHS: Dict[str, list] = {
+    "/products/application-retirement-solution": ["application-retirement"],
+    "/products/enterprise-data-archiving-solution": ["enterprise-archiving"],
+    "/products/data-lake-solution": ["enterprise-data-lake"],
+    "/products/solix-common-data-platform": ["common-data-platform"],
+    "/products/pre-built-akg": ["application-knowledge-graph"],
+    "/solutions/active-archiving": ["active-archiving-compliance"],
+    "/solutions/data-preservation": ["data-preservation"],
+    "/solutions/ma-data-preservation": ["data-preservation"],
+    "/solutions/cloud-data-management-for-sap": ["sap-archiving"],
+    "/solutions/oracle-ebusiness-suite": ["oracle-oebs-archiving"],
+    "/solutions/ibm-zseries-mainframe": ["mainframe-archiving"],
+    "/solutions/ai-governance-and-trust": ["ai-governance"],
+    "/solutions/agentic-operations": ["agentic"],
+    "/solutions/solix-eai-pharma": ["eai-pharma"],
+    "/solutions/intelligent-classification-and-discovery": ["enterprise-data-governance"],
+    "/solutions/customer-built-ai-applications": ["enterprise-ai"],
+    "/solutions/self-service-enterprise-analytics": ["data-ask"],
+    "/solutions/hybrid-query": ["common-data-platform"],
+}
+SOLIXCOM_INDUSTRIES = {
+    "/solutions/banking": "financial-services", "/solutions/finance": "financial-services",
+    "/solutions/government": "public-sector", "/solutions/healthcare": "healthcare", "/solutions/insurance": "insurance",
+    "/solutions/manufacturing": "manufacturing", "/solutions/retail": "retail", "/solutions/solix-eai-pharma": "pharma-biotech",
+}
+
+
+def _norm_path(path: str) -> str:
+    path = (path or "").split("?")[0].split("#")[0].rstrip("/")
+    return re.sub(r"^/Website", "", path)
+
+
 def topics_for_path(path: str) -> list[str]:
     """Server-side mapping of site paths to products (authoritative for page views)."""
-    path = (path or "").split("?")[0].rstrip("/")
-    path = re.sub(r"^/Website", "", path)
+    path = _norm_path(path)
+    if path in SOLIXCOM_PATHS:
+        return list(SOLIXCOM_PATHS[path])
     m = re.match(r"^/products/([a-z0-9-]+)$", path)
     if m and m.group(1) in PRODUCTS:
         return [m.group(1)]
@@ -120,7 +155,10 @@ def topics_for_path(path: str) -> list[str]:
 
 
 def industry_for_path(path: str) -> Optional[str]:
-    m = re.match(r"^/industries/([a-z0-9-]+)$", re.sub(r"^/Website", "", (path or "").split("?")[0].rstrip("/")))
+    path = _norm_path(path)
+    if path in SOLIXCOM_INDUSTRIES:
+        return SOLIXCOM_INDUSTRIES[path]
+    m = re.match(r"^/industries/([a-z0-9-]+)$", path)
     return m.group(1) if m and m.group(1) in INDUSTRIES else None
 
 
