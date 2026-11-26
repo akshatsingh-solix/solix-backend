@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import List, Optional, Literal
 
-from fastapi import FastAPI, APIRouter, BackgroundTasks, Depends, Query, Request
+from fastapi import FastAPI, APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -100,9 +100,17 @@ async def _score_submission(doc: dict, visitor_id: Optional[str], topics: Option
         logger.exception("lead scoring failed for submission %s", doc["id"])
 
 
+async def _inbox_reader(user: dict = Depends(get_current_admin)) -> dict:
+    # This route sits outside /api/admin, so the per-feature check there never sees it: apply the same "inbox" level.
+    import permissions
+    if not await permissions.can(user, "inbox", "view"):
+        raise HTTPException(status_code=403, detail="You don't have access to the form inbox")
+    return user
+
+
 # Staff only: these are people's names, emails and phone numbers. The admin uses
 # /api/admin/submissions; this older list stays for scripts that hold a token.
-@api_router.get("/submissions", response_model=List[Submission], dependencies=[Depends(get_current_admin)])
+@api_router.get("/submissions", response_model=List[Submission], dependencies=[Depends(_inbox_reader)])
 async def list_submissions(type: Optional[SubmissionType] = Query(default=None), limit: int = Query(default=100, le=500)):
     query = {"type": type} if type else {}
     docs = await db.submissions.find(query, {"_id": 0}).sort("created_at", -1).to_list(limit)

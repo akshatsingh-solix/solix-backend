@@ -18,6 +18,14 @@ services:
         sync: false
       - key: ADMIN_PASSWORD
         sync: false
+      # Recovery only: 1 makes ADMIN_PASSWORD overwrite the admin's password at startup. Remove after use.
+      - key: ADMIN_PASSWORD_RESET
+        sync: false
+      # Which address is the visitor's (see client_ip.py). Check GET /api/admin/ops/client-ip first.
+      - key: CLIENT_IP_HEADER
+        sync: false
+      - key: TRUSTED_PROXY_HOPS
+        sync: false
       - key: CORS_ORIGINS
         value: https://akshatsingh-solix.github.io
       # Sol, the AI concierge: set at least one key. Providers are tried in

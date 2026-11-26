@@ -661,8 +661,12 @@ async def tick() -> dict:
     settings = await compliance.outbound_settings()
     counts = {"sent": 0, "stopped": 0, "errors": 0, "resumed": 0, "held": 0}
     now = _now()
-    async for e in _db().enrollments.find({"status": "paused", "resume_at": {"$lte": now.isoformat()}}, {"_id": 0, "id": 1}):
-        await _set_status(e, "active", "system", "Resumed after pause", {"next_send_at": now.isoformat(), "resume_at": None})
+    async for e in _db().enrollments.find({"status": "paused", "resume_at": {"$lte": now.isoformat()}}, {"_id": 0, "id": 1, "paused_from": 1, "first_sent_at": 1}):
+        if e.get("paused_from") == "pending_approval":
+            await _set_status(e, "pending_approval", "system", "Pause ended: back in the approval queue", {"resume_at": None, "paused_from": None})
+        else:
+            await _set_status(e, "active" if e.get("first_sent_at") else "scheduled", "system", "Resumed after pause",
+                              {"next_send_at": now.isoformat(), "resume_at": None, "paused_from": None})
         counts["resumed"] += 1
     if now.weekday() == 0 and now.hour >= 6:
         state = await _db().settings.find_one({"key": "learning"}, {"_id": 0}) or {}
@@ -937,8 +941,10 @@ async def handle_reply(contact: dict, text: str, *, source: str, label: Optional
         await ops.notify("replies", f"{label.replace('_', ' ').title()} reply from {who}; suppressed.", event="reply_negative")
     elif label == "objection":
         resume = (_now() + timedelta(days=90)).isoformat()
-        async for e in _db().enrollments.find({"contact_id": contact["id"], "status": {"$in": ACTIVE}}, {"_id": 0, "id": 1}):
-            await _set_status(e, "paused", "echolocate", "Objection: re-engage in 90 days", {"resume_at": resume})
+        async for e in _db().enrollments.find({"contact_id": contact["id"], "status": {"$in": ACTIVE}}, {"_id": 0, "id": 1, "status": 1, "paused_from": 1}):
+            # Keep where it was paused from: an unapproved draft must come back to the approval queue, not send.
+            src = e.get("paused_from") if e["status"] == "paused" else e["status"]
+            await _set_status(e, "paused", "echolocate", "Objection: re-engage in 90 days", {"resume_at": resume, "paused_from": src})
         await ops.notify("replies", f"Objection from {who}; paused for 90 days.", event="reply_objection")
     elif label == "ooo":
         resume = cls.get("resume_on") or (_now() + timedelta(days=7)).date().isoformat()
@@ -1609,9 +1615,20 @@ async def patch_enrollment(enr_id: str, body: EnrollmentPatch, user: dict = Depe
     elif body.action == "reject":
         await _set_status(e, "stopped", user["email"], f"Rejected: {body.reason or 'no reason given'}")
     elif body.action == "pause":
-        await _set_status(e, "paused", user["email"], body.reason or "Paused by hand", {"resume_at": None})
+        if e["status"] not in ("pending_approval", "scheduled", "active"):
+            raise HTTPException(status_code=409, detail=f"A {e['status'].replace('_', ' ')} enrollment can't be paused")
+        # Remember a pause taken before approval, so resuming returns it to the approval queue instead of sending.
+        await _set_status(e, "paused", user["email"], body.reason or "Paused by hand", {"resume_at": None, "paused_from": e["status"]})
     elif body.action == "resume":
-        await _set_status(e, "active" if e.get("first_sent_at") else "scheduled", user["email"], "Resumed", {"next_send_at": now_iso(), "resume_at": None})
+        # Only a paused enrollment resumes, and never past approval: stopped, rejected or waiting drafts go through
+        # approve (which re-runs the compliance gate), not here.
+        if e["status"] != "paused":
+            raise HTTPException(status_code=409, detail="Only paused enrollments can be resumed")
+        if e.get("paused_from") == "pending_approval":
+            await _set_status(e, "pending_approval", user["email"], "Resumed: back in the approval queue", {"resume_at": None, "paused_from": None})
+        else:
+            await _set_status(e, "active" if e.get("first_sent_at") else "scheduled", user["email"], "Resumed",
+                              {"next_send_at": now_iso(), "resume_at": None, "paused_from": None})
     elif body.action == "stop":
         await _set_status(e, "stopped", user["email"], body.reason or "Stopped by hand")
     return await _db().enrollments.find_one({"id": enr_id}, {"_id": 0})

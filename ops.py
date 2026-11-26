@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 import database
@@ -482,6 +482,14 @@ def start_background() -> None:
 
 
 # --- API --------------------------------------------------------------------------
+
+@router.get("/client-ip", dependencies=[admin_only])
+async def client_ip_check(request: Request):
+    """The address headers this request arrived with and what each client_ip.py setting would pick. Open it from a
+    browser on a known network to choose TRUSTED_PROXY_HOPS or CLIENT_IP_HEADER (see client_ip.py)."""
+    import client_ip
+    return client_ip.describe(request)
+
 
 @router.get("/health")
 async def health():
